@@ -3,7 +3,7 @@ name: Auto Release
 on:
   pull_request:
     types: [closed]
-    branches: [main]
+    branches: [release]
 
 jobs:
   release:

@@ -2,16 +2,16 @@ name: Branch Guard
 
 on:
   pull_request:
-    branches: [main]
+    branches: [release]
 
 jobs:
   check-source-branch:
     runs-on: ubuntu-latest
     steps:
-      - name: Require PRs into main to come from a release branch
+      - name: Require PRs into release to come from development
         run: |
           head_ref="${{ github.head_ref }}"
-          if [[ "$head_ref" != "release" && "$head_ref" != release/* ]]; then
-            echo "PRs into main must come from the 'release' branch or a 'release/*' branch (got '$head_ref')."
+          if [[ "$head_ref" != "development" ]]; then
+            echo "PRs into release must come from the 'development' branch (got '$head_ref')."
             exit 1
           fi

@@ -3,7 +3,7 @@ name: Require Bump Label
 on:
   pull_request:
     types: [opened, labeled, unlabeled, synchronize, reopened]
-    branches: [main]
+    branches: [release]
 
 jobs:
   check-bump-label:
@@ -19,6 +19,6 @@ jobs:
             fi
           done
           if [ "$COUNT" -ne 1 ]; then
-            echo "PRs into main must have exactly one of: bump:major, bump:minor, bump:patch (found $COUNT)." >&2
+            echo "PRs into release must have exactly one of: bump:major, bump:minor, bump:patch (found $COUNT)." >&2
             exit 1
           fi
