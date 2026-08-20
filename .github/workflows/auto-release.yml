@@ -16,6 +16,7 @@ jobs:
         with:
           ref: release
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Determine bump type from PR labels
         id: bump
