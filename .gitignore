@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyd
+.pytest_cache/
+src/inreach.egg-info
+
+# Environment variables
+.env
+
+# Local development
+requirements.txt
+scripts/
+
+# Local/ephemeral Claude Code state
+.claude/scheduled_tasks.lock
+CLAUDE.local.md
+CLAUDE.md
+.claude*
+agent/
+agent-old/
+MEMORY.md
+PROMPT.md
+
+# Vscode
+.vscode/
