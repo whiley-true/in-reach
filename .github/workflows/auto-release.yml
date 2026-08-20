@@ -1,0 +1,71 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine bump type from PR labels
+        id: bump
+        run: |
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          TYPE=""
+          for l in major minor patch; do
+            if echo "$LABELS" | grep -q "\"bump:$l\""; then
+              if [ -n "$TYPE" ]; then
+                echo "Multiple bump:* labels found; expected exactly one." >&2
+                exit 1
+              fi
+              TYPE="$l"
+            fi
+          done
+          if [ -z "$TYPE" ]; then
+            echo "No bump:major|minor|patch label found on the PR." >&2
+            exit 1
+          fi
+          echo "type=$TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: version
+        run: |
+          BASE_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$BASE_TAG" ]; then
+            BASE=$(grep -m1 '^version' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          else
+            BASE="${BASE_TAG#v}"
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+          case "${{ steps.bump.outputs.type }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEXT="$MAJOR.$MINOR.$PATCH"
+          echo "Base: $BASE -> Next: $NEXT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes

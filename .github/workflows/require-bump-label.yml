@@ -1,0 +1,24 @@
+name: Require Bump Label
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  check-bump-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exactly one bump:major|minor|patch label
+        run: |
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          COUNT=0
+          for l in major minor patch; do
+            if echo "$LABELS" | grep -q "\"bump:$l\""; then
+              COUNT=$((COUNT+1))
+            fi
+          done
+          if [ "$COUNT" -ne 1 ]; then
+            echo "PRs into main must have exactly one of: bump:major, bump:minor, bump:patch (found $COUNT)." >&2
+            exit 1
+          fi
