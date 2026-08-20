@@ -14,7 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: release
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Determine bump type from PR labels
         id: bump
@@ -62,6 +64,44 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "v$VERSION"
           git push origin "v$VERSION"
+
+      - name: Commit version bump to release
+        id: bump_commit
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          python -m pip install --upgrade tomlkit
+          python - "$VERSION" <<'PYEOF'
+          import pathlib
+          import re
+          import sys
+
+          import tomlkit
+
+          version = sys.argv[1]
+
+          pyproject_path = pathlib.Path("pyproject.toml")
+          doc = tomlkit.parse(pyproject_path.read_text(encoding="utf-8"))
+          doc["project"]["version"] = version
+          pyproject_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+          init_path = pathlib.Path("src/inreach/__init__.py")
+          text = init_path.read_text(encoding="utf-8")
+          text, count = re.subn(r'__version__ = ".*"', f'__version__ = "{version}"', text)
+          if count == 0:
+              raise ValueError(f"__version__ assignment not found in {init_path}")
+          init_path.write_text(text, encoding="utf-8")
+          PYEOF
+          git add pyproject.toml src/inreach/__init__.py
+          git commit -m "chore: bump version to $VERSION"
+          git push origin HEAD:release
+          echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Sync version bump to development
+        run: |
+          git fetch origin development
+          git checkout -B development origin/development
+          git cherry-pick "${{ steps.bump_commit.outputs.bump_sha }}"
+          git push origin HEAD:development
 
       - name: Create GitHub release
         env:
