@@ -31,6 +31,7 @@ def setup_project(project_dir: pathlib.Path) -> None:
     personal_variants.resolve_personal_variants(env_path)
     screens.save_screen_config(project_dir)
 
+    ui.clear_screen()
     logger.info("Project setup complete")
     ui.success("Project setup complete.")
 

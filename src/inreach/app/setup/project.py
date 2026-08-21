@@ -3,9 +3,15 @@ import pathlib
 import shutil
 import sys
 
+import click
+
+from inreach import logging_config
 from inreach.app import ui
+from inreach.app.setup import env_file
 
 logger = logging.getLogger(__name__)
+
+ROOT_DIR_KEY = "ROOT_DIR"
 
 PROJECT_DIR_NAME = ".inreach"
 TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / PROJECT_DIR_NAME
@@ -33,6 +39,11 @@ def create_project(base_dir: pathlib.Path | None = None) -> pathlib.Path | None:
     project_dir.mkdir(parents=True)
     shutil.copyfile(TEMPLATE_DIR / "example.env", project_dir / ".env")
     shutil.copyfile(TEMPLATE_DIR / ".gitignore", project_dir / ".gitignore")
+    env_file.update_env_value(project_dir / ".env", ROOT_DIR_KEY, str(base_dir))
+    logging_config.fill_resolved_env_defaults(project_dir / ".env")
+
+    ui.clear_screen()
+    click.echo()
 
     logger.info("Created project at %s", project_dir)
     ui.success(f"Created project at {project_dir}")

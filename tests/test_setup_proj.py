@@ -25,6 +25,7 @@ def test_setup_project_runs_all_steps(tmp_path, monkeypatch):
         lambda env_path: calls.append(("personal_variants", env_path)),
     )
     monkeypatch.setattr(screens, "save_screen_config", lambda project_dir: calls.append(("screens", project_dir)))
+    monkeypatch.setattr(setup_proj.ui, "clear_screen", lambda: calls.append(("clear_screen",)))
 
     setup_proj.setup_project(tmp_path)
 
@@ -34,6 +35,7 @@ def test_setup_project_runs_all_steps(tmp_path, monkeypatch):
         ("locations", env_path),
         ("personal_variants", env_path),
         ("screens", tmp_path),
+        ("clear_screen",),
     ]
 
 

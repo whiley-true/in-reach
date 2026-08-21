@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -26,7 +27,67 @@ _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "").strip().upper() or "INFO"
 LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 
 # Logs only go to file unless the project's .env sets OUTPUT_TO_STREAM=true.
-OUTPUT_TO_STREAM = os.environ.get("OUTPUT_TO_STREAM", "").strip().lower() in ("1", "true", "yes", "on")
+_output_to_stream_raw = os.environ.get("OUTPUT_TO_STREAM", "").strip().lower()
+OUTPUT_TO_STREAM = _output_to_stream_raw in ("1", "true", "yes", "on")
+
+RESOLVED_ENV_DEFAULTS = {
+    "LOG_DIR": str(LOG_DIR),
+    "LOG_FILE": str(LOG_FILE),
+    "LOG_LEVEL": _LOG_LEVEL_NAME,
+    "OUTPUT_TO_STREAM": "true" if OUTPUT_TO_STREAM else "false",
+}
+
+
+def _current_env_values(lines: list) -> dict:
+    values = {}
+    for line in lines:
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, _, raw_value = line.partition("=")
+            values[key.strip()] = raw_value.strip().strip("'\"")
+    return values
+
+
+def _set_env_line(lines: list, key: str, value: str) -> list:
+    quoted = f"'{value}'" if value else ""
+    new_line = f"{key}={quoted}"
+    pattern = re.compile(rf"^{re.escape(key)}=")
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            lines[i] = new_line
+            return lines
+    lines.append(new_line)
+    return lines
+
+
+def fill_resolved_env_defaults(path: pathlib.Path, resolved: dict = RESOLVED_ENV_DEFAULTS) -> None:
+    """Write the effective logging config into an env file when blank/missing.
+
+    Mirrors how ROOT_DIR/USER_WIN_NAME get filled with the real value in use,
+    rather than staying blank placeholders. Any key that already has a
+    non-empty value is left untouched. No-ops if ``path`` doesn't exist yet
+    (e.g. called before the project has been created).
+    """
+    if not path.exists():
+        return
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    current = _current_env_values(lines)
+
+    changed = False
+    for key, value in resolved.items():
+        if not current.get(key):
+            lines = _set_env_line(lines, key, value)
+            changed = True
+
+    if changed:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# Fills an existing project's .env on every run (e.g. an older project
+# missing OUTPUT_TO_STREAM). A no-op on a fresh `inreach init`, since the
+# project's .env doesn't exist yet at import time — project.create_project()
+# calls fill_resolved_env_defaults() again right after creating it.
+fill_resolved_env_defaults(_ENV_PATH)
 
 
 def setup_logging() -> None:
