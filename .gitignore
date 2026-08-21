@@ -13,6 +13,7 @@ src/inreach.egg-info
 requirements.txt
 scripts/
 refactor/
+/.inreach/
 
 # Local/ephemeral Claude Code state
 .claude/scheduled_tasks.lock

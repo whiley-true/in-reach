@@ -1,20 +1,33 @@
-import argparse
+import click
 
-from inreach.core import hello
+from inreach.app import verify
+from inreach.app.setup import create_project, run_init_menu
+from inreach.logging_config import setup_logging
 
 
-def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(prog="inreach")
-    subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("hello", help="Print a hello message")
+@click.group()
+def cli() -> None:
+    """inreach command-line tool."""
+    setup_logging()
 
-    args = parser.parse_args(argv)
 
-    if args.command == "hello":
-        print(hello())
-    else:
-        parser.print_help()
+@cli.command(name="verify")
+def verify_command() -> None:
+    """Run verification."""
+    verify.verify_installs()
+
+
+@cli.command(name="init")
+def init_command() -> None:
+    """Initialize the application."""
+    project_dir = create_project()
+    if project_dir is not None:
+        run_init_menu(project_dir)
+
+
+def main(argv=None) -> int:
+    return cli.main(args=argv, prog_name="inreach", standalone_mode=False)
 
 
 if __name__ == "__main__":
-    main()
+    cli()
