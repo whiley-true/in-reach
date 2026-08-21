@@ -12,4 +12,8 @@ def test_save_screen_config_writes_json(tmp_path):
     config_path = screens.save_screen_config(tmp_path, screens=fake_screens)
 
     assert config_path == tmp_path / "config" / "screens.json"
-    assert json.loads(config_path.read_text(encoding="utf-8")) == fake_screens
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved[0]["priority"] == 1
+    assert saved[1]["priority"] == 2
+    for original, written in zip(fake_screens, saved):
+        assert written.items() >= original.items()

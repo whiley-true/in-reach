@@ -39,6 +39,10 @@ def confirm(prompt: str, default: bool = True) -> bool:
     return click.confirm(prompt, default=default)
 
 
+def info(message: str) -> None:
+    click.echo(message)
+
+
 def success(message: str) -> None:
     click.secho(message, fg="green")
 

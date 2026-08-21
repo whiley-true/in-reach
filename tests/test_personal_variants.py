@@ -1,3 +1,5 @@
+import pytest
+
 from inreach.app.setup import env_file, personal_variants
 
 
@@ -19,15 +21,25 @@ def test_skips_when_loc_1_missing(tmp_path):
     assert values["USER_REACH_STRING"] == ""
 
 
-def test_skips_when_no_subfolders(tmp_path):
+def test_no_subfolders_and_user_declines_exits(tmp_path):
     loc_1 = tmp_path / "personal"
     loc_1.mkdir()
     env_path = _write_base_env(tmp_path, loc_1)
 
-    personal_variants.resolve_personal_variants(env_path)
+    with pytest.raises(SystemExit):
+        personal_variants.resolve_personal_variants(env_path, confirm=lambda prompt: False)
+
+
+def test_no_subfolders_and_user_confirms_creates_stub_only(tmp_path):
+    loc_1 = tmp_path / "personal"
+    loc_1.mkdir()
+    env_path = _write_base_env(tmp_path, loc_1)
+
+    personal_variants.resolve_personal_variants(env_path, confirm=lambda prompt: True)
 
     values = env_file.get_env_values(env_path)
     assert values["USER_REACH_STRING"] == ""
+    assert list(loc_1.iterdir()) == []
 
 
 def test_auto_selects_single_subfolder(tmp_path):
@@ -43,13 +55,17 @@ def test_auto_selects_single_subfolder(tmp_path):
     assert values["PERSONAL_VARIANTS_LOC"] == str(loc_1 / "only_variant\\HaloReach\\GameType")
 
 
-def test_prompts_when_multiple_subfolders(tmp_path):
+def test_prompts_when_multiple_subfolders_and_opens_explorer(tmp_path):
     loc_1 = tmp_path / "personal"
     (loc_1 / "variant_a").mkdir(parents=True)
     (loc_1 / "variant_b").mkdir(parents=True)
     env_path = _write_base_env(tmp_path, loc_1)
 
-    personal_variants.resolve_personal_variants(env_path, select_variant=lambda title, options: 1)
+    opened = []
+    personal_variants.resolve_personal_variants(
+        env_path, select_variant=lambda title, options: 1, open_folder=opened.append
+    )
 
     values = env_file.get_env_values(env_path)
     assert values["USER_REACH_STRING"] == "variant_b"
+    assert opened == [str(loc_1 / "variant_b")]

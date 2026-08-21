@@ -57,8 +57,40 @@ def get_screen_info() -> list[dict]:
     return screens
 
 
+def assign_priorities(screens: list[dict]) -> list[dict]:
+    """Annotate each screen with a ``priority``: primary is 1, rest 2, 3, ...
+
+    Array order is left untouched (it's raw OS enumeration order); only
+    the ``priority`` field is added/overwritten.
+    """
+    result = []
+    next_priority = 2
+    for screen in screens:
+        annotated = dict(screen)
+        if annotated.get("primary"):
+            annotated["priority"] = 1
+        else:
+            annotated["priority"] = next_priority
+            next_priority += 1
+        result.append(annotated)
+    return result
+
+
+def guess_target_screen(screens: list[dict]) -> dict | None:
+    """Guess which screen a newly launched window will appear on.
+
+    Absent any other signal, that's the primary screen (priority 1) -
+    Windows' default placement for a new top-level window.
+    """
+    for screen in screens:
+        if screen.get("priority") == 1 or screen.get("primary"):
+            return screen
+    return screens[0] if screens else None
+
+
 def save_screen_config(project_dir: pathlib.Path, screens: list[dict] | None = None) -> pathlib.Path:
     screens = get_screen_info() if screens is None else screens
+    screens = assign_priorities(screens)
 
     config_dir = project_dir / CONFIG_DIR_NAME
     config_dir.mkdir(parents=True, exist_ok=True)

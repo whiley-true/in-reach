@@ -1,4 +1,12 @@
-# inreach
+# inreach v0.1.4
+
+A set of python tools designed to speed up scripting in Halo Reach.
+
+System Requirements:
+- Windows
+- Steam version of Halo Master Chief Collection Installed
+- Halo Reach Multiplayer Installed
+
 
 ## Install
 
@@ -9,12 +17,14 @@ pip install inreach
 ## Usage
 
 ```
-inreach hello
+inreach init
 ```
 
-prints:
+Follow the on-screen instructions to setup a new project, or run as a command line argument:
 
 ```
-hello
+inreach init --arg1 "val" --arg2 "val"
 ```
-some text
+-- fill with args 
+
+Or load a "project.rch.json" directly:

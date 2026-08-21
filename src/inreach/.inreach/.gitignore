@@ -1,2 +1,3 @@
 .env
 config/screens.json
+config/window.history
