@@ -11,6 +11,7 @@ def test_verify_locations_skips_existing_paths(tmp_path):
     locations.verify_locations(
         env_path,
         prompt_for_missing=lambda key, current: calls.append(key),
+        delay=0,
     )
 
     assert calls == [key for key in locations.LOCATION_KEYS if key != "STEAM_INSTALL_LOC"]
@@ -25,7 +26,7 @@ def test_verify_locations_updates_env_when_user_provides_path(tmp_path):
     def fake_prompt(key, current):
         return str(found) if key == "STEAM_INSTALL_LOC" else None
 
-    locations.verify_locations(env_path, prompt_for_missing=fake_prompt)
+    locations.verify_locations(env_path, prompt_for_missing=fake_prompt, delay=0)
 
     assert env_file.get_env_values(env_path)["STEAM_INSTALL_LOC"] == str(found)
 
@@ -35,6 +36,6 @@ def test_verify_locations_leaves_env_unchanged_when_declined(tmp_path):
     missing = str(tmp_path / "missing")
     env_file.update_env_value(env_path, "STEAM_INSTALL_LOC", missing)
 
-    locations.verify_locations(env_path, prompt_for_missing=lambda key, current: None)
+    locations.verify_locations(env_path, prompt_for_missing=lambda key, current: None, delay=0)
 
     assert env_file.get_env_values(env_path)["STEAM_INSTALL_LOC"] == missing

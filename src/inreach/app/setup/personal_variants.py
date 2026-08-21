@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 LOC_1_KEY = "PERSONAL_VARIANTS_LOC_1"
 LOC_2_KEY = "PERSONAL_VARIANTS_LOC_2"
-COMB_KEY = "PERSONAL_VARIANTS_COMB"
+LOC_KEY = "PERSONAL_VARIANTS_LOC"
 USER_REACH_STRING_KEY = "USER_REACH_STRING"
 
 
@@ -42,5 +42,5 @@ def resolve_personal_variants(env_path: pathlib.Path, select_variant=ui.select_o
     env_file.update_env_value(env_path, LOC_2_KEY, loc_2)
 
     comb = str(pathlib.Path(loc_1) / loc_2) if loc_2 else loc_1
-    env_file.update_env_value(env_path, COMB_KEY, comb)
-    logger.info("%s set to %s", COMB_KEY, comb)
+    env_file.update_env_value(env_path, LOC_KEY, comb)
+    logger.info("%s set to %s", LOC_KEY, comb)

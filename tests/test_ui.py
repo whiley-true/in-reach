@@ -35,3 +35,42 @@ def test_confirm_parses_yes_and_no(monkeypatch):
 
     assert ui.confirm("Continue?") is True
     assert ui.confirm("Continue?") is False
+
+
+def test_checklist_ticks_off_found_items_and_returns_missing(capsys):
+    found = {"a": "somewhere", "c": "elsewhere"}
+    items = [("a", "Item A"), ("b", "Item B"), ("c", "Item C")]
+
+    missing = ui.checklist("Checking things", items, lambda key: found.get(key), delay=0)
+
+    assert missing == ["b"]
+    out = capsys.readouterr().out
+    assert "[x] Item A - found at somewhere" in out
+    assert "[ ] Item B - not found" in out
+    assert "[x] Item C - found at elsewhere" in out
+
+
+def test_checklist_waits_delay_seconds_between_items(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ui.time, "sleep", sleeps.append)
+    items = [("a", "Item A"), ("b", "Item B")]
+
+    ui.checklist("Checking things", items, lambda key: "found", delay=0.5)
+
+    assert sleeps == [0.5, 0.5]
+
+
+def test_clear_screen_noop_when_not_a_tty(monkeypatch, capsys):
+    monkeypatch.setattr(ui.sys.stdout, "isatty", lambda: False)
+
+    ui.clear_screen()
+
+    assert capsys.readouterr().out == ""
+
+
+def test_clear_screen_writes_ansi_sequence_when_tty(monkeypatch, capsys):
+    monkeypatch.setattr(ui.sys.stdout, "isatty", lambda: True)
+
+    ui.clear_screen()
+
+    assert capsys.readouterr().out == "\x1b[3J\x1b[2J\x1b[H"

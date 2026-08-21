@@ -5,7 +5,7 @@ import sys
 
 from dotenv import load_dotenv
 
-_ENV_PATH = pathlib.Path(__file__).parent / ".env"
+_ENV_PATH = pathlib.Path.cwd() / ".inreach" / ".env"
 load_dotenv(_ENV_PATH)
 
 _DEFAULT_LOG_DIR = pathlib.Path.home() / ".inreach" / "logs"
@@ -25,6 +25,9 @@ LOG_DIR = LOG_FILE.parent
 _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "").strip().upper() or "INFO"
 LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 
+# Logs only go to file unless the project's .env sets OUTPUT_TO_STREAM=true.
+OUTPUT_TO_STREAM = os.environ.get("OUTPUT_TO_STREAM", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def setup_logging() -> None:
     logger = logging.getLogger("inreach")
@@ -32,9 +35,10 @@ def setup_logging() -> None:
         return
     logger.setLevel(LOG_LEVEL)
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(console_handler)
+    if OUTPUT_TO_STREAM:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(console_handler)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")

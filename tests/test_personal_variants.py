@@ -6,7 +6,7 @@ def _write_base_env(tmp_path, loc_1):
     env_file.update_env_value(env_path, "USER_REACH_STRING", "")
     env_file.update_env_value(env_path, "PERSONAL_VARIANTS_LOC_1", str(loc_1))
     env_file.update_env_value(env_path, "PERSONAL_VARIANTS_LOC_2", "${USER_REACH_STRING}\\HaloReach\\GameType")
-    env_file.update_env_value(env_path, "PERSONAL_VARIANTS_COMB", "")
+    env_file.update_env_value(env_path, "PERSONAL_VARIANTS_LOC", "")
     return env_path
 
 
@@ -40,7 +40,7 @@ def test_auto_selects_single_subfolder(tmp_path):
     values = env_file.get_env_values(env_path)
     assert values["USER_REACH_STRING"] == "only_variant"
     assert values["PERSONAL_VARIANTS_LOC_2"] == "only_variant\\HaloReach\\GameType"
-    assert values["PERSONAL_VARIANTS_COMB"] == str(loc_1 / "only_variant\\HaloReach\\GameType")
+    assert values["PERSONAL_VARIANTS_LOC"] == str(loc_1 / "only_variant\\HaloReach\\GameType")
 
 
 def test_prompts_when_multiple_subfolders(tmp_path):

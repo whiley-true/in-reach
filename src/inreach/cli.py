@@ -1,7 +1,7 @@
 import click
 
 from inreach.app import verify
-from inreach.app.setup import create_project, run_init_menu
+from inreach.app.setup import run_init_menu
 from inreach.logging_config import setup_logging
 
 
@@ -20,9 +20,7 @@ def verify_command() -> None:
 @cli.command(name="init")
 def init_command() -> None:
     """Initialize the application."""
-    project_dir = create_project()
-    if project_dir is not None:
-        run_init_menu(project_dir)
+    run_init_menu()
 
 
 def main(argv=None) -> int:
