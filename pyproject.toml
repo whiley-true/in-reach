@@ -24,6 +24,7 @@ dependencies = [
     "PyAutoGUI==0.9.54",
     "pydantic==2.13.4",
     "pydantic_core==2.46.4",
+    "pydirectinput==1.0.4; sys_platform == 'win32'",
     "PyGetWindow==0.0.9",
     "Pygments==2.21.0",
     "PyMsgBox==2.0.1",
@@ -47,7 +48,7 @@ inreach = "inreach.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-inreach = ["scripts/*.bat"]
+inreach = ["scripts/*.bat", "app/anchors/save-game-type/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

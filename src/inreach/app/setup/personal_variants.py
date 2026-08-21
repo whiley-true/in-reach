@@ -3,7 +3,7 @@ import pathlib
 import sys
 
 from inreach.app import ui
-from inreach.app.setup import env_file
+from inreach.app.setup import env_file, gametype_bootstrap
 
 logger = logging.getLogger(__name__)
 
@@ -12,9 +12,25 @@ LOC_2_KEY = "PERSONAL_VARIANTS_LOC_2"
 LOC_KEY = "PERSONAL_VARIANTS_LOC"
 USER_REACH_STRING_KEY = "USER_REACH_STRING"
 
+# A folder directly under PERSONAL_VARIANTS_LOC_1 is only a real personal-
+# variants folder (as opposed to some other, unrelated folder MCC/Windows
+# happens to have left under LocalFiles) if it actually has this
+# structure inside it - e.g.
+# ...\LocalFiles\000901f158282684\HaloReach\GameType. Matches
+# PERSONAL_VARIANTS_LOC_2's fixed "${USER_REACH_STRING}\HaloReach\
+# GameType" template.
+GAMETYPE_SUBPATH = gametype_bootstrap.GAMETYPE_SUBPATH
+
+
+def _is_personal_variants_folder(candidate: pathlib.Path) -> bool:
+    return candidate.is_dir() and (candidate / GAMETYPE_SUBPATH).is_dir()
+
 
 def resolve_personal_variants(
-    env_path: pathlib.Path, select_variant=ui.select_option, open_folder=None, confirm=ui.confirm
+    env_path: pathlib.Path,
+    select_variant=ui.select_option,
+    open_folder=None,
+    create_gametype=gametype_bootstrap.create_temporary_gametype,
 ) -> None:
     if open_folder is None:
         import os
@@ -30,17 +46,33 @@ def resolve_personal_variants(
         # TODO: handle a missing/unset PERSONAL_VARIANTS_LOC_1 folder
         return
 
-    subfolders = sorted(p.name for p in loc_1_path.iterdir() if p.is_dir())
+    subfolders = sorted(p.name for p in loc_1_path.iterdir() if _is_personal_variants_folder(p))
 
+    just_created = False
     if not subfolders:
-        if confirm("No personal variants folder found. Create one now?"):
-            logger.info("User opted to create a personal variants folder in %s.", loc_1_path)
-            # TODO: create the personal variants folder - no folder-creation
-            # logic yet, revisit once there is test data for the expected
-            # folder/file layout.
-            return
-        ui.warning("Exiting - no personal variants folder to use.")
-        sys.exit(0)
+        logger.info("No personal variants folder found; creating one in %s.", loc_1_path)
+        ui.info(
+            "Setting up your personal gametype folder - this drives Halo: MCC's own UI "
+            "briefly, so expect your mouse/keyboard to be taken over for a moment."
+        )
+        if not create_gametype(loc_1_path):
+            # Without a personal-variants folder the rest of this tool
+            # can't do its job, so this is fatal, not skippable - same
+            # ui.error + sys.exit(1) pattern as verify.py's other fatal
+            # setup failures, which menu.run_init_menu's cleanup (catches
+            # BaseException, so this includes SystemExit) relies on to
+            # remove the half-configured .inreach project folder rather
+            # than leaving it behind.
+            ui.error("Could not create a personal variants folder automatically.")
+            sys.exit(1)
+
+        after = sorted(p.name for p in loc_1_path.iterdir() if _is_personal_variants_folder(p))
+        new_folders = sorted(set(after) - set(subfolders))
+        if not new_folders:
+            ui.error("No new personal variants folder appeared after saving the gametype.")
+            sys.exit(1)
+        user_reach_string = new_folders[0]
+        just_created = True
     elif len(subfolders) == 1:
         user_reach_string = subfolders[0]
     else:
@@ -58,3 +90,14 @@ def resolve_personal_variants(
     comb = str(pathlib.Path(loc_1) / loc_2) if loc_2 else loc_1
     env_file.update_env_value(env_path, LOC_KEY, comb)
     logger.info("%s set to %s", LOC_KEY, comb)
+
+    if just_created:
+        # This folder was just created fresh by ``create_gametype`` above,
+        # so the only thing in it is the throwaway gametype it saved -
+        # clean that up now that its job (making Reach create the folder)
+        # is done.
+        gametype_dir = pathlib.Path(comb)
+        for entry in gametype_dir.iterdir():
+            if entry.is_file():
+                entry.unlink()
+        logger.info("Deleted temporary gametype file(s) in %s", gametype_dir)

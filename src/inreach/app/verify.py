@@ -1,6 +1,7 @@
 import logging
 import pathlib
 import sys
+from typing import Callable
 
 import click
 
@@ -10,7 +11,7 @@ from inreach.logging_config import LOG_FILE
 
 logger = logging.getLogger(__name__)
 
-_CHECKLIST_TITLE = "Checking install setup"
+CHECKLIST_TITLE = "Checking install setup"
 
 
 def find_project_dir(base_dir: pathlib.Path | None = None) -> pathlib.Path | None:
@@ -20,6 +21,33 @@ def find_project_dir(base_dir: pathlib.Path | None = None) -> pathlib.Path | Non
     base_dir = base_dir or pathlib.Path.cwd()
     project_dir = base_dir / project.PROJECT_DIR_NAME
     return project_dir if project_dir.exists() else None
+
+
+def checklist_items_and_check(
+    project_dir: pathlib.Path,
+    check_tesseract=tesseract.check_tesseract_on_path,
+) -> tuple[list[tuple[str, str]], Callable[[str], str | None]]:
+    """The install-locations/Steam/Tesseract checklist's (items, check)
+    pair, factored out of ``verify_installs`` so other steps that want to
+    extend the same on-screen checklist (rather than opening a second,
+    differently-titled one) - see ``mcc_launch.run_eac_launch_step`` - can
+    append their own items/check logic onto the exact same list instead of
+    duplicating this one.
+    """
+    env_path = project_dir / ".env"
+    items = [(key, locations.LOCATION_LABELS[key]) for key in locations.LOCATION_KEYS]
+    items.append((steam.USER_STEAM_LOC_INT_KEY, steam.CHECKLIST_LABEL))
+    items.append((tesseract.CHECKLIST_KEY, tesseract.CHECKLIST_LABEL))
+
+    def check(key: str) -> str | None:
+        if key == steam.USER_STEAM_LOC_INT_KEY:
+            steam_loc = env_file.get_env_values(env_path).get(locations.STEAM_KEY) or ""
+            return steam.check_steam_account(env_path, steam_loc)
+        if key == tesseract.CHECKLIST_KEY:
+            return check_tesseract()
+        return locations.check_location(env_path, key)
+
+    return items, check
 
 
 def verify_installs(
@@ -46,19 +74,9 @@ def verify_installs(
     project), so improvements to this checklist benefit both.
     """
     env_path = project_dir / ".env"
-    items = [(key, locations.LOCATION_LABELS[key]) for key in locations.LOCATION_KEYS]
-    items.append((steam.USER_STEAM_LOC_INT_KEY, steam.CHECKLIST_LABEL))
-    items.append((tesseract.CHECKLIST_KEY, tesseract.CHECKLIST_LABEL))
+    items, check = checklist_items_and_check(project_dir, check_tesseract=check_tesseract)
 
-    def check(key: str) -> str | None:
-        if key == steam.USER_STEAM_LOC_INT_KEY:
-            steam_loc = env_file.get_env_values(env_path).get(locations.STEAM_KEY) or ""
-            return steam.check_steam_account(env_path, steam_loc)
-        if key == tesseract.CHECKLIST_KEY:
-            return check_tesseract()
-        return locations.check_location(env_path, key)
-
-    missing = ui.checklist(_CHECKLIST_TITLE, items, check, delay=delay)
+    missing = ui.checklist(CHECKLIST_TITLE, items, check, delay=delay)
 
     changed = False
     if missing:
@@ -82,7 +100,7 @@ def verify_installs(
         # state rather than being left on the picker/menu screen. No delay
         # here - this is a redraw of already-known state, not a fresh
         # check, so it should populate prefilled rather than re-animating.
-        missing = ui.checklist(_CHECKLIST_TITLE, items, check, delay=0)
+        missing = ui.checklist(CHECKLIST_TITLE, items, check, delay=0)
 
     # `check()` only reads the Steam account for display - persist an
     # auto-detected (not menu-chosen) one, and its profile name, now that

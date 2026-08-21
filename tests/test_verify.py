@@ -65,7 +65,7 @@ def test_verify_installs_shows_one_combined_screen_and_records_persona(tmp_path,
     verify.verify_installs(tmp_path, check_tesseract=_found_tesseract, delay=0)
 
     expected_keys = locations.LOCATION_KEYS + [steam.USER_STEAM_LOC_INT_KEY, tesseract.CHECKLIST_KEY]
-    assert checklist_calls == [(verify._CHECKLIST_TITLE, expected_keys)]
+    assert checklist_calls == [(verify.CHECKLIST_TITLE, expected_keys)]
     values = env_file.get_env_values(env_path)
     assert values[steam.USER_STEAM_LOC_INT_KEY] == "111"
     assert values[steam.USER_STEAM_PROFILE_NAME_KEY] == "Alice"
@@ -101,8 +101,8 @@ def test_verify_installs_redraws_once_prefilled_after_resolving_location_and_acc
     # Shown once with the caller's real delay, then redrawn once prefilled
     # (delay=0) after resolving - never left sitting on the picker/menu.
     assert checklist_calls == [
-        (verify._CHECKLIST_TITLE, 0.5),
-        (verify._CHECKLIST_TITLE, 0),
+        (verify.CHECKLIST_TITLE, 0.5),
+        (verify.CHECKLIST_TITLE, 0),
     ]
     values = env_file.get_env_values(env_path)
     assert values[locations.STEAM_KEY] == str(steam_loc)
@@ -154,7 +154,7 @@ def test_verify_installs_exits_on_fatal_missing_without_extra_redraw(tmp_path, m
     with pytest.raises(SystemExit):
         verify.verify_installs(tmp_path, check_tesseract=_found_tesseract, delay=0)
 
-    assert checklist_calls == [verify._CHECKLIST_TITLE]
+    assert checklist_calls == [verify.CHECKLIST_TITLE]
 
 
 def test_verify_installs_rechecks_reach_against_updated_halo_mcc_location(tmp_path):
