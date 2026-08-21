@@ -19,7 +19,8 @@ import datetime
 import json
 import logging
 import pathlib
-from typing import Callable
+import time
+from typing import Callable, Iterable
 
 import pywintypes
 import win32api
@@ -81,7 +82,7 @@ def get_foreground_window() -> int:
     return win32gui.GetForegroundWindow()
 
 
-def bring_to_foreground(hwnd: int) -> None:
+def bring_to_foreground(hwnd: int, cycle_minimize: bool = False) -> None:
     """Restore (if minimized) and reliably focus ``hwnd``.
 
     A plain ``SetForegroundWindow`` call is often silently refused by
@@ -94,8 +95,18 @@ def bring_to_foreground(hwnd: int) -> None:
     ends up above every other window immediately - not pinned there
     forever, just raised once - rather than relying on focus alone, which
     doesn't guarantee visibility if something else is still drawn on top.
+
+    ``cycle_minimize=True`` forces a minimize-then-restore even when
+    ``hwnd`` isn't currently minimized - restoring the window a minimize/
+    restore cycle just acted on is treated specially by Windows and can
+    grab the foreground even in cases where the Alt-keypress trick alone
+    doesn't. Off by default since it's a visible, momentary state change;
+    opt in for a window that's proving stubborn about taking focus.
     """
-    if win32gui.IsIconic(hwnd):
+    already_iconic = win32gui.IsIconic(hwnd)
+    if cycle_minimize and not already_iconic:
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+    if cycle_minimize or already_iconic:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
 
     win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
@@ -113,17 +124,79 @@ def bring_to_foreground(hwnd: int) -> None:
         logger.warning("SetWindowPos failed for hwnd=%s", hwnd)
 
 
-def minimize_other_windows(keep_hwnd: int) -> None:
+def get_monitor_size(hwnd: int) -> tuple[int, int]:
+    """Return ``(width, height)`` of the monitor ``hwnd`` currently sits on."""
+    hmonitor = win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+    left, top, right, bottom = win32api.GetMonitorInfo(hmonitor)["Monitor"]
+    return right - left, bottom - top
+
+
+def wait_for_stable_size(
+    hwnd: int,
+    timeout: float,
+    poll_interval: float = 0.5,
+    min_confirmations: int = 2,
+    min_fraction_of_monitor: float | None = None,
+    get_window_rect=get_window_rect,
+    get_monitor_size=get_monitor_size,
+    sleep=time.sleep,
+) -> bool:
+    """Poll ``hwnd``'s rect until its ``(width, height)`` has stayed the
+    same for ``min_confirmations`` consecutive checks, or ``timeout``
+    elapses.
+
+    Some apps' windows pass through several transient sizes while
+    launching (e.g. a small standalone launcher, then a brief "mini
+    title" frame) before settling at their real size - foregrounding or
+    interacting with one before then risks acting on a transient window
+    rather than the real one. If ``min_fraction_of_monitor`` is given,
+    a size only counts as a candidate for "settled" once it's at least
+    that fraction of its monitor's width *and* height in both dimensions
+    - otherwise a transient size that happens to hold steady across a
+    couple of polls (unlikely but not impossible) would count as settled
+    too. Returns whether it settled within ``timeout``.
+    """
+    min_width = min_height = 0
+    if min_fraction_of_monitor is not None:
+        monitor_width, monitor_height = get_monitor_size(hwnd)
+        min_width = monitor_width * min_fraction_of_monitor
+        min_height = monitor_height * min_fraction_of_monitor
+
+    last_size = None
+    streak = 0
+    elapsed = 0.0
+    while elapsed <= timeout:
+        _, _, width, height = get_window_rect(hwnd)
+        big_enough = width > 0 and height > 0 and width >= min_width and height >= min_height
+        size = (width, height)
+        if big_enough and size == last_size:
+            streak += 1
+        else:
+            streak = 1 if big_enough else 0
+        last_size = size
+
+        if streak >= min_confirmations:
+            return True
+        sleep(poll_interval)
+        elapsed += poll_interval
+    return False
+
+
+def minimize_other_windows(keep_hwnds: int | Iterable[int]) -> None:
     """Minimize every other visible, titled top-level window.
 
-    Leaves ``keep_hwnd`` as the only thing left in view - the "move
-    everything else back" half of getting a window unambiguously in
-    front, for when a Steam overlay/notification or some other app window
-    keeps reappearing over it.
+    ``keep_hwnds`` may be a single hwnd or an iterable of them - e.g. the
+    target window plus the terminal running the calling script, so it
+    doesn't get minimized out from under whoever's watching its output.
+    Leaves those as the only things left in view - the "move everything
+    else back" half of getting a window unambiguously in front, for when
+    a Steam overlay/notification or some other app window keeps
+    reappearing over it.
     """
+    keep = {keep_hwnds} if isinstance(keep_hwnds, int) else set(keep_hwnds)
 
     def _enum_callback(hwnd, _extra):
-        if hwnd == keep_hwnd or not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+        if hwnd in keep or not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
             return True
         if not get_window_title(hwnd):
             return True
@@ -136,16 +209,17 @@ def minimize_other_windows(keep_hwnd: int) -> None:
     win32gui.EnumWindows(_enum_callback, None)
 
 
-def focus_exclusively(hwnd: int) -> None:
+def focus_exclusively(hwnd: int, also_keep: Iterable[int] = ()) -> None:
     """Bring ``hwnd`` to the foreground and minimize every other window.
 
     The combined operation this module was built for: make ``hwnd``
     unambiguously the thing on screen and receiving input, rather than
     just "focused" (which other windows can still visually cover or steal
-    back from).
+    back from). ``also_keep`` is forwarded to ``minimize_other_windows``
+    alongside ``hwnd`` itself.
     """
     bring_to_foreground(hwnd)
-    minimize_other_windows(hwnd)
+    minimize_other_windows({hwnd, *also_keep})
 
 
 def capture_window_state(title_matcher: Callable[[str], bool], screens_list: list[dict]) -> dict | None:

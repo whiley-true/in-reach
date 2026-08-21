@@ -12,6 +12,8 @@ src/inreach.egg-info
 # Local development
 requirements.txt
 scripts/
+!/src/inreach/scripts/
+!/src/inreach/scripts/**
 refactor/
 /.inreach/
 

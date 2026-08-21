@@ -29,6 +29,14 @@ def test_confirm_defaults_on_empty_input(monkeypatch):
     assert ui.confirm("Continue?", default=False) is False
 
 
+def test_press_enter_returns_on_empty_input(monkeypatch, capsys):
+    monkeypatch.setattr(click.termui, "visible_prompt_func", lambda prompt="": "")
+
+    ui.press_enter("Press enter to confirm")
+
+    assert "Press enter to confirm" in capsys.readouterr().out
+
+
 def test_confirm_parses_yes_and_no(monkeypatch):
     inputs = iter(["y", "n"])
     monkeypatch.setattr(click.termui, "visible_prompt_func", lambda prompt="": next(inputs))

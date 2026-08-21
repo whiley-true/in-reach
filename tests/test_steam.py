@@ -1,3 +1,5 @@
+import pytest
+
 from inreach.app.setup import env_file, steam
 
 LOCALCONFIG_TEMPLATE = """
@@ -89,6 +91,35 @@ def test_resolve_steam_account_via_menu_prompts_and_saves(tmp_path):
 
     assert chosen == "222"
     assert env_file.get_env_values(env_path)["USER_STEAM_LOC_INT"] == "222"
+
+
+def test_resolve_steam_account_via_menu_offers_exit_option(tmp_path):
+    steam_loc = tmp_path / "steam"
+    _write_user(steam_loc / "userdata", "111", persona="Alice")
+    _write_user(steam_loc / "userdata", "222", persona="Bob")
+    env_path = tmp_path / ".env"
+
+    seen_options = []
+
+    def select_user(title, options):
+        seen_options.append(options)
+        return 1
+
+    steam.resolve_steam_account_via_menu(env_path, steam_loc, select_user=select_user)
+
+    assert seen_options == [["Alice (111)", "Bob (222)", steam.EXIT]]
+
+
+def test_resolve_steam_account_via_menu_exits_when_exit_chosen(tmp_path):
+    steam_loc = tmp_path / "steam"
+    _write_user(steam_loc / "userdata", "111", persona="Alice")
+    _write_user(steam_loc / "userdata", "222", persona="Bob")
+    env_path = tmp_path / ".env"
+
+    with pytest.raises(SystemExit):
+        steam.resolve_steam_account_via_menu(env_path, steam_loc, select_user=lambda title, options: 2)
+
+    assert "USER_STEAM_LOC_INT" not in env_file.get_env_values(env_path)
 
 
 def test_resolve_steam_account_via_menu_warns_when_no_accounts(tmp_path, monkeypatch):

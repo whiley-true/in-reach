@@ -3,7 +3,14 @@ import logging
 import pytest
 
 from inreach.app import verify
-from inreach.app.setup import env_file, locations, project, steam
+from inreach.app.setup import env_file, locations, project, steam, tesseract
+
+
+def _found_tesseract() -> str:
+    """A ``check_tesseract`` stub for tests that aren't exercising the
+    Tesseract checklist item itself - keeps them from depending on whether
+    the machine running the suite actually has it on PATH."""
+    return r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 LOCALCONFIG_TEMPLATE = """
 "UserLocalConfigStore"
@@ -55,9 +62,9 @@ def test_verify_installs_shows_one_combined_screen_and_records_persona(tmp_path,
 
     monkeypatch.setattr(verify.ui, "checklist", spy_checklist)
 
-    verify.verify_installs(tmp_path, delay=0)
+    verify.verify_installs(tmp_path, check_tesseract=_found_tesseract, delay=0)
 
-    expected_keys = locations.LOCATION_KEYS + [steam.USER_STEAM_LOC_INT_KEY]
+    expected_keys = locations.LOCATION_KEYS + [steam.USER_STEAM_LOC_INT_KEY, tesseract.CHECKLIST_KEY]
     assert checklist_calls == [(verify._CHECKLIST_TITLE, expected_keys)]
     values = env_file.get_env_values(env_path)
     assert values[steam.USER_STEAM_LOC_INT_KEY] == "111"
@@ -87,6 +94,7 @@ def test_verify_installs_redraws_once_prefilled_after_resolving_location_and_acc
         prompt_for_missing=lambda key, current: str(steam_loc),
         verify_steam=lambda path: True,
         select_user=lambda title, options: 1,
+        check_tesseract=_found_tesseract,
         delay=0.5,
     )
 
@@ -119,6 +127,7 @@ def test_verify_installs_never_opens_folder_picker_for_steam_account(tmp_path, m
     verify.verify_installs(
         tmp_path,
         prompt_for_missing=lambda key, current: prompted.append(key),
+        check_tesseract=_found_tesseract,
         delay=0,
     )
 
@@ -143,7 +152,7 @@ def test_verify_installs_exits_on_fatal_missing_without_extra_redraw(tmp_path, m
     monkeypatch.setattr(verify.ui, "checklist", spy_checklist)
 
     with pytest.raises(SystemExit):
-        verify.verify_installs(tmp_path, delay=0)
+        verify.verify_installs(tmp_path, check_tesseract=_found_tesseract, delay=0)
 
     assert checklist_calls == [verify._CHECKLIST_TITLE]
 
@@ -170,10 +179,53 @@ def test_verify_installs_rechecks_reach_against_updated_halo_mcc_location(tmp_pa
         tmp_path,
         prompt_for_missing=lambda key, current: str(real_mcc) if key == locations.HALO_MCC_KEY else None,
         verify_steam=lambda path: True,
+        check_tesseract=_found_tesseract,
         delay=0,
     )
 
     assert env_file.get_env_values(env_path)[locations.HALO_MCC_KEY] == str(real_mcc)
+
+
+def test_verify_installs_resolves_missing_tesseract_via_menu(tmp_path):
+    env_path = tmp_path / ".env"
+    steam_loc = tmp_path / "steam"
+    _write_steam_user(steam_loc / "userdata", "111")
+    _write_locations_env(tmp_path, env_path, steam_loc)
+
+    resolved = []
+    found = False
+
+    def check_tesseract():
+        return _found_tesseract() if found else None
+
+    def resolve_tesseract(project_dir):
+        nonlocal found
+        resolved.append(project_dir)
+        found = True
+
+    verify.verify_installs(
+        tmp_path,
+        check_tesseract=check_tesseract,
+        resolve_tesseract=resolve_tesseract,
+        delay=0,
+    )
+
+    assert resolved == [tmp_path]
+
+
+def test_verify_installs_exits_when_tesseract_still_missing_after_resolving(tmp_path):
+    env_path = tmp_path / ".env"
+    steam_loc = tmp_path / "steam"
+    _write_steam_user(steam_loc / "userdata", "111")
+    _write_locations_env(tmp_path, env_path, steam_loc)
+
+    with pytest.raises(SystemExit):
+        verify.verify_installs(
+            tmp_path,
+            check_tesseract=lambda: None,
+            resolve_tesseract=lambda project_dir: None,
+            delay=0,
+        )
 
 
 def test_run_verify_exits_on_non_windows(monkeypatch):

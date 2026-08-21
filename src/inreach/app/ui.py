@@ -39,6 +39,11 @@ def confirm(prompt: str, default: bool = True) -> bool:
     return click.confirm(prompt, default=default)
 
 
+def press_enter(prompt: str) -> None:
+    """Block until the user presses Enter (or types anything then Enter)."""
+    click.prompt(prompt, default="", show_default=False)
+
+
 def info(message: str) -> None:
     click.echo(message)
 

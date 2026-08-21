@@ -53,3 +53,32 @@ def test_set_user_win_name_prompts_when_multiple_users(tmp_path, monkeypatch):
     setup_proj._set_user_win_name(env_path)
 
     assert env_file.get_env_values(env_path)["USER_WIN_NAME"] == "bob"
+
+
+def test_set_user_win_name_menu_offers_exit_option(tmp_path, monkeypatch):
+    monkeypatch.setattr(users, "list_windows_users", lambda: ["alice", "bob"])
+    seen_options = []
+
+    def select_option(title, options):
+        seen_options.append(options)
+        return 1
+
+    monkeypatch.setattr(setup_proj.ui, "select_option", select_option)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+
+    setup_proj._set_user_win_name(env_path)
+
+    assert seen_options == [["alice", "bob", setup_proj.EXIT]]
+
+
+def test_set_user_win_name_exits_when_exit_chosen(tmp_path, monkeypatch):
+    monkeypatch.setattr(users, "list_windows_users", lambda: ["alice", "bob"])
+    monkeypatch.setattr(setup_proj.ui, "select_option", lambda title, options: 2)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        setup_proj._set_user_win_name(env_path)
+
+    assert "USER_WIN_NAME" not in env_file.get_env_values(env_path)

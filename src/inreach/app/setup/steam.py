@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import sys
 
 from inreach.app import ui
 from inreach.app.setup import env_file, vdf
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 MCC_APPID = "976730"
 USER_STEAM_LOC_INT_KEY = "USER_STEAM_LOC_INT"
 USER_STEAM_PROFILE_NAME_KEY = "USER_STEAM_PROFILE_NAME"
+EXIT = "Exit"
 
 USERDATA_DIR_NAME = "userdata"
 LOCALCONFIG_REL_PATH = pathlib.Path("config") / "localconfig.vdf"
@@ -79,7 +81,11 @@ def resolve_steam_account_via_menu(
     for user_id in ids:
         persona = read_persona_name(data_dir, user_id)
         labels.append(f"{persona} ({user_id})" if persona else user_id)
-    index = select_user("Select your Steam account", labels)
+    options = labels + [EXIT]
+    index = select_user("Select your Steam account", options)
+    if options[index] == EXIT:
+        ui.warning("Exiting.")
+        sys.exit(0)
     chosen = ids[index]
 
     env_file.update_env_value(env_path, USER_STEAM_LOC_INT_KEY, chosen)

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 USER_WIN_NAME_KEY = "USER_WIN_NAME"
 FINAL_CHECKLIST_HANG_SECONDS = 1.0
+EXIT = "Exit"
 
 
 def setup_project(
@@ -55,7 +56,11 @@ def _set_user_win_name(env_path: pathlib.Path) -> None:
     if len(entries) == 1:
         chosen = entries[0]
     else:
-        index = ui.select_option("Select your Windows user", entries)
+        options = entries + [EXIT]
+        index = ui.select_option("Select your Windows user", options)
+        if options[index] == EXIT:
+            ui.warning("Exiting.")
+            sys.exit(0)
         chosen = entries[index]
 
     env_file.update_env_value(env_path, USER_WIN_NAME_KEY, chosen)

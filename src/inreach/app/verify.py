@@ -5,7 +5,7 @@ import sys
 import click
 
 from inreach.app import ui
-from inreach.app.setup import env_file, locations, project, steam
+from inreach.app.setup import env_file, locations, project, steam, tesseract
 from inreach.logging_config import LOG_FILE
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,8 @@ def verify_installs(
     prompt_for_missing=locations.ask_user_for_path,
     verify_steam=locations.verify_steam_install,
     select_user=ui.select_option,
+    check_tesseract=tesseract.check_tesseract_on_path,
+    resolve_tesseract=tesseract.resolve_tesseract_via_menu,
     delay: float = 0.5,
 ) -> None:
     """Steps 1-7: install locations plus the Steam account, as one
@@ -46,11 +48,14 @@ def verify_installs(
     env_path = project_dir / ".env"
     items = [(key, locations.LOCATION_LABELS[key]) for key in locations.LOCATION_KEYS]
     items.append((steam.USER_STEAM_LOC_INT_KEY, steam.CHECKLIST_LABEL))
+    items.append((tesseract.CHECKLIST_KEY, tesseract.CHECKLIST_LABEL))
 
     def check(key: str) -> str | None:
         if key == steam.USER_STEAM_LOC_INT_KEY:
             steam_loc = env_file.get_env_values(env_path).get(locations.STEAM_KEY) or ""
             return steam.check_steam_account(env_path, steam_loc)
+        if key == tesseract.CHECKLIST_KEY:
+            return check_tesseract()
         return locations.check_location(env_path, key)
 
     missing = ui.checklist(_CHECKLIST_TITLE, items, check, delay=delay)
@@ -66,6 +71,10 @@ def verify_installs(
         if check(steam.USER_STEAM_LOC_INT_KEY) is None:
             steam_loc = env_file.get_env_values(env_path).get(locations.STEAM_KEY) or ""
             steam.resolve_steam_account_via_menu(env_path, steam_loc, select_user)
+            changed = True
+
+        if tesseract.CHECKLIST_KEY in missing:
+            resolve_tesseract(project_dir)
             changed = True
 
     if changed:
@@ -86,9 +95,9 @@ def verify_installs(
         if persona:
             env_file.update_env_value(env_path, steam.USER_STEAM_PROFILE_NAME_KEY, persona)
 
-    fatal_missing = [key for key in missing if key in locations.FATAL_KEYS]
+    fatal_missing = [key for key in missing if key in locations.FATAL_KEYS or key == tesseract.CHECKLIST_KEY]
     if fatal_missing:
-        label = locations.LOCATION_LABELS[fatal_missing[0]]
+        label = locations.LOCATION_LABELS.get(fatal_missing[0], tesseract.CHECKLIST_LABEL)
         ui.error(f"{label} not found. Cannot continue setup.")
         sys.exit(1)
 
