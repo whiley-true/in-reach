@@ -13,14 +13,21 @@ def cli() -> None:
 
 @cli.command(name="verify")
 def verify_command() -> None:
-    """Run verification."""
-    verify.verify_installs()
+    """Verify an existing project's install locations and Steam account."""
+    verify.run_verify()
 
 
 @cli.command(name="init")
 def init_command() -> None:
     """Initialize the application."""
     run_init_menu()
+
+
+@cli.command(name="help")
+@click.pass_context
+def help_command(ctx: click.Context) -> None:
+    """Show this help message."""
+    click.echo(ctx.parent.get_help())
 
 
 def main(argv=None) -> int:

@@ -1,7 +1,6 @@
 import logging
 import pathlib
 import subprocess
-import sys
 import time
 
 from inreach.app import ui
@@ -81,9 +80,6 @@ def verify_steam_install(
     return ok
 
 
-_CHECKLIST_TITLE = "Checking install locations"
-
-
 def check_location(env_path: pathlib.Path, key: str) -> str | None:
     """Does ``key``'s env value point to a folder that exists?"""
     raw = env_file.get_env_values(env_path).get(key) or ""
@@ -127,43 +123,3 @@ def resolve_missing_locations(
             ui.warning("Could not verify the Steam install by launching it.")
 
     return changed
-
-
-def verify_locations(
-    env_path: pathlib.Path,
-    prompt_for_missing=ask_user_for_path,
-    verify_steam=verify_steam_install,
-    delay: float = 0.5,
-) -> None:
-    """Show the install-location checklist and resolve anything missing.
-
-    Steam and Halo: MCC fall back to a folder picker when missing.
-    Everything after them (Reach, hot reload, and the variant folders) is
-    fatal when missing. The whole checklist is one screen so it fills the
-    terminal rather than clearing between items; if a folder picker is
-    needed, that's its own screen, then the checklist is redrawn from
-    scratch afterwards - which also re-checks Reach with freshly
-    interpolated env values, in case a just-fixed Halo: MCC location
-    changed its derived path.
-    """
-    items = [(key, LOCATION_LABELS[key]) for key in LOCATION_KEYS]
-
-    def check(key: str) -> str | None:
-        return check_location(env_path, key)
-
-    missing = ui.checklist(_CHECKLIST_TITLE, items, check, delay=delay)
-    if not missing:
-        return
-
-    if resolve_missing_locations(env_path, missing, prompt_for_missing, verify_steam):
-        # Switch back to the checklist so the user sees the full, current
-        # state rather than being left on the folder-picker screen. No
-        # delay - this redraws already-known state, so it should populate
-        # prefilled rather than re-animating.
-        missing = ui.checklist(_CHECKLIST_TITLE, items, check, delay=0)
-
-    fatal_missing = [key for key in missing if key in FATAL_KEYS]
-    if fatal_missing:
-        label = LOCATION_LABELS[fatal_missing[0]]
-        ui.error(f"{label} not found. Cannot continue setup.")
-        sys.exit(1)

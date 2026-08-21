@@ -45,57 +45,64 @@ def test_read_persona_name_missing_file_returns_none(tmp_path):
     assert steam.read_persona_name(userdata_dir, "111") is None
 
 
-def test_resolve_steam_user_auto_selects_single_user(tmp_path):
+def test_check_steam_account_single_id_resolves(tmp_path):
     steam_loc = tmp_path / "steam"
     _write_user(steam_loc / "userdata", "111", persona="Alice")
     env_path = tmp_path / ".env"
 
-    chosen = steam.resolve_steam_user(env_path, steam_loc, delay=0)
-
-    assert chosen == "111"
-    assert env_file.get_env_values(env_path)["USER_STEAM_LOC_INT"] == "111"
+    assert steam.check_steam_account(env_path, steam_loc) == "111"
 
 
-def test_resolve_steam_user_prompts_when_multiple(tmp_path):
+def test_check_steam_account_multiple_ids_ambiguous_without_prior_choice(tmp_path):
     steam_loc = tmp_path / "steam"
     _write_user(steam_loc / "userdata", "111", persona="Alice")
     _write_user(steam_loc / "userdata", "222", persona="Bob")
     env_path = tmp_path / ".env"
 
-    chosen = steam.resolve_steam_user(env_path, steam_loc, select_user=lambda title, options: 1, delay=0)
+    assert steam.check_steam_account(env_path, steam_loc) is None
+
+
+def test_check_steam_account_multiple_ids_resolves_with_prior_choice(tmp_path):
+    steam_loc = tmp_path / "steam"
+    _write_user(steam_loc / "userdata", "111", persona="Alice")
+    _write_user(steam_loc / "userdata", "222", persona="Bob")
+    env_path = tmp_path / ".env"
+    env_file.update_env_value(env_path, steam.USER_STEAM_LOC_INT_KEY, "222")
+
+    assert steam.check_steam_account(env_path, steam_loc) == "222"
+
+
+def test_check_steam_account_no_ids_returns_none(tmp_path):
+    steam_loc = tmp_path / "steam"
+    env_path = tmp_path / ".env"
+
+    assert steam.check_steam_account(env_path, steam_loc) is None
+
+
+def test_resolve_steam_account_via_menu_prompts_and_saves(tmp_path):
+    steam_loc = tmp_path / "steam"
+    _write_user(steam_loc / "userdata", "111", persona="Alice")
+    _write_user(steam_loc / "userdata", "222", persona="Bob")
+    env_path = tmp_path / ".env"
+
+    chosen = steam.resolve_steam_account_via_menu(env_path, steam_loc, select_user=lambda title, options: 1)
 
     assert chosen == "222"
     assert env_file.get_env_values(env_path)["USER_STEAM_LOC_INT"] == "222"
 
 
-def test_resolve_steam_user_returns_none_when_no_users(tmp_path):
+def test_resolve_steam_account_via_menu_warns_when_no_accounts(tmp_path, monkeypatch):
     steam_loc = tmp_path / "steam"
+    (steam_loc / "userdata").mkdir(parents=True)
     env_path = tmp_path / ".env"
 
-    assert steam.resolve_steam_user(env_path, steam_loc, delay=0) is None
+    warnings = []
+    monkeypatch.setattr(steam.ui, "warning", warnings.append)
 
+    result = steam.resolve_steam_account_via_menu(env_path, steam_loc, select_user=lambda title, options: 0)
 
-def test_resolve_steam_user_redraws_checklist_after_menu(tmp_path, monkeypatch):
-    steam_loc = tmp_path / "steam"
-    _write_user(steam_loc / "userdata", "111", persona="Alice")
-    _write_user(steam_loc / "userdata", "222", persona="Bob")
-    env_path = tmp_path / ".env"
-
-    checklist_calls = []
-    real_checklist = steam.ui.checklist
-
-    def spy_checklist(title, items, check, delay=0.5):
-        checklist_calls.append((title, delay))
-        return real_checklist(title, items, check, delay=0)
-
-    monkeypatch.setattr(steam.ui, "checklist", spy_checklist)
-
-    steam.resolve_steam_user(env_path, steam_loc, select_user=lambda title, options: 0, delay=0.5)
-
-    # Once showing the ambiguous/missing state (with the caller's real
-    # delay), once more after the menu resolves it - that redraw should
-    # populate prefilled (delay=0), not replay the reveal animation.
-    assert checklist_calls == [(steam._CHECKLIST_TITLE, 0.5), (steam._CHECKLIST_TITLE, 0)]
+    assert result is None
+    assert any("No Steam accounts found" in message for message in warnings)
 
 
 def test_launch_mcc_eac_disabled_uses_option1():

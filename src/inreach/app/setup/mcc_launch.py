@@ -2,7 +2,7 @@ import logging
 import pathlib
 
 from inreach.app import ui
-from inreach.app.setup import processes, steam, window_tracking
+from inreach.app.setup import personal_variants, processes, steam, window_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ def run_eac_launch_step(
     launch=steam.launch_mcc_eac_disabled,
     wait_for_process=processes.wait_for_process,
     record=window_tracking.poll_and_record_window,
+    resolve_personal_variants=personal_variants.resolve_personal_variants,
 ) -> None:
     """Launch Halo: MCC with anti-cheat disabled and capture where its
     window ends up."""
@@ -44,6 +45,11 @@ def run_eac_launch_step(
     logger.info("Halo: MCC launched with anti-cheat disabled.")
     ui.success("Halo: MCC launched with anti-cheat disabled.")
     record(project_dir, _is_mcc_title)
+
+    # Checked here, while MCC is still open, rather than after closing it:
+    # once this grows to actually create the folder, that'll mean driving
+    # the game's own UI, which needs it running - not a second re-launch.
+    resolve_personal_variants(env_path)
 
     # This launch is only to verify anti-cheat-disabled mode works and
     # capture the window/screen it lands on - it shouldn't stay open
