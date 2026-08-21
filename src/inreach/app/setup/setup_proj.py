@@ -26,11 +26,11 @@ def setup_project(project_dir: pathlib.Path) -> None:
     # TODO: verify the template folder was copied successfully
     # TODO: verify all dependencies installed correctly (list still to be finalised)
 
+    screens.save_screen_config(project_dir)
     _set_user_win_name(env_path)
     locations.verify_locations(env_path)
     personal_variants.resolve_personal_variants(env_path)
-    screens.save_screen_config(project_dir)
-
+    
     ui.clear_screen()
     logger.info("Project setup complete")
     ui.success("Project setup complete.")
