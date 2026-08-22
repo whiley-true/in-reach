@@ -48,7 +48,13 @@ inreach = "inreach.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-inreach = ["scripts/*.bat", "app/anchors/save-game-type/*.png"]
+inreach = [
+    "scripts/*.bat",
+    "app/anchors/save-game-type/*.png",
+    ".inreach/example.env",
+    ".inreach/.gitignore",
+    ".inreach/logs/.gitkeep",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

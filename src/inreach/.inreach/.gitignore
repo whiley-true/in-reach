@@ -1,0 +1,4 @@
+.env
+*.log
+config/screens.json
+config/window.history
