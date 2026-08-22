@@ -19,6 +19,9 @@ from inreach.logging_config import setup_logging
 # from inreach.app import verify
 # from inreach.app.setup import run_init_menu
 
+TITLE_MAX_LEN = 32
+DESCRIPTION_MAX_LEN = 127
+
 
 # --------------------------------------------------------------------------
 # commands
@@ -146,8 +149,29 @@ def cmd_init(args: argparse.Namespace) -> int:
     Returns:
         Process exit code. ``0`` on success, ``1`` if a project already
         exists or ``--use-file`` was given but does not exist, ``2`` if
-        ``--title`` is missing while other init options were given.
+        ``--title`` is missing while other init options were given, or if
+        ``--title``/``--description`` exceed :data:`TITLE_MAX_LEN`/
+        :data:`DESCRIPTION_MAX_LEN`.
     """
+    # Validate flags before touching the project folder, so a rejected
+    # `--title`/`--description` doesn't leave a half-initialised .inreach
+    # behind for the user to clean up.
+    if not _init_is_bare(args):
+        if args.title is None:
+            print("error: --title is required when passing init options "
+                  "(run bare `inreach init` for the wizard)", file=sys.stderr)
+            return 2
+
+        if len(args.title) > TITLE_MAX_LEN:
+            print(f"error: --title must be {TITLE_MAX_LEN} characters or "
+                  f"fewer (got {len(args.title)})", file=sys.stderr)
+            return 2
+
+        if args.description is not None and len(args.description) > DESCRIPTION_MAX_LEN:
+            print(f"error: --description must be {DESCRIPTION_MAX_LEN} "
+                  f"characters or fewer (got {len(args.description)})", file=sys.stderr)
+            return 2
+
     if not _require_new_project(args):
         return 1
 
@@ -156,11 +180,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         # return run_init_menu()
         print("launching init wizard...")
         return 0
-
-    if args.title is None:
-        print("error: --title is required when passing init options "
-              "(run bare `inreach init` for the wizard)", file=sys.stderr)
-        return 2
 
     # --use-blank is the fallback when no other source is given
     use_blank = args.use_blank or not (args.use_ff or args.use_file)
@@ -301,8 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
     # inreach setup
     setup = subparsers.add_parser(
         "setup",
-        help="set up the local environment",
-        description="Set up the local environment.",
+        help="set up the local environment (without creating a project)",
+        description="Set up the local environment (without creating a project).",
         parents=[global_opts],
     )
     setup.set_defaults(func=cmd_setup)
@@ -339,8 +358,14 @@ def build_parser() -> argparse.ArgumentParser:
                     "interactive wizard.",
         parents=[global_opts],
     )
-    init.add_argument("--title", help="project title")
-    init.add_argument("--description", help="short project description")
+    init.add_argument(
+        "--title",
+        help=f"project title (max {TITLE_MAX_LEN} characters)",
+    )
+    init.add_argument(
+        "--description",
+        help=f"short project description (max {DESCRIPTION_MAX_LEN} characters)",
+    )
 
     source = init.add_mutually_exclusive_group()
     source.add_argument(
