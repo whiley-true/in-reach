@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyd
+# ...except the prebuilt _reachvarianttool native module (ported from refactor/mide/native/), which
+# is a committed binary shipped as package-data, not a regenerated build artifact -- see
+# src/in-reach/app/rvt/rvt_bridge.py.
+!/src/in-reach/app/rvt/native/*.pyd
+.pytest_cache/
+
+# Environment variables
+.env
+
+# Local development
+requirements.txt
+.scripts/
+refactor/
+/.in-reach/
+
+# Local/ephemeral Claude Code state
+.claude/scheduled_tasks.lock
+CLAUDE.local.md
+CLAUDE.md
+.claude/
+
+# Vscode
+.vscode/
