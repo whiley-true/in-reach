@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "in-reach"
 version = "0.1.0"
-description = "Python tooling and mine IDE to help improve the Halo Reach scripting experience."
+description = "Python tooling and mini-IDE to help improve the Halo Reach scripting experience."
 readme = "README.md"
 requires-python = ">=3.14"
 license = { file = "LICENSE" }
