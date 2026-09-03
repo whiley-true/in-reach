@@ -17,7 +17,7 @@ def help_cmd(ctx: click.Context) -> None:
 @main.command()
 def run() -> None:
     """Run in-reach."""
-    click.echo("run")
+    click.echo("run test")
 
 
 @main.command()
