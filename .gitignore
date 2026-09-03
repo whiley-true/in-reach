@@ -9,7 +9,8 @@ __pycache__/
 # src/in_reach/app/rvt/rvt_bridge.py.
 !/src/in_reach/app/rvt/native/*.pyd
 .pytest_cache/
-
+src/inreach.egg-info
+    
 # Environment variables
 .env
 
