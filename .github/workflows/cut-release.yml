@@ -46,12 +46,42 @@ jobs:
           fi
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Create release branch
+      - name: Create release branch and bump version
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "release/v$VERSION"
+
+          python -m pip install --upgrade tomlkit
+          python - "$VERSION" <<'PYEOF'
+          import pathlib
+          import re
+          import sys
+
+          import tomlkit
+
+          version = sys.argv[1]
+
+          pyproject_path = pathlib.Path("pyproject.toml")
+          doc = tomlkit.parse(pyproject_path.read_text(encoding="utf-8"))
+          doc["project"]["version"] = version
+          pyproject_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+          init_path = pathlib.Path("src/in_reach/__init__.py")
+          text = init_path.read_text(encoding="utf-8")
+          text, count = re.subn(r'__version__ = ".*"', f'__version__ = "{version}"', text)
+          if count == 0:
+              raise ValueError(f"__version__ assignment not found in {init_path}")
+          init_path.write_text(text, encoding="utf-8")
+          PYEOF
+
+          git add pyproject.toml src/in_reach/__init__.py
+          if git diff --cached --quiet; then
+            echo "pyproject.toml/__init__.py already at $VERSION -- nothing to bump."
+          else
+            git commit -m "chore: bump version to $VERSION"
+          fi
           git push origin "release/v$VERSION"
 
       - name: Open PR into main
