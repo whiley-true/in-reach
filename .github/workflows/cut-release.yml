@@ -27,19 +27,23 @@ jobs:
         id: version
         run: |
           BASE_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          PYPROJECT_VERSION=$(grep -m1 '^version' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
           if [ -z "$BASE_TAG" ]; then
-            BASE=$(grep -m1 '^version' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+            # No release has ever been tagged: ship pyproject.toml's current version as-is
+            # (the "bump" input doesn't apply -- there's nothing to bump from yet).
+            NEXT="$PYPROJECT_VERSION"
+            echo "No existing tags -- shipping pyproject.toml's current version as the first release: $NEXT"
           else
             BASE="${BASE_TAG#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+            case "${{ inputs.bump }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            NEXT="$MAJOR.$MINOR.$PATCH"
+            echo "Base: $BASE -> Next: $NEXT"
           fi
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          case "${{ inputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-          NEXT="$MAJOR.$MINOR.$PATCH"
-          echo "Base: $BASE -> Next: $NEXT"
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
 
       - name: Create release branch
