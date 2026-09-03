@@ -1,5 +1,7 @@
 import click
 
+from in_reach.app import project, verify
+
 
 @click.group()
 @click.version_option(package_name="in-reach")
@@ -17,6 +19,12 @@ def help_cmd(ctx: click.Context) -> None:
 @main.command()
 def run() -> None:
     """Run in-reach."""
+    project_dir = project.get_project_dir()
+    if not project.project_exists():
+        project.create_project()
+    project.ensure_gitignore(project_dir)
+    verify.verify_project(project_dir)
+
     click.echo("run test")
 
 

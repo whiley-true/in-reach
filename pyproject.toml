@@ -21,3 +21,11 @@ dev = ["pytest==8.4.2"]
 
 [project.scripts]
 in-reach = "in_reach.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+in_reach = [
+    ".in-reach/example.env",
+]
