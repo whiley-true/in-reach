@@ -3,10 +3,11 @@
 __pycache__/
 *.pyc
 *.pyd
+*.egg-info/
 # ...except the prebuilt _reachvarianttool native module (ported from refactor/mide/native/), which
 # is a committed binary shipped as package-data, not a regenerated build artifact -- see
-# src/in-reach/app/rvt/rvt_bridge.py.
-!/src/in-reach/app/rvt/native/*.pyd
+# src/in_reach/app/rvt/rvt_bridge.py.
+!/src/in_reach/app/rvt/native/*.pyd
 .pytest_cache/
 
 # Environment variables
