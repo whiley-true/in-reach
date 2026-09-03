@@ -33,41 +33,6 @@ jobs:
           git tag "v$VERSION"
           git push origin "v$VERSION"
 
-      - name: Bump version on main
-        id: bump_commit
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          python -m pip install --upgrade tomlkit
-          python - "$VERSION" <<'PYEOF'
-          import pathlib
-          import re
-          import sys
-
-          import tomlkit
-
-          version = sys.argv[1]
-
-          pyproject_path = pathlib.Path("pyproject.toml")
-          doc = tomlkit.parse(pyproject_path.read_text(encoding="utf-8"))
-          doc["project"]["version"] = version
-          pyproject_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-
-          init_path = pathlib.Path("src/in_reach/__init__.py")
-          text = init_path.read_text(encoding="utf-8")
-          text, count = re.subn(r'__version__ = ".*"', f'__version__ = "{version}"', text)
-          if count == 0:
-              raise ValueError(f"__version__ assignment not found in {init_path}")
-          init_path.write_text(text, encoding="utf-8")
-          PYEOF
-          git add pyproject.toml src/in_reach/__init__.py
-          if git diff --cached --quiet; then
-            echo "pyproject.toml/__init__.py already at $VERSION -- nothing to bump (first release)."
-          else
-            git commit -m "chore: bump version to $VERSION"
-            git push origin HEAD:main
-          fi
-          echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
@@ -81,10 +46,14 @@ jobs:
         run: |
           git push origin --delete "${{ github.event.pull_request.head.ref }}" || true
 
-      - name: Sync version bump to development
+      - name: Open PR to sync main into development
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git fetch origin development
-          git checkout -B development origin/development
-          git merge --no-ff "${{ steps.bump_commit.outputs.bump_sha }}" -m "Merge main v$VERSION into development"
-          git push origin HEAD:development
+          gh pr create \
+            --base development \
+            --head main \
+            --title "Sync main v$VERSION into development" \
+            --body "Automated sync after releasing v$VERSION." \
+            || echo "Nothing to sync, or a sync PR already exists."
