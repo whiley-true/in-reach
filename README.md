@@ -1,0 +1,1 @@
+Python tooling and mini-IDE to help improve the Halo Reach scripting experience.
