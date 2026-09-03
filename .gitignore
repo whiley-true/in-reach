@@ -23,6 +23,7 @@ refactor/
 CLAUDE.local.md
 CLAUDE.md
 .claude/
+PROMPT.md
 
 # Vscode
 .vscode/
