@@ -18,7 +18,7 @@ def test_run_prints_run() -> None:
     result = runner.invoke(main, ["run"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == "run"
+    assert result.output.strip() == "run test"
 
 
 def test_cfg_prints_placeholder_menu() -> None:
