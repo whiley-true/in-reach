@@ -18,14 +18,16 @@ def help_cmd(ctx: click.Context) -> None:
 
 @main.command()
 def run() -> None:
-    """Run in-reach."""
+    """Open the in-reach IDE, fullscreen."""
     project_dir = project.get_project_dir()
     if not project.project_exists():
         project.create_project()
     project.ensure_gitignore(project_dir)
     verify.verify_project(project_dir)
 
-    click.echo("run test")
+    from in_reach.ide import app as ide_app
+
+    ide_app.run(project_dir)
 
 
 @main.command()

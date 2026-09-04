@@ -1,0 +1,23 @@
+# in-reach IDE theme -- see in_reach/ide/theme.py's module docstring for the schema.
+#
+# A dark theme with crimson/red accents (inspired by vscode's own "Red" theme, not a pixel-exact
+# copy of it) -- see in_reach/ide/themes/dark.yml's matching comment for `window`/`base`.
+
+name: Whiley
+
+palette:
+  window: "#1a0f0f"
+  window_text: "#f2e0e0"
+  base: "#241616"
+  alternate_base: "#2d1b1b"
+  tooltip_base: "#f2e0e0"
+  tooltip_text: "#1a0f0f"
+  text: "#f2e0e0"
+  button: "#2d1b1b"
+  button_text: "#f2e0e0"
+  bright_text: "#ff6b6b"
+  link: "#e05252"
+  highlight: "#c41e3a"
+  highlighted_text: "#ffffff"
+  mid: "#4a2e2e"
+disabled_text: "#8a6a6a"

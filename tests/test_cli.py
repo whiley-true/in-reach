@@ -12,6 +12,17 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def stub_ide_launch(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """``in-reach run`` launches a real, blocking Qt window -- every test in this file exercises
+    the CLI's project-bootstrap logic only, never the IDE itself, so the actual launch is stubbed
+    out everywhere by default. ``test_run_launches_the_ide_against_the_project_dir`` below asserts
+    against the call this records."""
+    calls: list[Path] = []
+    monkeypatch.setattr("in_reach.ide.app.run", lambda project_dir: calls.append(project_dir))
+    return calls
+
+
 def test_help_prints_help_menu(runner: CliRunner) -> None:
     result = runner.invoke(main, ["help"])
 
@@ -21,13 +32,15 @@ def test_help_prints_help_menu(runner: CliRunner) -> None:
     assert "cfg" in result.output
 
 
-def test_run_prints_run(runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_launches_the_ide_against_the_project_dir(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_ide_launch: list[Path]
+) -> None:
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(main, ["run"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == "run test"
+    assert stub_ide_launch == [project.get_project_dir(tmp_path)]
 
 
 def test_run_creates_project_on_first_run(
