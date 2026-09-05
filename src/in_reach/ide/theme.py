@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QStyleFactory
+from PyQt6.QtWidgets import QApplication, QStyleFactory, QToolTip
 
 THEMES_PATH = Path(__file__).resolve().parent / "themes" / "themes.json"
 DEFAULT_THEME_NAME = "Light"
@@ -106,7 +106,14 @@ def apply_theme(app: QApplication, theme_name: str) -> Theme:
     except ValueError:
         theme = load_theme(DEFAULT_THEME_NAME)
     app.setStyle(QStyleFactory.create("Fusion"))
-    app.setPalette(theme.build_palette())
+    palette = theme.build_palette()
+    app.setPalette(palette)
+    # QToolTip renders through its own private widget class, which doesn't reliably pick up
+    # ToolTipBase/ToolTipText from a bare QApplication.setPalette() call -- without this, a
+    # tooltip's background can end up following the new theme while its text stays whatever the
+    # previous theme (or Qt's own built-in default) left behind, which reads as unreadable on the
+    # dark themes. Setting it explicitly here is the standard fix.
+    QToolTip.setPalette(palette)
     # A per-widget stylesheet rule that references the dynamic palette() QSS function is cached as
     # a "render rule" the first time a widget is polished -- a bare PaletteChange event doesn't
     # invalidate that cache, only a real unpolish/polish cycle does. Without this, an

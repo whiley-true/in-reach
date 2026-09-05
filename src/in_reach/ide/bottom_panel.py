@@ -16,6 +16,7 @@ class BottomPanel(QTabWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self.setStyleSheet(style.TAB_PANEL_BORDER_STYLE)
         for label in _TAB_LABELS:
             self.addTab(QWidget(), label)

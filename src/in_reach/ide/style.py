@@ -73,6 +73,11 @@ def wrap_tab_widget(tab_widget: QTabWidget) -> QWidget:
     card = QWidget()
     card.setObjectName("tabCard")
     card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    # Without an explicit autofill, Qt's paint buffer for this widget can start from an
+    # uncleared/undefined canvas before the QSS rounded-rect fill is drawn over it, leaving a thin
+    # antialiased fringe of that undefined color right on the rounded corners themselves --
+    # visible as stray light pixels there regardless of the active theme.
+    card.setAutoFillBackground(True)
     card.setStyleSheet(_TAB_CARD_STYLE)
     layout = QVBoxLayout(card)
     layout.setContentsMargins(0, 0, 0, 0)

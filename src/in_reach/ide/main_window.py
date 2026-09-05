@@ -187,13 +187,50 @@ class _TopBar(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+class _ResizableBody(QWidget):
+    """Fills the window below the top bar. MainWindow's own background is never directly
+    hoverable -- the top bar and this widget together tile its entire client area -- so
+    bottom/left/right edge-resize hover/press detection has to live here rather than on
+    MainWindow itself; a MainWindow-level override would simply never fire."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__(window)
+        self._window = window
+        self.setMouseTracking(True)
+
+    def _edges_at(self, pos) -> Qt.Edge:  # noqa: ANN001 -- QPoint
+        if self._window.isMaximized():
+            return Qt.Edge(0)
+        return _resize_edges(pos, self.width(), self.height(), top=False, bottom=True)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.childAt(event.position().toPoint()) is None:
+            edges = self._edges_at(event.position().toPoint())
+            window_handle = self._window.windowHandle()
+            if edges and window_handle is not None:
+                window_handle.startSystemResize(edges)
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not bool(event.buttons() & Qt.MouseButton.LeftButton) and self.childAt(event.position().toPoint()) is None:
+            edges = self._edges_at(event.position().toPoint())
+            self.setCursor(_cursor_for_edges(edges)) if edges else self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 -- QEvent
+        # Otherwise a resize cursor set while hovering the edge gutter can stay stuck: a sibling
+        # card doesn't set its own cursor, so it would inherit whatever this widget last set.
+        self.unsetCursor()
+        super().leaveEvent(event)
+
+
 class MainWindow(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
-        self.setMouseTracking(True)
 
         screen = QApplication.primaryScreen()
         if screen is not None:
@@ -209,14 +246,13 @@ class MainWindow(QWidget):
         self.top_bar = _TopBar(self)
         outer.addWidget(self.top_bar)
 
-        body = QWidget()
-        body.setMouseTracking(True)
+        body = _ResizableBody(self)
         body_layout = QHBoxLayout(body)
         # Every top-level region (activity bar, sidebar, main panel, bottom panel) is its own
         # bordered/rounded card -- this margin/spacing is the window-background gap left around
         # and between them, so the rounding reads as rounded instead of flush against a neighbor.
         # It also happens to be exactly where the bottom/left/right edge-resize grab area lives --
-        # see mousePressEvent()/mouseMoveEvent() below.
+        # see _ResizableBody's own mousePressEvent()/mouseMoveEvent() above.
         body_layout.setContentsMargins(style.PANEL_GAP, style.PANEL_GAP, style.PANEL_GAP, style.PANEL_GAP)
         body_layout.setSpacing(style.PANEL_GAP)
         outer.addWidget(body, 1)
@@ -227,6 +263,7 @@ class MainWindow(QWidget):
         self._side_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._side_splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
         self._side_splitter.setHandleWidth(style.SIDEBAR_CONTENT_GAP)
+        self._side_splitter.setChildrenCollapsible(False)
         body_layout.addWidget(self._side_splitter, 1)
 
         self.primary_sidebar = self._build_primary_sidebar()
@@ -235,6 +272,7 @@ class MainWindow(QWidget):
         self._main_splitter = QSplitter(Qt.Orientation.Vertical)
         self._main_splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
         self._main_splitter.setHandleWidth(style.PANEL_GAP)
+        self._main_splitter.setChildrenCollapsible(False)
         self._side_splitter.addWidget(self._main_splitter)
         self._side_splitter.setStretchFactor(0, 0)
         self._side_splitter.setStretchFactor(1, 1)
@@ -309,14 +347,21 @@ class MainWindow(QWidget):
             self.showMaximized()
         self.refresh_icon_colors()
 
-    def refresh_icon_colors(self) -> None:
-        """Re-renders the top bar's icon buttons in the current theme's window-text color.
+    def refresh_icon_colors(self, color: str | None = None) -> None:
+        """Re-renders the top bar's icon buttons in ``color`` (or, if omitted, the current theme's
+        window-text color read back from the live QPalette).
 
         Must be called again after a live theme switch (the first-run dialog's own theme buttons),
         since :func:`in_reach.ide.icons.icon` bakes a fixed color into the pixmap rather than
-        tracking a live QPalette.
+        tracking a live QPalette. Prefer :meth:`on_theme_applied` (which passes ``color``
+        explicitly) over relying on the palette read-back for that case -- ``QApplication.
+        setPalette()`` only actually updates this widget's own ``self.palette()`` once the
+        resulting ``PaletteChange`` event is processed on the event loop, which hasn't happened yet
+        by the time a theme-switch callback runs synchronously; reading it back here right after
+        switching would silently reuse the *previous* theme's color for one click.
         """
-        color = self.palette().color(QPalette.ColorRole.WindowText).name()
+        if color is None:
+            color = self.palette().color(QPalette.ColorRole.WindowText).name()
         for button in self.top_bar.icon_buttons():
             icon_name = button.property("_icon_name")
             if button is self.top_bar.maximize_button:
@@ -327,26 +372,7 @@ class MainWindow(QWidget):
         """Refreshes every bit of chrome that a live theme switch doesn't drive automatically via
         QPalette alone: the top bar's icon colors and the status bar's accent color."""
         self.status_bar.set_color(theme.status_bar_color)
-        self.refresh_icon_colors()
-
-    def _edges_at(self, pos: QPoint) -> Qt.Edge:
-        if self.isMaximized():
-            return Qt.Edge(0)
-        return _resize_edges(pos, self.width(), self.height(), top=False, bottom=True)
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            edges = self._edges_at(event.position().toPoint())
-            window_handle = self.windowHandle()
-            if edges and window_handle is not None:
-                window_handle.startSystemResize(edges)
-                return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if not bool(event.buttons() & Qt.MouseButton.LeftButton):
-            self.setCursor(_cursor_for_edges(self._edges_at(event.position().toPoint())))
-        super().mouseMoveEvent(event)
+        self.refresh_icon_colors(theme.palette_colors.get("window_text"))
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001 -- QResizeEvent, matches base signature
         super().resizeEvent(event)
