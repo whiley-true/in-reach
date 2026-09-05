@@ -39,11 +39,19 @@ _TAB_CARD_STYLE = (
 # it), an unselected tab matches that same shade so it reads as a real tab rather than blending
 # into the chrome, and the selected tab gets a permanent highlight background with rounded top
 # corners so it reads as raised above the row.
+#
+# The strip behind the tab row (QTabWidget/QTabBar) is painted with an explicit palette(window)
+# background-color rather than "transparent": a transparent QTabBar sitting over an unstyled
+# ancestor lets Qt's QSS engine fall back to its own default (light) widget fill for the
+# antialiased pixels just outside a rounded QTabBar::tab's corner arc, which showed up as light
+# pixels leaking through the tab corners in the dark/Whiley themes. Painting a real color here
+# (and setting WA_StyledBackground on the owning widget -- see TabPane/BottomPanel) removes the
+# transparent layer that caused it.
 TAB_PANEL_BORDER_STYLE = (
     "QTabWidget::pane { border: none; background-color: palette(base);"
     f" border-bottom-left-radius: {PANEL_RADIUS}px; border-bottom-right-radius: {PANEL_RADIUS}px; }}"
-    "QTabWidget { border: none; background: transparent; }"
-    "QTabBar { background: transparent; }"
+    "QTabWidget { border: none; background-color: palette(window); }"
+    "QTabBar { background-color: palette(window); }"
     "QTabBar::tab { background-color: palette(base); color: palette(window-text);"
     " border: 1px solid transparent; padding: 5px 14px; margin-right: 2px; }"
     "QTabBar::tab:first { margin-left: 4px; }"

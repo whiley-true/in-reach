@@ -15,7 +15,6 @@ dependencies = [
     "python-dotenv==1.2.3",
     "tomlkit==0.15.1",
     "PyQt6==6.11.0",
-    "PyYAML==6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -30,5 +29,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 in_reach = [
     ".in-reach/example.env",
-    "ide/themes/*.yml",
+    "ide/themes/*.json",
+    "ide/assets/*.svg",
 ]

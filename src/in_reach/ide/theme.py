@@ -1,23 +1,29 @@
-"""Named color themes, loaded from ``in_reach/ide/themes/*.yml``.
+"""Named color themes, loaded from ``in_reach/ide/themes/themes.json``.
 
 QPalette-based rather than a hand-rolled QSS stylesheet: PyQt6's native widgets already respect
 QPalette roles (Window/Base/Text/Highlight/etc.) automatically, so a theme here is just a small
 dict of hex colors mapped onto those roles. The Fusion style is forced whenever a theme is
 applied -- native platform styles only partially honour a custom QPalette, which would make
 switching themes look inconsistent depending on the user's own Windows theme.
+
+All shipped themes live in one ``themes.json`` file (a top-level ``"themes"`` list) rather than
+one file per theme -- each entry also carries an ``editable`` flag (always ``false`` for the three
+shipped themes today) and a ``status_bar_color``, reserved/used respectively for a future 4th,
+user-customizable theme slot. That customization UI isn't implemented yet -- see PROMPT.md.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QStyleFactory
 
-THEMES_DIR = Path(__file__).resolve().parent / "themes"
+THEMES_PATH = Path(__file__).resolve().parent / "themes" / "themes.json"
 DEFAULT_THEME_NAME = "Light"
+DEFAULT_STATUS_BAR_COLOR = "#007acc"
 
 _PALETTE_ROLES = {
     "window": QPalette.ColorRole.Window,
@@ -42,6 +48,8 @@ class Theme:
     name: str
     palette_colors: dict[str, str] = field(default_factory=dict)
     disabled_text: str | None = None
+    status_bar_color: str = DEFAULT_STATUS_BAR_COLOR
+    editable: bool = False
 
     def build_palette(self) -> QPalette:
         palette = QPalette()
@@ -60,38 +68,29 @@ class Theme:
         return palette
 
 
-def _theme_files() -> list[Path]:
-    if not THEMES_DIR.is_dir():
-        return []
-    return sorted(THEMES_DIR.glob("*.yml"))
-
-
-def _read_theme_yaml(path: Path) -> dict | None:
+def _read_themes() -> list[dict]:
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    return data if isinstance(data, dict) else None
+        data = json.loads(THEMES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    themes = data.get("themes") if isinstance(data, dict) else None
+    return [entry for entry in themes if isinstance(entry, dict) and entry.get("name")] if themes else []
 
 
 def list_themes() -> list[str]:
-    """Every theme's display ``name`` (e.g. ``["Light", "Dark", "Whiley"]``), in filename order."""
-    names = []
-    for path in _theme_files():
-        data = _read_theme_yaml(path)
-        if data and data.get("name"):
-            names.append(data["name"])
-    return names
+    """Every theme's display ``name`` (e.g. ``["Light", "Dark", "Whiley"]``), in file order."""
+    return [entry["name"] for entry in _read_themes()]
 
 
 def load_theme(name: str) -> Theme:
-    for path in _theme_files():
-        data = _read_theme_yaml(path)
-        if data and data.get("name") == name:
+    for entry in _read_themes():
+        if entry["name"] == name:
             return Theme(
-                name=data["name"],
-                palette_colors=data.get("palette") or {},
-                disabled_text=data.get("disabled_text"),
+                name=entry["name"],
+                palette_colors=entry.get("palette") or {},
+                disabled_text=entry.get("disabled_text"),
+                status_bar_color=entry.get("status_bar_color", DEFAULT_STATUS_BAR_COLOR),
+                editable=bool(entry.get("editable", False)),
             )
     raise ValueError(f"No such theme: {name!r} (available: {list_themes()})")
 

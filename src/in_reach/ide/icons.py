@@ -13,11 +13,17 @@ data can be rendered in whatever color a caller needs.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QByteArray, Qt
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 DEFAULT_COLOR = "#cccccc"
+
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_APP_ICON_FILE = "icon-bluegrey-small-windows.svg"
+_TOPBAR_ICON_FILE = "icon-bluegrey-micro.svg"
 
 _SVG_TEMPLATE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" fill="{{color}}">{path}</svg>'
 
@@ -39,9 +45,13 @@ _ICON_SOURCES = {
         "0 0 16 16",
         '<path d="M15 12.5C15 13.881 13.881 15 12.5 15H3.5C2.119 15 1 13.881 1 12.5V3.5C1 2.119 2.119 1 3.5 1H12.5C13.881 1 15 2.119 15 3.5V12.5ZM2 10H14V3.5C14 2.672 13.328 2 12.5 2H3.5C2.672 2 2 2.672 2 3.5V10Z"/>',
     ),
-    "split": (  # plain two-pane rectangle, deliberately simple -- no matching codicon
+    "split": (  # plain two-pane rectangle (left/right), deliberately simple -- no matching codicon
         "0 0 16 16",
         '<path d="M2.5 2C1.67157 2 1 2.67157 1 3.5V12.5C1 13.3284 1.67157 14 2.5 14H13.5C14.3284 14 15 13.3284 15 12.5V3.5C15 2.67157 14.3284 2 13.5 2H2.5ZM2 3.5C2 3.22386 2.22386 3 2.5 3H7V13H2.5C2.22386 13 2 12.7761 2 12.5V3.5ZM9 13V3H13.5C13.7761 3 14 3.22386 14 3.5V12.5C14 12.7761 13.7761 13 13.5 13H9Z"/>',
+    ),
+    "split_vertical": (  # same two-pane rectangle, transposed to stack top/bottom
+        "0 0 16 16",
+        '<path d="M2.5 2C1.67157 2 1 2.67157 1 3.5V12.5C1 13.3284 1.67157 14 2.5 14H13.5C14.3284 14 15 13.3284 15 12.5V3.5C15 2.67157 14.3284 2 13.5 2H2.5ZM2 3.5C2 3.22386 2.22386 3 2.5 3H13.5C13.7761 3 14 3.22386 14 3.5V7H2V3.5ZM2 9H14V12.5C14 12.7761 13.7761 13 13.5 13H2.5C2.22386 13 2 12.7761 2 12.5V9Z"/>',
     ),
     "chevron_down": (  # codicon "chevron-down", used for the topbar text1/text2 dropdowns
         "0 0 16 16",
@@ -84,3 +94,13 @@ def icon(name: str, color: str = DEFAULT_COLOR, size: int = 24) -> QIcon:
         renderer.render(painter)
         painter.end()
     return QIcon(pixmap)
+
+
+def app_icon() -> QIcon:
+    """The full-color logo used as the taskbar/window icon."""
+    return QIcon(str(_ASSETS_DIR / _APP_ICON_FILE))
+
+
+def topbar_icon() -> QIcon:
+    """The small mark shown in the top bar's left corner, ahead of the dropdown menus."""
+    return QIcon(str(_ASSETS_DIR / _TOPBAR_ICON_FILE))

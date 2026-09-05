@@ -7,7 +7,7 @@ from in_reach.ide import app as ide_app
 from in_reach.ide import theme
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import MainWindow
-from in_reach.ide.tabs import _MAX_SPLITS
+from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def window(qtbot):
 
 
 def test_lists_the_three_shipped_themes() -> None:
-    assert theme.list_themes() == ["Dark", "Light", "Whiley"]
+    assert theme.list_themes() == ["Light", "Dark", "Whiley"]
 
 
 def test_apply_theme_falls_back_to_default_for_an_unknown_name(qtbot) -> None:
@@ -71,19 +71,53 @@ def test_settings_button_has_no_wired_action(window: MainWindow) -> None:
     assert window.activity_bar.settings_button.isCheckable() is False
 
 
-def test_split_panel_can_be_split_up_to_three_times(window: MainWindow) -> None:
+def test_split_panel_can_be_split_horizontally_up_to_the_max(window: MainWindow) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
 
-    for expected_split_count in range(1, _MAX_SPLITS + 1):
+    for expected_split_count in range(1, _MAX_H_SPLITS + 1):
         first_pane.split_button.click()
         assert main_panel.split_count == expected_split_count
 
-    # A fourth split is refused -- the button disables itself once the max is reached.
+    # A further split is refused -- the button disables itself once the max is reached.
     assert first_pane.split_button.isEnabled() is False
     first_pane.split_button.click()
-    assert main_panel.split_count == _MAX_SPLITS
-    assert len(main_panel.panes) == _MAX_SPLITS + 1
+    assert main_panel.split_count == _MAX_H_SPLITS
+    assert len(main_panel.panes) == _MAX_H_SPLITS + 1
+
+
+def test_pane_can_be_split_vertically_once_per_group(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_group = first_pane.group
+
+    first_pane.vsplit_button.click()
+    assert first_group.vsplit_count == _MAX_V_SPLITS
+    assert len(main_panel.panes) == 2
+
+    # A second vertical split of the same group is refused -- the button disables itself.
+    assert first_pane.vsplit_button.isEnabled() is False
+    first_pane.vsplit_button.click()
+    assert first_group.vsplit_count == _MAX_V_SPLITS
+    assert len(main_panel.panes) == 2
+
+
+def test_max_panes_is_three_horizontal_groups_of_two_vertical_panes(window: MainWindow) -> None:
+    main_panel = window.main_panel
+
+    # Split horizontally to the max (3 groups), then split every group vertically once (2 panes
+    # each) -- 3 x 2 = 6 panes total.
+    for _ in range(_MAX_H_SPLITS):
+        main_panel.panes[0].split_button.click()
+    assert len(main_panel.groups) == _MAX_H_SPLITS + 1
+
+    for group in list(main_panel.groups):
+        group.panes[0].vsplit_button.click()
+
+    assert len(main_panel.panes) == (_MAX_H_SPLITS + 1) * (_MAX_V_SPLITS + 1) == 6
+    for pane in main_panel.panes:
+        assert pane.split_button.isEnabled() is False
+        assert pane.vsplit_button.isEnabled() is False
 
 
 def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow) -> None:
@@ -117,12 +151,14 @@ def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindo
 
 def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
     notified = []
-    dialog = FirstRunDialog(on_theme_changed=lambda: notified.append(True))
+    dialog = FirstRunDialog(on_theme_changed=lambda applied: notified.append(applied.name))
     qtbot.addWidget(dialog)
 
     dialog._apply_theme("Whiley")
 
-    assert notified == [True]
+    assert notified == ["Whiley"]
+    assert dialog._theme_buttons["Whiley"].isChecked() is True
+    assert dialog._theme_buttons["Light"].isChecked() is False
 
 
 def test_first_run_flag_defaults_to_true_and_flips_to_false_after_run(

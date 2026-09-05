@@ -13,6 +13,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.app import env_file
+from in_reach.ide import icons
 from in_reach.ide import theme as theme_module
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import MainWindow
@@ -35,13 +36,15 @@ def run(project_dir: Path) -> int:
     env_path = project_dir / _ENV_NAME
 
     app = QApplication.instance() or QApplication(sys.argv)
-    theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)
+    app.setWindowIcon(icons.app_icon())
+    theme = theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)
 
     window = MainWindow()
+    window.on_theme_applied(theme)
     window.showMaximized()
 
     if _is_first_use(env_path):
-        dialog = FirstRunDialog(window, on_theme_changed=window.refresh_icon_colors)
+        dialog = FirstRunDialog(window, on_theme_changed=window.on_theme_applied)
         dialog.exec()
         env_file.update_env_value(env_path, _FIRST_USE_KEY, "false")
 

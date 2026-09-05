@@ -32,6 +32,19 @@ def test_help_prints_help_menu(runner: CliRunner) -> None:
     assert "cfg" in result.output
 
 
+def test_run_refuses_to_launch_off_windows(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_ide_launch: list[Path]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "linux")
+
+    result = runner.invoke(main, ["run"])
+
+    assert result.exit_code != 0
+    assert "windows" in result.output.lower()
+    assert stub_ide_launch == []
+
+
 def test_run_launches_the_ide_against_the_project_dir(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_ide_launch: list[Path]
 ) -> None:

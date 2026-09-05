@@ -1,0 +1,71 @@
+{
+  "//": "in-reach IDE themes -- see in_reach/ide/theme.py's module docstring for the schema. `palette` keys map onto QPalette color roles (theme.py's _PALETTE_ROLES); anything not listed keeps Qt's own Fusion-style default for that role. `status_bar_color` is the bottom status bar's accent color -- a deliberate per-theme brand choice, not a semantic palette role. `editable` is reserved for a future user-defined 4th theme slot and is not yet acted on anywhere.",
+  "themes": [
+    {
+      "name": "Light",
+      "editable": false,
+      "status_bar_color": "#007acc",
+      "palette": {
+        "window": "#f0f0f0",
+        "window_text": "#000000",
+        "base": "#ffffff",
+        "alternate_base": "#f7f7f7",
+        "tooltip_base": "#ffffdc",
+        "tooltip_text": "#000000",
+        "text": "#000000",
+        "button": "#f0f0f0",
+        "button_text": "#000000",
+        "bright_text": "#ff0000",
+        "link": "#0000ff",
+        "highlight": "#308cc6",
+        "highlighted_text": "#ffffff",
+        "mid": "#d4d4d4"
+      },
+      "disabled_text": "#787878"
+    },
+    {
+      "name": "Dark",
+      "editable": false,
+      "status_bar_color": "#007acc",
+      "palette": {
+        "window": "#1e1e1e",
+        "window_text": "#f0f0f0",
+        "base": "#252526",
+        "alternate_base": "#2d2d2d",
+        "tooltip_base": "#f0f0f0",
+        "tooltip_text": "#f0f0f0",
+        "text": "#f0f0f0",
+        "button": "#2b2b2b",
+        "button_text": "#f0f0f0",
+        "bright_text": "#ff5050",
+        "link": "#2a82da",
+        "highlight": "#2a82da",
+        "highlighted_text": "#000000",
+        "mid": "#3f3f3f"
+      },
+      "disabled_text": "#7f7f7f"
+    },
+    {
+      "name": "Whiley",
+      "editable": false,
+      "status_bar_color": "#c41e3a",
+      "palette": {
+        "window": "#1a0f0f",
+        "window_text": "#f2e0e0",
+        "base": "#241616",
+        "alternate_base": "#2d1b1b",
+        "tooltip_base": "#f2e0e0",
+        "tooltip_text": "#1a0f0f",
+        "text": "#f2e0e0",
+        "button": "#2d1b1b",
+        "button_text": "#f2e0e0",
+        "bright_text": "#ff6b6b",
+        "link": "#e05252",
+        "highlight": "#c41e3a",
+        "highlighted_text": "#ffffff",
+        "mid": "#4a2e2e"
+      },
+      "disabled_text": "#8a6a6a"
+    }
+  ]
+}
