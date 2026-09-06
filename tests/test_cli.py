@@ -49,6 +49,7 @@ def test_run_launches_the_ide_against_the_project_dir(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_ide_launch: list[Path]
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
 
     result = runner.invoke(main, ["run"])
 
@@ -60,6 +61,7 @@ def test_run_creates_project_on_first_run(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
 
     runner.invoke(main, ["run"])
 
@@ -85,6 +87,7 @@ def test_run_rechecks_existing_project_instead_of_erroring(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
 
     first = runner.invoke(main, ["run"])
     assert first.exit_code == 0
@@ -107,6 +110,7 @@ def test_run_regenerates_missing_gitignore(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
 
     first = runner.invoke(main, ["run"])
     assert first.exit_code == 0
