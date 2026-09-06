@@ -61,6 +61,11 @@ def run(project_dir: Path) -> int:
     window = MainWindow()
     window.on_theme_applied(theme)
     window.showMaximized()
+    # refresh_icon_colors() reads isMaximized() to pick win_maximize vs win_restore -- on_theme_
+    # applied() (and MainWindow.__init__ itself) both ran it before this showMaximized(), while the
+    # window was still in its pre-maximized state, so without this the icon stays wrong until the
+    # button's own toggle_maximize() happens to run once.
+    window.refresh_icon_colors()
 
     if _is_first_use(env_path):
         dialog = FirstRunDialog(window, on_theme_changed=window.on_theme_applied)

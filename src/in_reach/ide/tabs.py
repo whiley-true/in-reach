@@ -40,7 +40,8 @@ class _DragTabBar(QTabBar):
     """A QTabBar that starts a cross-pane drag (carrying the owning pane's id + tab index) once
     the mouse leaves the tab bar's own bounds while dragging a tab -- reordering *within* the bar
     is left entirely to Qt's own built-in movable-tab handling (``setMovable(True)``), so any drag
-    that stays inside the bar falls through to the base implementation untouched."""
+    that stays inside the bar falls through to the base implementation untouched. Double-clicking
+    the bar's own empty space (past the last tab) creates a new placeholder tab."""
 
     def __init__(self, pane: "TabPane") -> None:
         super().__init__(pane)
@@ -49,13 +50,17 @@ class _DragTabBar(QTabBar):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            index = self.tabAt(event.position().toPoint())
-            self._drag_start_index = index
-            if index < 0:
-                # Clicked the bar's own empty tail past the last tab, rather than any tab itself.
-                self._pane._area.new_tab_in(self._pane)
-                return
+            self._drag_start_index = self.tabAt(event.position().toPoint())
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.tabAt(event.position().toPoint()) < 0:
+            # Double-clicked the bar's own empty tail past the last tab, rather than any tab
+            # itself -- a single click there is left alone since it's also the first half of every
+            # ordinary drag/press interaction with the bar.
+            self._pane._area.new_tab_in(self._pane)
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         index = self._drag_start_index

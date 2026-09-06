@@ -69,6 +69,11 @@ MAIN_TAB_STYLE = (
     " border: none; margin: 6px 2px; padding: 4px 10px; border-radius: 4px; }"
     "QTabBar::tab:selected { background-color: palette(alternate-base); }"
     "QTabBar::tab:!selected:hover { background-color: palette(alternate-base); }"
+    # Qt's native "tear" indicator -- a jagged/torn-paper affordance drawn at the edge where
+    # scrolled-off tabs get cut, hinting there's more content that way -- default-renders as a
+    # scalloped wavy edge under Fusion. Flattening it to a plain fill removes that artifact; the
+    # scroll arrows already communicate "more tabs this way" on their own.
+    "QTabBar::tear { background: palette(base); border: none; }"
 )
 
 # Applied to the bottom panel's QTabWidget once it's inside a wrap_tab_widget() card. Unlike

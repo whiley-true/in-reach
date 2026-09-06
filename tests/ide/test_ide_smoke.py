@@ -2,12 +2,14 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QApplication, QTabWidget
 
 from in_reach.ide import app as ide_app
-from in_reach.ide import theme
+from in_reach.ide import icons, style, theme
+from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.first_run_dialog import FirstRunDialog
-from in_reach.ide.main_window import MainWindow
+from in_reach.ide.main_window import _ICON_SIZE, MainWindow
 from in_reach.ide.tabs import _INITIAL_TAB_COUNT, _MAX_H_SPLITS, _MAX_V_SPLITS
 
 
@@ -37,12 +39,93 @@ def test_every_theme_has_readable_tooltip_contrast() -> None:
         assert loaded.palette_colors["tooltip_base"] != loaded.palette_colors["tooltip_text"]
 
 
+def test_apply_theme_sets_the_app_palette_and_forces_fusion(qtbot) -> None:
+    app = QApplication.instance()
+
+    applied = theme.apply_theme(app, "Dark")
+
+    assert app.style().objectName().lower() == "fusion"
+    dark = theme.load_theme("Dark")
+    for key, color_hex in dark.palette_colors.items():
+        role = theme._PALETTE_ROLES.get(key)
+        if role is not None:
+            assert app.palette().color(role) == QColor(color_hex)
+    assert applied.name == "Dark"
+
+
+def test_build_palette_applies_disabled_text_to_disabled_roles() -> None:
+    loaded = theme.load_theme("Dark")
+    palette = loaded.build_palette()
+
+    disabled = QColor(loaded.disabled_text)
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        assert palette.color(QPalette.ColorGroup.Disabled, role) == disabled
+
+
 def test_on_theme_applied_colors_status_bar_and_icons_immediately(window: MainWindow) -> None:
     whiley = theme.load_theme("Whiley")
 
     window.on_theme_applied(whiley)
 
     assert window.status_bar.styleSheet() == f"background-color: {whiley.status_bar_color};"
+
+
+def _maximize_icon_image(window: MainWindow):
+    return window.top_bar.maximize_button.icon().pixmap(_ICON_SIZE, _ICON_SIZE).toImage()
+
+
+def _expected_icon_image(name: str, window: MainWindow):
+    color = window.palette().color(QPalette.ColorRole.WindowText).name()
+    return icons.icon(name, color=color, size=_ICON_SIZE).pixmap(_ICON_SIZE, _ICON_SIZE).toImage()
+
+
+def test_refresh_icon_colors_shows_restore_icon_when_maximized(window: MainWindow) -> None:
+    # Regression guard: refresh_icon_colors() must reflect isMaximized() correctly in both
+    # directions, not just carry over whatever icon_name each button started construction with.
+    window.showNormal()
+    QApplication.processEvents()
+    window.refresh_icon_colors()
+    assert _maximize_icon_image(window) == _expected_icon_image("win_maximize", window)
+
+    window.showMaximized()
+    QApplication.processEvents()
+    window.refresh_icon_colors()
+    assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
+
+
+def test_toggle_maximize_restores_to_half_screen_centered(window: MainWindow) -> None:
+    window.showMaximized()
+    QApplication.processEvents()
+    assert window.isMaximized() is True
+
+    window.toggle_maximize()
+    QApplication.processEvents()
+
+    assert window.isMaximized() is False
+    avail = (window.screen() or QApplication.primaryScreen()).availableGeometry()
+    # minimumSize was set from the *primary* screen at construction time, while toggle_maximize()
+    # restores relative to whichever screen the window is actually on -- on a multi-monitor setup
+    # where a secondary screen is smaller, the resize can get clamped back up by that minimum, so
+    # match toggle_maximize()'s own actual guarantee rather than assuming they're always the same.
+    assert window.width() == max(avail.width() // 2, window.minimumWidth())
+    assert window.height() == max(avail.height() // 2, window.minimumHeight())
+    # toggle_maximize() must refresh the icon itself, not rely on some other caller doing it.
+    assert _maximize_icon_image(window) == _expected_icon_image("win_maximize", window)
+
+
+def test_toggle_maximize_shows_restore_icon_when_maximizing(window: MainWindow) -> None:
+    window.showNormal()
+    QApplication.processEvents()
+
+    window.toggle_maximize()
+    QApplication.processEvents()
+
+    assert window.isMaximized() is True
+    assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
 
 
 def test_main_window_opens_on_eight_stub_tabs(window: MainWindow) -> None:
@@ -88,6 +171,26 @@ def test_settings_button_has_no_wired_action(window: MainWindow) -> None:
     # PROMPT.md: "for now settings should do nothing" -- just asserts the button exists and isn't
     # checkable/connected to anything that changes app state.
     assert window.activity_bar.settings_button.isCheckable() is False
+
+
+def test_activity_bar_starts_with_search_checked_and_settings_not_checkable(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar.search_button.isChecked() is True
+    assert bar.settings_button.isCheckable() is False
+
+
+def test_activity_bar_set_primary_sidebar_open_does_not_reemit_search_toggled(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    emitted = []
+    bar.search_toggled.connect(emitted.append)
+
+    bar.set_primary_sidebar_open(False)
+
+    assert bar.search_button.isChecked() is False
+    assert emitted == []
 
 
 def test_split_panel_can_be_split_horizontally_up_to_the_max(window: MainWindow) -> None:
@@ -190,7 +293,9 @@ def test_new_tab_in_adds_a_uniquely_labeled_placeholder_tab(window: MainWindow) 
     assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
 
 
-def test_clicking_the_tab_bars_empty_space_creates_a_new_tab(window: MainWindow, qtbot) -> None:
+def test_single_clicking_the_tab_bars_empty_space_does_not_create_a_tab(
+    window: MainWindow, qtbot
+) -> None:
     window.resize(2000, 800)
     QApplication.processEvents()
     pane = window.main_panel.panes[0]
@@ -200,6 +305,22 @@ def test_clicking_the_tab_bars_empty_space_creates_a_new_tab(window: MainWindow,
     assert tab_bar.tabAt(empty_point) == -1
 
     qtbot.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=empty_point)
+
+    assert pane.count() == before
+
+
+def test_double_clicking_the_tab_bars_empty_space_creates_a_new_tab(
+    window: MainWindow, qtbot
+) -> None:
+    window.resize(2000, 800)
+    QApplication.processEvents()
+    pane = window.main_panel.panes[0]
+    tab_bar = pane.tabBar()
+    before = pane.count()
+    empty_point = QPoint(tab_bar.width() - 5, tab_bar.height() // 2)
+    assert tab_bar.tabAt(empty_point) == -1
+
+    qtbot.mouseDClick(tab_bar, Qt.MouseButton.LeftButton, pos=empty_point)
 
     assert pane.count() == before + 1
     assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
@@ -261,6 +382,52 @@ def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindo
     assert main_panel.split_count == 0
 
 
+def test_status_bar_owns_the_bottom_edge_and_corners_when_not_maximized(window: MainWindow) -> None:
+    window.showNormal()
+    QApplication.processEvents()
+    status_bar = window.status_bar
+    status_bar.resize(300, 22)
+
+    assert status_bar._edges_at(QPoint(0, 21)) == (Qt.Edge.BottomEdge | Qt.Edge.LeftEdge)
+    assert status_bar._edges_at(QPoint(299, 21)) == (Qt.Edge.BottomEdge | Qt.Edge.RightEdge)
+    assert status_bar._edges_at(QPoint(150, 10)) == Qt.Edge(0)
+
+
+def test_status_bar_reports_no_edges_when_maximized(window: MainWindow) -> None:
+    window.showMaximized()
+    QApplication.processEvents()
+    status_bar = window.status_bar
+
+    assert status_bar._edges_at(QPoint(0, status_bar.height() - 1)) == Qt.Edge(0)
+
+
+def test_wrap_tab_widget_builds_a_named_bordered_card(qtbot) -> None:
+    tab_widget = QTabWidget()
+    qtbot.addWidget(tab_widget)
+
+    card = style.wrap_tab_widget(tab_widget)
+
+    assert card.objectName() == "tabCard"
+    assert tab_widget.parent() is card
+    assert "border-top-left-radius: 0px" not in card.styleSheet()
+
+
+def test_wrap_tab_widget_flush_top_drops_the_cards_top_border(qtbot) -> None:
+    tab_widget = QTabWidget()
+    qtbot.addWidget(tab_widget)
+
+    card = style.wrap_tab_widget(tab_widget, flush_top=True)
+
+    assert "border-top: 0px solid transparent" in card.styleSheet()
+    assert "border-top-left-radius: 0px" in card.styleSheet()
+
+
+def test_main_tab_style_flattens_the_scroll_tear_indicator() -> None:
+    # Regression guard: Qt's native "tear" indicator (drawn at the edge where scrolled-off tabs
+    # get cut) default-renders as a scalloped wavy edge under Fusion unless explicitly flattened.
+    assert "QTabBar::tear" in style.MAIN_TAB_STYLE
+
+
 def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
     notified = []
     dialog = FirstRunDialog(on_theme_changed=lambda applied: notified.append(applied.name))
@@ -306,3 +473,31 @@ def test_second_run_skips_the_first_run_dialog(
     ide_app.run(project_dir)
 
     assert shown == []
+
+
+def test_run_shows_the_restore_icon_since_it_launches_maximized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard: run() shows the window via showMaximized() directly rather than through
+    # toggle_maximize() (which refreshes the icon itself), so it must refresh the icon afterward
+    # too, or the maximize button stays stuck showing win_maximize despite already being maximized.
+    project_dir = tmp_path / ".in-reach"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text("FIRST_USE=false\n")
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+    def existing_windows() -> set[int]:
+        return {id(w) for w in QApplication.instance().topLevelWidgets() if isinstance(w, MainWindow)}
+
+    before = existing_windows()
+    ide_app.run(project_dir)
+    new_windows = [
+        w
+        for w in QApplication.instance().topLevelWidgets()
+        if isinstance(w, MainWindow) and id(w) not in before
+    ]
+
+    assert len(new_windows) == 1
+    window = new_windows[0]
+    assert window.isMaximized() is True
+    assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
