@@ -2,14 +2,14 @@
 sidebar/panel toggles, window controls), a fixed activity bar, a toggleable primary sidebar, a
 split-capable main panel above a toggleable bottom panel, and a bottom status bar. Since the window
 is frameless, edge/corner dragging (to resize) and the maximize/restore button are both
-hand-implemented here rather than provided by the OS chrome -- see ``_resize_edges()``/
+hand-implemented here rather than provided by the OS chrome -- see ``in_reach.ide.window_resize``/
 ``toggle_maximize()``.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
+from PyQt6.QtGui import QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -24,50 +24,16 @@ from PyQt6.QtWidgets import (
 from in_reach.ide import icons, style
 from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
-from in_reach.ide.quick_access import QuickAccessBar
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
+from in_reach.ide.window_resize import cursor_for_edges, resize_edges
 
 _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
 _TOPBAR_MARK_SIZE = 16
 _WINDOW_BUTTON_WIDTH = 46
 _SIDEBAR_MIN_WIDTH = 180
-_RESIZE_MARGIN = 6
-
-
-def _resize_edges(pos: QPoint, width: int, height: int, *, top: bool, bottom: bool) -> Qt.Edge:
-    """Which window edge(s) ``pos`` (widget-local) falls within :data:`_RESIZE_MARGIN` of, as an
-    OR'd :class:`Qt.Edge` flag combination suitable for :meth:`QWindow.startSystemResize`.
-    ``top``/``bottom`` gate whether that particular edge is even reachable from the calling
-    widget (the top bar only ever reports its own top/corners; the window body only bottom)."""
-    edges = Qt.Edge(0)
-    if top and pos.y() <= _RESIZE_MARGIN:
-        edges |= Qt.Edge.TopEdge
-    if bottom and pos.y() >= height - _RESIZE_MARGIN:
-        edges |= Qt.Edge.BottomEdge
-    if pos.x() <= _RESIZE_MARGIN:
-        edges |= Qt.Edge.LeftEdge
-    if pos.x() >= width - _RESIZE_MARGIN:
-        edges |= Qt.Edge.RightEdge
-    return edges
-
-
-def _cursor_for_edges(edges: Qt.Edge) -> Qt.CursorShape:
-    if (edges & Qt.Edge.TopEdge and edges & Qt.Edge.LeftEdge) or (
-        edges & Qt.Edge.BottomEdge and edges & Qt.Edge.RightEdge
-    ):
-        return Qt.CursorShape.SizeFDiagCursor
-    if (edges & Qt.Edge.TopEdge and edges & Qt.Edge.RightEdge) or (
-        edges & Qt.Edge.BottomEdge and edges & Qt.Edge.LeftEdge
-    ):
-        return Qt.CursorShape.SizeBDiagCursor
-    if edges & Qt.Edge.LeftEdge or edges & Qt.Edge.RightEdge:
-        return Qt.CursorShape.SizeHorCursor
-    if edges & Qt.Edge.TopEdge or edges & Qt.Edge.BottomEdge:
-        return Qt.CursorShape.SizeVerCursor
-    return Qt.CursorShape.ArrowCursor
 
 
 class _DropdownButton(QToolButton):
@@ -88,8 +54,9 @@ class _TopBar(QWidget):
     """The custom title-bar row: a small mark and dropdown menus on the left, sidebar/panel
     toggles and window controls on the right. Dragging empty space moves the (frameless) window;
     double-clicking it toggles maximize, same as a native title bar. Dragging within
-    :data:`_RESIZE_MARGIN` of the window's top edge (or its corners) resizes it instead, since the
-    top bar covers the entire top edge and both top corners of the frameless window."""
+    :data:`~in_reach.ide.window_resize.RESIZE_MARGIN` of the window's top edge (or its corners)
+    resizes it instead, since the top bar covers the entire top edge and both top corners of the
+    frameless window."""
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
@@ -154,7 +121,7 @@ class _TopBar(QWidget):
     def _edges_at(self, pos: QPoint) -> Qt.Edge:
         if self._window.isMaximized():
             return Qt.Edge(0)
-        return _resize_edges(pos, self.width(), self.height(), top=True, bottom=False)
+        return resize_edges(pos, self.width(), self.height(), top=True, bottom=False)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self.childAt(event.position().toPoint()) is None:
@@ -174,7 +141,7 @@ class _TopBar(QWidget):
                 self._drag_offset = QPoint(self._window.width() // 2, self.height() // 2)
             self._window.move(event.globalPosition().toPoint() - self._drag_offset)
         elif not bool(event.buttons() & Qt.MouseButton.LeftButton):
-            self.setCursor(_cursor_for_edges(self._edges_at(event.position().toPoint())))
+            self.setCursor(cursor_for_edges(self._edges_at(event.position().toPoint())))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -188,10 +155,13 @@ class _TopBar(QWidget):
 
 
 class _ResizableBody(QWidget):
-    """Fills the window below the top bar. MainWindow's own background is never directly
-    hoverable -- the top bar and this widget together tile its entire client area -- so
-    bottom/left/right edge-resize hover/press detection has to live here rather than on
-    MainWindow itself; a MainWindow-level override would simply never fire."""
+    """Fills the window between the top bar and the status bar. MainWindow's own background is
+    never directly hoverable -- the top bar, this widget, and the status bar together tile its
+    entire client area -- so left/right edge-resize hover/press detection has to live here rather
+    than on MainWindow itself; a MainWindow-level override would simply never fire. The bottom
+    edge is deliberately not this widget's to claim: it sits above the status bar, not at the
+    window's true bottom, so :class:`~in_reach.ide.status_bar.StatusBar` handles that edge (and
+    its own corners) itself instead."""
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
@@ -201,7 +171,7 @@ class _ResizableBody(QWidget):
     def _edges_at(self, pos) -> Qt.Edge:  # noqa: ANN001 -- QPoint
         if self._window.isMaximized():
             return Qt.Edge(0)
-        return _resize_edges(pos, self.width(), self.height(), top=False, bottom=True)
+        return resize_edges(pos, self.width(), self.height(), top=False, bottom=False)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self.childAt(event.position().toPoint()) is None:
@@ -215,7 +185,7 @@ class _ResizableBody(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if not bool(event.buttons() & Qt.MouseButton.LeftButton) and self.childAt(event.position().toPoint()) is None:
             edges = self._edges_at(event.position().toPoint())
-            self.setCursor(_cursor_for_edges(edges)) if edges else self.unsetCursor()
+            self.setCursor(cursor_for_edges(edges)) if edges else self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001 -- QEvent
@@ -288,12 +258,8 @@ class MainWindow(QWidget):
         self._main_splitter.setStretchFactor(1, 0)
         self._main_splitter.setSizes([700, 200])
 
-        self.status_bar = StatusBar()
+        self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
-
-        self.quick_access = QuickAccessBar(self)
-        QShortcut(QKeySequence("Ctrl+P"), self, activated=self._open_quick_access)
-        QShortcut(QKeySequence("Ctrl+Shift+P"), self, activated=self._open_quick_access_command_mode)
 
         self.activity_bar.search_toggled.connect(self._set_primary_sidebar_visible)
         self.top_bar.sidebar_toggle.toggled.connect(self._set_primary_sidebar_visible)
@@ -321,12 +287,6 @@ class MainWindow(QWidget):
         self.top_bar.sidebar_toggle.blockSignals(True)
         self.top_bar.sidebar_toggle.setChecked(visible)
         self.top_bar.sidebar_toggle.blockSignals(False)
-
-    def _open_quick_access(self) -> None:
-        self.quick_access.open()
-
-    def _open_quick_access_command_mode(self) -> None:
-        self.quick_access.open(command_mode=True)
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -373,8 +333,3 @@ class MainWindow(QWidget):
         QPalette alone: the top bar's icon colors and the status bar's accent color."""
         self.status_bar.set_color(theme.status_bar_color)
         self.refresh_icon_colors(theme.palette_colors.get("window_text"))
-
-    def resizeEvent(self, event) -> None:  # noqa: ANN001 -- QResizeEvent, matches base signature
-        super().resizeEvent(event)
-        if self.quick_access.isVisible():
-            self.quick_access.reposition()

@@ -34,41 +34,73 @@ _TAB_CARD_STYLE = (
     " background-color: palette(window); }"
 )
 
-# Applied to a QTabWidget once it's inside a wrap_tab_widget() card: the content pane fills with
-# palette(base) (rounded only on the bottom, so it reads as continuous with the tab strip above
-# it), an unselected tab matches that same shade so it reads as a real tab rather than blending
-# into the chrome, and the selected tab gets a permanent highlight background with rounded top
-# corners so it reads as raised above the row.
+# Same card, minus its top edge -- for the main panel (see wrap_tab_widget()'s ``flush_top``):
+# editor-style tabs (MAIN_TAB_STYLE) already read as flush with whatever's above them, so a border
+# line drawn across the top of the card showed up as a stray rule sitting right above the tab row.
+_TAB_CARD_STYLE_FLUSH_TOP = (
+    "QWidget#tabCard {"
+    " border-left: 1px solid palette(mid); border-right: 1px solid palette(mid);"
+    " border-bottom: 1px solid palette(mid); border-top: 0px solid transparent;"
+    " border-top-left-radius: 0px; border-top-right-radius: 0px;"
+    f" border-bottom-left-radius: {PANEL_RADIUS}px; border-bottom-right-radius: {PANEL_RADIUS}px;"
+    " background-color: palette(window); }"
+)
+
+# Applied to the main panel's QTabWidget once it's inside a wrap_tab_widget() card. Editor-style
+# tabs per vs_tabs.png: the tab strip and every unselected tab share the content pane's own
+# palette(base) fill, so an unselected tab reads as flush with the main view rather than as a
+# distinct bar -- only the selected tab stands out, via an inset palette(alternate-base) "chip"
+# (margin top/bottom shrinks it off the strip's own edges, border-radius rounds all four of its
+# corners) drawn around its icon/label rather than filling the whole tab cell.
 #
-# The strip behind the tab row (QTabWidget/QTabBar) is painted with an explicit palette(window)
+# The strip behind the tab row (QTabWidget/QTabBar) is painted with an explicit palette(base)
 # background-color rather than "transparent": a transparent QTabBar sitting over an unstyled
 # ancestor lets Qt's QSS engine fall back to its own default (light) widget fill for the
 # antialiased pixels just outside a rounded QTabBar::tab's corner arc, which showed up as light
 # pixels leaking through the tab corners in the dark/Whiley themes. Painting a real color here
-# (and setting WA_StyledBackground on the owning widget -- see TabPane/BottomPanel) removes the
-# transparent layer that caused it.
-TAB_PANEL_BORDER_STYLE = (
+# (and setting WA_StyledBackground on the owning widget -- see TabPane) removes the transparent
+# layer that caused it.
+MAIN_TAB_STYLE = (
+    "QTabWidget::pane { border: none; background-color: palette(base);"
+    f" border-bottom-left-radius: {PANEL_RADIUS}px; border-bottom-right-radius: {PANEL_RADIUS}px; }}"
+    "QTabWidget { border: none; background-color: palette(base); }"
+    "QTabBar { background-color: palette(base); }"
+    "QTabBar::tab { background-color: transparent; color: palette(window-text);"
+    " border: none; margin: 6px 2px; padding: 4px 10px; border-radius: 4px; }"
+    "QTabBar::tab:selected { background-color: palette(alternate-base); }"
+    "QTabBar::tab:!selected:hover { background-color: palette(alternate-base); }"
+)
+
+# Applied to the bottom panel's QTabWidget once it's inside a wrap_tab_widget() card. Unlike
+# MAIN_TAB_STYLE above, these keep an actual pill-shaped tab: every tab (selected or not) gets
+# rounded top corners from the shared base ``::tab`` rule below, and the ``:selected`` rule only
+# overrides background/border on top of that -- so an unselected tab reads as a real (if
+# unhighlighted) tab rather than a flat square, and the active one reads as raised above the row.
+BOTTOM_TAB_STYLE = (
     "QTabWidget::pane { border: none; background-color: palette(base);"
     f" border-bottom-left-radius: {PANEL_RADIUS}px; border-bottom-right-radius: {PANEL_RADIUS}px; }}"
     "QTabWidget { border: none; background-color: palette(window); }"
     "QTabBar { background-color: palette(window); }"
     "QTabBar::tab { background-color: palette(base); color: palette(window-text);"
-    " border: 1px solid transparent; padding: 5px 14px; margin-right: 2px; }"
+    " border: 1px solid transparent; padding: 5px 14px; margin-right: 2px;"
+    f" border-top-left-radius: {PANEL_RADIUS}px; border-top-right-radius: {PANEL_RADIUS}px; }}"
     "QTabBar::tab:first { margin-left: 4px; }"
     "QTabBar::tab:selected { background-color: palette(highlight); color: palette(window-text);"
-    " border: 1px solid palette(mid); border-bottom: none;"
-    f" border-top-left-radius: {PANEL_RADIUS}px; border-top-right-radius: {PANEL_RADIUS}px; }}"
+    " border: 1px solid palette(mid); border-bottom: none; }"
     "QTabBar::tab:!selected:hover { background-color: palette(alternate-base); }"
 )
 
 
-def wrap_tab_widget(tab_widget: QTabWidget) -> QWidget:
+def wrap_tab_widget(tab_widget: QTabWidget, *, flush_top: bool = False) -> QWidget:
     """Wraps ``tab_widget`` in a rounded, bordered "card" that encloses its tab strip too, not just
     its content pane -- ``QTabWidget``'s own ``::pane`` subcontrol only ever covers the area below
     the tab row, so a border set there alone would leave the tab strip (and any empty space beside
-    a short row of tabs) outside the box. ``tab_widget`` should already carry
-    :data:`TAB_PANEL_BORDER_STYLE` (borderless/transparent) before being wrapped here -- this
-    function only draws the outer box.
+    a short row of tabs) outside the box. ``tab_widget`` should already carry :data:`MAIN_TAB_STYLE`
+    or :data:`BOTTOM_TAB_STYLE` (borderless/transparent) before being wrapped here -- this function
+    only draws the outer box.
+
+    Pass ``flush_top=True`` (the main panel's own tab panes) to drop the card's top border/corner
+    rounding -- see :data:`_TAB_CARD_STYLE_FLUSH_TOP`.
     """
     card = QWidget()
     card.setObjectName("tabCard")
@@ -78,7 +110,7 @@ def wrap_tab_widget(tab_widget: QTabWidget) -> QWidget:
     # antialiased fringe of that undefined color right on the rounded corners themselves --
     # visible as stray light pixels there regardless of the active theme.
     card.setAutoFillBackground(True)
-    card.setStyleSheet(_TAB_CARD_STYLE)
+    card.setStyleSheet(_TAB_CARD_STYLE_FLUSH_TOP if flush_top else _TAB_CARD_STYLE)
     layout = QVBoxLayout(card)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)

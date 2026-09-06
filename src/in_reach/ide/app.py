@@ -20,6 +20,24 @@ from in_reach.ide.main_window import MainWindow
 
 _ENV_NAME = ".env"
 _FIRST_USE_KEY = "FIRST_USE"
+_WINDOWS_APP_USER_MODEL_ID = "InReach.IDE"
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Without this, Windows identifies the taskbar entry by the launching executable (the
+    console-script shim under ``Scripts/``, or ``python.exe`` itself) rather than by this app, and
+    falls back to that executable's own embedded icon -- a generic Python icon -- for the taskbar
+    button instead of the window icon set below. Must run before the window (ideally before
+    ``QApplication``) is created; irrelevant on non-Windows platforms.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_WINDOWS_APP_USER_MODEL_ID)
+    except (AttributeError, OSError):
+        pass
 
 
 def _is_first_use(env_path: Path) -> bool:
@@ -35,6 +53,7 @@ def run(project_dir: Path) -> int:
     """
     env_path = project_dir / _ENV_NAME
 
+    _set_windows_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(icons.app_icon())
     theme = theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)

@@ -8,7 +8,7 @@ other, regardless of which group they belong to.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QMimeData, Qt
+from PyQt6.QtCore import QMimeData, QSize, Qt
 from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -49,7 +49,12 @@ class _DragTabBar(QTabBar):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_index = self.tabAt(event.position().toPoint())
+            index = self.tabAt(event.position().toPoint())
+            self._drag_start_index = index
+            if index < 0:
+                # Clicked the bar's own empty tail past the last tab, rather than any tab itself.
+                self._pane._area.new_tab_in(self._pane)
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -94,16 +99,40 @@ class TabPane(QTabWidget):
         self.setAcceptDrops(True)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
-        self.setStyleSheet(style.TAB_PANEL_BORDER_STYLE)
+        # Neither of these is styling per se -- they suppress native chrome that QTabBar::tab's own
+        # QSS (border: none included) can't reach, since it's painted by QTabBar itself rather than
+        # per-tab: documentMode drops the native pane/tab-bar frame, and drawBase specifically drops
+        # the base line Fusion otherwise still paints across the top of the tab row regardless.
+        self.setDocumentMode(True)
+        self.tabBar().setDrawBase(False)
+        self.setStyleSheet(style.MAIN_TAB_STYLE)
+        # Whenever the tabs don't fit their natural size -- too many for the width, whether that
+        # shows up as scroll arrows or as elided/shrunk tab labels -- QTabBar recomputes a *shorter*
+        # preferred row height from its own overflow-handling metrics instead of our tabs' actual
+        # padding/margin box model, and the corner widget's slot (which QTabBar positions directly,
+        # bypassing its own setFixedSize) gets forced to match that shorter height, squashing the
+        # split buttons. Pinning the tab bar to its natural (tabs-fit-comfortably) height keeps the
+        # row -- and the corner slot -- from ever shrinking, in every overflow state.
+        bar_height = self.fontMetrics().height() + 20
+        self.tabBar().setFixedHeight(bar_height)
+        # Sized to match the tab bar's own scroll-arrow buttons (which fill the full row height)
+        # rather than some arbitrary smaller constant, so the two button pairs read as the same
+        # weight of control instead of the split buttons looking like a shrunken afterthought.
+        button_size = bar_height
+        icon_size = max(button_size - 14, 16)
 
         self.vsplit_button = QToolButton()
-        self.vsplit_button.setIcon(icons.icon("split_vertical", color=_SPLIT_ICON_COLOR, size=16))
+        self.vsplit_button.setIcon(icons.icon("split_vertical", color=_SPLIT_ICON_COLOR, size=icon_size))
+        self.vsplit_button.setIconSize(QSize(icon_size, icon_size))
+        self.vsplit_button.setFixedSize(button_size, button_size)
         self.vsplit_button.setToolTip("Split panel down")
         self.vsplit_button.setAutoRaise(True)
         self.vsplit_button.clicked.connect(lambda: self._area.vsplit_from(self))
 
         self.split_button = QToolButton()
-        self.split_button.setIcon(icons.icon("split", color=_SPLIT_ICON_COLOR, size=16))
+        self.split_button.setIcon(icons.icon("split", color=_SPLIT_ICON_COLOR, size=icon_size))
+        self.split_button.setIconSize(QSize(icon_size, icon_size))
+        self.split_button.setFixedSize(button_size, button_size)
         self.split_button.setToolTip("Split panel right")
         self.split_button.setAutoRaise(True)
         self.split_button.clicked.connect(lambda: self._area.split_from(self))
@@ -185,7 +214,7 @@ class _PaneGroup(QWidget):
 
     def add_pane(self, pane: TabPane) -> None:
         pane.group = self
-        pane.card = style.wrap_tab_widget(pane)
+        pane.card = style.wrap_tab_widget(pane, flush_top=True)
         self.splitter.addWidget(pane.card)
         self.panes.append(pane)
         self._equalize()
@@ -229,6 +258,7 @@ class MainPanelArea(QWidget):
             first_pane.addTab(_stub_tab_content(f"Tab {n}"), f"Tab {n}")
         first_group.add_pane(first_pane)
         self._add_group(first_group)
+        self._next_tab_number = _INITIAL_TAB_COUNT + 1
 
     @property
     def panes(self) -> list[TabPane]:
@@ -297,6 +327,15 @@ class MainPanelArea(QWidget):
         self._duplicate_current_tab(source, new_pane)
         group.add_pane(new_pane)
         self._update_split_buttons()
+
+    def new_tab_in(self, pane: TabPane) -> None:
+        """Adds a fresh placeholder tab to ``pane`` -- called when a click lands on the tab bar's
+        own empty space rather than any existing tab. Stub content only, same as the initial tabs;
+        the shared counter keeps labels unique across every pane rather than restarting per-pane."""
+        label = f"Tab {self._next_tab_number}"
+        self._next_tab_number += 1
+        new_index = pane.addTab(_stub_tab_content(label), label)
+        pane.setCurrentIndex(new_index)
 
     def find_pane(self, pane_id: int) -> TabPane | None:
         for pane in self.panes:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.ide import app as ide_app
@@ -176,6 +177,51 @@ def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainW
 
     assert new_pane not in main_panel.panes
     assert main_panel.split_count == 0
+
+
+def test_new_tab_in_adds_a_uniquely_labeled_placeholder_tab(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    before = pane.count()
+
+    main_panel.new_tab_in(pane)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
+
+
+def test_clicking_the_tab_bars_empty_space_creates_a_new_tab(window: MainWindow, qtbot) -> None:
+    window.resize(2000, 800)
+    QApplication.processEvents()
+    pane = window.main_panel.panes[0]
+    tab_bar = pane.tabBar()
+    before = pane.count()
+    empty_point = QPoint(tab_bar.width() - 5, tab_bar.height() // 2)
+    assert tab_bar.tabAt(empty_point) == -1
+
+    qtbot.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=empty_point)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
+
+
+def test_tab_bar_height_and_split_buttons_survive_overflow(window: MainWindow) -> None:
+    # Regression guard: QTabBar recomputes a shorter row height once tabs stop fitting their
+    # natural size (scroll arrows *or* elided labels), and the corner widget holding the split
+    # buttons gets forced to match -- squashing them. The tab bar height must stay fixed regardless.
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    natural_height = pane.tabBar().height()
+    button_size = pane.vsplit_button.height()
+    for _ in range(10):
+        main_panel.new_tab_in(pane)
+
+    window.resize(350, 600)
+    QApplication.processEvents()
+
+    assert pane.tabBar().height() == natural_height
+    assert (pane.vsplit_button.width(), pane.vsplit_button.height()) == (button_size, button_size)
+    assert (pane.split_button.width(), pane.split_button.height()) == (button_size, button_size)
 
 
 def test_panel_splitters_refuse_to_collapse_children(window: MainWindow) -> None:
