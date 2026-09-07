@@ -8,6 +8,8 @@ hand-implemented here rather than provided by the OS chrome -- see ``in_reach.id
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
@@ -16,13 +18,14 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from in_reach.ide import icons, style
-from in_reach.ide.activity_bar import ActivityBar
+from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
@@ -196,8 +199,10 @@ class _ResizableBody(QWidget):
 
 
 class MainWindow(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, root_dir: Path | None = None) -> None:
         super().__init__()
+        self.root_dir = root_dir or Path.cwd()
+        self._active_sidebar_view = DEFAULT_VIEW
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
@@ -248,7 +253,9 @@ class MainWindow(QWidget):
         self._side_splitter.setStretchFactor(1, 1)
         self._side_splitter.setSizes([220, 1000])
 
-        self.main_panel = MainPanelArea()
+        self.main_panel = MainPanelArea(
+            root_dir=self.root_dir, reveal_in_explorer=self._reveal_in_explorer_view
+        )
         self._main_splitter.addWidget(self.main_panel)
 
         self.bottom_panel = BottomPanel()
@@ -261,8 +268,9 @@ class MainWindow(QWidget):
         self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
 
-        self.activity_bar.search_toggled.connect(self._set_primary_sidebar_visible)
-        self.top_bar.sidebar_toggle.toggled.connect(self._set_primary_sidebar_visible)
+        self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
+        self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
+        self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
         self.top_bar.panel_toggle.toggled.connect(self._bottom_panel_card.setVisible)
         self.top_bar.minimize_button.clicked.connect(self.showMinimized)
         self.top_bar.maximize_button.clicked.connect(self.toggle_maximize)
@@ -276,17 +284,53 @@ class MainWindow(QWidget):
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.addWidget(QLabel("Search"))
-        layout.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._sidebar_pages = {
+            "explorer": self._build_sidebar_page("Explorer"),
+            "search": self._build_sidebar_page("Search"),
+        }
+        self._sidebar_stack = QStackedWidget()
+        for page in self._sidebar_pages.values():
+            self._sidebar_stack.addWidget(page)
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages[DEFAULT_VIEW])
+        layout.addWidget(self._sidebar_stack)
         return sidebar
 
-    def _set_primary_sidebar_visible(self, visible: bool) -> None:
+    def _build_sidebar_page(self, label: str) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(12, 12, 12, 12)
+        page_layout.addWidget(QLabel(label))
+        page_layout.addStretch(1)
+        return page
+
+    def _show_sidebar(self, visible: bool) -> None:
         self.primary_sidebar.setVisible(visible)
-        self.activity_bar.set_primary_sidebar_open(visible)
         self.top_bar.sidebar_toggle.blockSignals(True)
         self.top_bar.sidebar_toggle.setChecked(visible)
         self.top_bar.sidebar_toggle.blockSignals(False)
+
+    def _on_sidebar_view_selected(self, view: str) -> None:
+        self._active_sidebar_view = view
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages[view])
+        self._show_sidebar(True)
+
+    def _on_sidebar_view_collapsed(self) -> None:
+        self._show_sidebar(False)
+
+    def _on_sidebar_toggle_changed(self, visible: bool) -> None:
+        self._show_sidebar(visible)
+        self.activity_bar.set_active_view(self._active_sidebar_view if visible else None)
+
+    def _reveal_in_explorer_view(self) -> None:
+        """Switches the primary sidebar to the Explorer view and ensures it's open -- the one
+        honest effect "Reveal in Explorer View" (a tab's context menu) can have today, since the
+        Explorer view itself has no file tree yet to select anything within."""
+        self._active_sidebar_view = "explorer"
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages["explorer"])
+        self._show_sidebar(True)
+        self.activity_bar.set_active_view("explorer")
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():

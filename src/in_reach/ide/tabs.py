@@ -1,18 +1,35 @@
-"""The main tab panel: a stub 8-tab view that can be split horizontally (max 2 splits -> 3
-side-by-side pane-groups) and, independently, each pane-group can be split vertically once (max 2
-stacked panes per group) -- so the area tops out at 3 x 2 = 6 panes. Splitting duplicates the
-source pane's current tab into the new pane (VSCode's "split editor" behavior) rather than leaving
-it empty. Tabs are closable and reorderable within a pane, and draggable from any pane into any
-other, regardless of which group they belong to.
+"""The main tab panel: a split-capable tab view (max 2 splits -> 3 side-by-side pane-groups) and,
+independently, each pane-group can be split vertically once (max 2 stacked panes per group) -- so
+the area tops out at 3 x 2 = 6 panes. Splitting duplicates the source pane's current tab into the
+new pane (VSCode's "split editor" behavior) rather than leaving it empty -- for a text-editor tab,
+the duplicate shares the same underlying QTextDocument, so both views edit the same buffer. Tabs
+are closable and reorderable within a pane, and draggable from any pane into any other, regardless
+of which group they belong to.
+
+The panel opens on a single Welcome tab. Double-clicking a tab bar's own empty space creates a new
+"Untitled-N.txt" text-editor tab. Every tab tracks unsaved changes (the close button becomes a dot
+while dirty; closing a dirty tab prompts Save/Don't Save/Cancel, with Save falling back to a native
+Save As dialog the first time), and can be right-clicked for a VSCode-style context menu (close
+variants, copy/reveal path actions -- only enabled once a tab has a real file behind it -- pin, and
+split).
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QMimeData, QSize, Qt
+import subprocess
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Callable
+
+from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt
 from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent
 from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
     QHBoxLayout,
-    QLabel,
+    QMenu,
+    QMessageBox,
     QSplitter,
     QTabBar,
     QTabWidget,
@@ -22,18 +39,46 @@ from PyQt6.QtWidgets import (
 )
 
 from in_reach.ide import icons, style
+from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.welcome import WelcomeTab
 
 _MIME_TYPE = "application/x-inreach-tab"
 _MAX_H_SPLITS = 2  # -> up to 3 pane-groups side by side
 _MAX_V_SPLITS = 1  # -> up to 2 panes stacked within one group
-_INITIAL_TAB_COUNT = 8
 _SPLIT_ICON_COLOR = "#808080"
+_TAB_CLOSE_ICON_COLOR = "#808080"
+_TAB_CLOSE_ICON_SIZE = 14
 
 
-def _stub_tab_content(label: str) -> QWidget:
-    widget = QLabel(f"{label} content")
-    widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    return widget
+class _SaveChoice(Enum):
+    SAVE = "save"
+    DISCARD = "discard"
+    CANCEL = "cancel"
+
+
+@dataclass
+class _TabState:
+    path: Path | None = None
+    pinned: bool = False
+
+
+def _is_modified(widget: QWidget | None) -> bool:
+    return isinstance(widget, TextEditorWidget) and widget.document().isModified()
+
+
+def _on_editor_modified(widget: TextEditorWidget, modified: bool) -> None:
+    pane = getattr(widget, "_owner_pane", None)
+    if pane is None:
+        return
+    index = pane.indexOf(widget)
+    if index >= 0:
+        pane._update_close_icon(index)
+
+
+def _connect_modification_tracking(editor: TextEditorWidget) -> None:
+    editor.document().modificationChanged.connect(
+        lambda modified, w=editor: _on_editor_modified(w, modified)
+    )
 
 
 class _DragTabBar(QTabBar):
@@ -97,10 +142,13 @@ class TabPane(QTabWidget):
         self._area = area
         self.group: "_PaneGroup | None" = None  # set by _PaneGroup.add_pane()
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
+        self._tab_state: dict[QWidget, _TabState] = {}
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
         self.setTabsClosable(True)
-        self.tabCloseRequested.connect(self._close_tab)
+        self.tabCloseRequested.connect(self._maybe_close)
+        self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
         self.setAcceptDrops(True)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
@@ -150,12 +198,221 @@ class TabPane(QTabWidget):
         corner_layout.addWidget(self.split_button)
         self.setCornerWidget(corner, Qt.Corner.TopRightCorner)
 
+    # -- tab tracking (dirty state / file path / pinned) -----------------------------------
+
+    def _track_tab(self, index: int, widget: QWidget, state: "_TabState | None" = None) -> None:
+        self._tab_state[widget] = state or _TabState()
+        widget._owner_pane = self  # read back dynamically by _on_editor_modified
+        self._update_close_icon(index)
+
+    def _tab_state_for(self, widget: QWidget) -> _TabState:
+        return self._tab_state.setdefault(widget, _TabState())
+
+    def _update_close_icon(self, index: int) -> None:
+        button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if button is None:
+            return
+        name = "tab_dirty" if _is_modified(self.widget(index)) else "win_close"
+        button.setIcon(icons.icon(name, color=_TAB_CLOSE_ICON_COLOR, size=_TAB_CLOSE_ICON_SIZE))
+
+    # -- closing, with unsaved-changes handling ---------------------------------------------
+
     def _close_tab(self, index: int) -> None:
         widget = self.widget(index)
         self.removeTab(index)
         if widget is not None:
+            self._tab_state.pop(widget, None)
             widget.deleteLater()
         self._area.on_pane_emptied(self)
+
+    def _maybe_close(self, index: int) -> bool:
+        """Closes the tab at ``index``, prompting to save first if it's dirty. Returns whether it
+        ended up closed (``False`` if the user cancelled, or a Save As was itself cancelled)."""
+        widget = self.widget(index)
+        if widget is None:
+            return False
+        if _is_modified(widget):
+            choice = self._ask_save_choice(self.tabText(index))
+            if choice == _SaveChoice.CANCEL:
+                return False
+            if choice == _SaveChoice.SAVE and not self._save_tab(index):
+                return False
+        self._close_tab(index)
+        return True
+
+    def _ask_save_choice(self, label: str) -> _SaveChoice:
+        """Kept as its own method (rather than inlined) purely so tests can monkeypatch it instead
+        of driving a real modal QMessageBox."""
+        box = QMessageBox(self)
+        box.setWindowTitle("in-reach")
+        box.setText(f"Do you want to save the changes you made to {label}?")
+        save_button = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Don't Save", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_button)
+        box.exec()
+        role = box.buttonRole(box.clickedButton())
+        if role == QMessageBox.ButtonRole.AcceptRole:
+            return _SaveChoice.SAVE
+        if role == QMessageBox.ButtonRole.DestructiveRole:
+            return _SaveChoice.DISCARD
+        return _SaveChoice.CANCEL
+
+    def _ask_save_path(self, default_dir: Path, suggested_name: str) -> Path | None:
+        """Also its own method for the same test-seam reason as ``_ask_save_choice``."""
+        chosen, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Save As", str(default_dir / suggested_name)
+        )
+        return Path(chosen) if chosen else None
+
+    def _save_tab(self, index: int) -> bool:
+        widget = self.widget(index)
+        state = self._tab_state_for(widget)
+        path = state.path
+        if path is None:
+            path = self._ask_save_path(self._area.root_dir, self.tabText(index))
+            if path is None:
+                return False
+        try:
+            path.write_text(widget.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't save {path.name}:\n{exc}")
+            return False
+        state.path = path
+        self.setTabText(index, path.name)
+        widget.document().setModified(False)
+        return True
+
+    def _close_many(self, widgets: list[QWidget]) -> None:
+        for widget in widgets:
+            index = self.indexOf(widget)
+            if index >= 0:
+                self._maybe_close(index)
+
+    def _close_others(self, keep_index: int) -> None:
+        keep_widget = self.widget(keep_index)
+        targets = [
+            self.widget(i)
+            for i in range(self.count())
+            if self.widget(i) is not keep_widget and not self._tab_state_for(self.widget(i)).pinned
+        ]
+        self._close_many(targets)
+
+    def _close_to_the_right(self, index: int) -> None:
+        targets = [
+            self.widget(i)
+            for i in range(index + 1, self.count())
+            if not self._tab_state_for(self.widget(i)).pinned
+        ]
+        self._close_many(targets)
+
+    def _close_saved(self) -> None:
+        targets = [
+            self.widget(i)
+            for i in range(self.count())
+            if not _is_modified(self.widget(i)) and not self._tab_state_for(self.widget(i)).pinned
+        ]
+        self._close_many(targets)
+
+    def _close_all(self) -> None:
+        targets = [
+            self.widget(i) for i in range(self.count()) if not self._tab_state_for(self.widget(i)).pinned
+        ]
+        self._close_many(targets)
+
+    # -- pin ---------------------------------------------------------------------------------
+
+    def _toggle_pin(self, index: int) -> None:
+        widget = self.widget(index)
+        state = self._tab_state_for(widget)
+        state.pinned = not state.pinned
+        if state.pinned:
+            pinned_before = sum(
+                1
+                for i in range(self.count())
+                if self.widget(i) is not widget and self._tab_state_for(self.widget(i)).pinned
+            )
+            current_index = self.indexOf(widget)
+            if current_index != pinned_before:
+                self.tabBar().moveTab(current_index, pinned_before)
+
+    # -- copy/reveal path actions -------------------------------------------------------------
+
+    def _copy_path(self, widget: QWidget) -> None:
+        path = self._tab_state_for(widget).path
+        if path is not None:
+            QApplication.clipboard().setText(str(path))
+
+    def _copy_relative_path(self, widget: QWidget) -> None:
+        path = self._tab_state_for(widget).path
+        if path is None:
+            return
+        try:
+            relative = path.relative_to(self._area.root_dir)
+        except ValueError:
+            relative = path
+        QApplication.clipboard().setText(str(relative))
+
+    def _reveal_in_os_explorer(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            subprocess.run(["explorer", "/select,", str(path)], check=False)
+        except OSError:
+            pass
+
+    def _reveal_in_explorer_view(self) -> None:
+        if self._area.reveal_in_explorer is not None:
+            self._area.reveal_in_explorer()
+
+    # -- split (from the tab context menu, acting on a specific -- not necessarily active -- tab)
+
+    def _split_tab(self, index: int, *, vertical: bool) -> None:
+        self.setCurrentIndex(index)
+        if vertical:
+            self._area.vsplit_from(self)
+        else:
+            self._area.split_from(self)
+
+    # -- context menu --------------------------------------------------------------------------
+
+    def _show_tab_context_menu(self, pos: QPoint) -> None:
+        index = self.tabBar().tabAt(pos)
+        if index < 0:
+            return
+        widget = self.widget(index)
+        state = self._tab_state_for(widget)
+        has_path = state.path is not None
+
+        menu = QMenu(self)
+        menu.addAction("Close", lambda: self._maybe_close(index))
+        menu.addAction("Close Others", lambda: self._close_others(index))
+        menu.addAction("Close to the Right", lambda: self._close_to_the_right(index))
+        menu.addAction("Close Saved", self._close_saved)
+        menu.addAction("Close All", self._close_all)
+        menu.addSeparator()
+
+        menu.addAction("Copy Path", lambda: self._copy_path(widget)).setEnabled(has_path)
+        menu.addAction("Copy Relative Path", lambda: self._copy_relative_path(widget)).setEnabled(has_path)
+        menu.addSeparator()
+
+        menu.addAction(
+            "Reveal in File Explorer", lambda: self._reveal_in_os_explorer(state.path)
+        ).setEnabled(has_path)
+        menu.addAction("Reveal in Explorer View", self._reveal_in_explorer_view).setEnabled(has_path)
+        menu.addSeparator()
+
+        menu.addAction("Unpin" if state.pinned else "Pin", lambda: self._toggle_pin(index))
+        menu.addSeparator()
+
+        can_hsplit = self._area.split_count < _MAX_H_SPLITS
+        can_vsplit = self.group is None or self.group.vsplit_count < _MAX_V_SPLITS
+        menu.addAction("Split Right", lambda: self._split_tab(index, vertical=False)).setEnabled(can_hsplit)
+        menu.addAction("Split Down", lambda: self._split_tab(index, vertical=True)).setEnabled(can_vsplit)
+
+        menu.exec(self.tabBar().mapToGlobal(pos))
+
+    # -- drag/drop between panes ---------------------------------------------------------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasFormat(_MIME_TYPE):
@@ -186,8 +443,10 @@ class TabPane(QTabWidget):
 
         label = source.tabText(index)
         content = source.widget(index)
+        state = source._tab_state.pop(content, _TabState())
         source.removeTab(index)
         new_index = self.addTab(content, label)
+        self._track_tab(new_index, content, state=state)
         self.setCurrentIndex(new_index)
         self._area.on_pane_emptied(source)
         event.acceptProposedAction()
@@ -243,8 +502,16 @@ class MainPanelArea(QWidget):
     """Holds one or more :class:`_PaneGroup` instances side by side in a horizontal splitter, up
     to :data:`_MAX_H_SPLITS` horizontal splits, each in turn holding up to one vertical split."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        root_dir: Path | None = None,
+        reveal_in_explorer: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
+        self.root_dir = root_dir or Path.cwd()
+        self.reveal_in_explorer = reveal_in_explorer
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -259,11 +526,12 @@ class MainPanelArea(QWidget):
         self.groups: list[_PaneGroup] = []
         first_group = self._new_group()
         first_pane = self._new_pane()
-        for n in range(1, _INITIAL_TAB_COUNT + 1):
-            first_pane.addTab(_stub_tab_content(f"Tab {n}"), f"Tab {n}")
+        welcome = WelcomeTab()
+        welcome_index = first_pane.addTab(welcome, "Welcome")
+        first_pane._track_tab(welcome_index, welcome)
         first_group.add_pane(first_pane)
         self._add_group(first_group)
-        self._next_tab_number = _INITIAL_TAB_COUNT + 1
+        self._next_tab_number = 1
 
     @property
     def panes(self) -> list[TabPane]:
@@ -303,13 +571,25 @@ class MainPanelArea(QWidget):
 
     def _duplicate_current_tab(self, source: TabPane, target: TabPane) -> None:
         """Splitting a pane duplicates its current tab into the new pane, rather than leaving the
-        new pane empty -- matching e.g. VSCode's "split editor" behavior. Stub content only, so
-        "duplicate" just means a fresh stub widget carrying the same label."""
+        new pane empty -- matching e.g. VSCode's "split editor" behavior. A text-editor tab's
+        duplicate shares the same QTextDocument as the source, so both views edit the same buffer
+        and stay in sync (including dirty state) for free."""
         index = source.currentIndex()
         if index < 0:
             return
         label = source.tabText(index)
-        target.addTab(_stub_tab_content(label), label)
+        widget = source.widget(index)
+        source_state = source._tab_state_for(widget)
+
+        if isinstance(widget, TextEditorWidget):
+            duplicate: QWidget = TextEditorWidget()
+            duplicate.setDocument(widget.document())
+            _connect_modification_tracking(duplicate)
+        else:
+            duplicate = WelcomeTab()
+
+        new_index = target.addTab(duplicate, label)
+        target._track_tab(new_index, duplicate, state=_TabState(path=source_state.path))
 
     def split_from(self, source: TabPane) -> None:
         """Horizontal split: adds a new pane-group beside ``source``'s own group, seeded with a
@@ -334,12 +614,15 @@ class MainPanelArea(QWidget):
         self._update_split_buttons()
 
     def new_tab_in(self, pane: TabPane) -> None:
-        """Adds a fresh placeholder tab to ``pane`` -- called when a click lands on the tab bar's
-        own empty space rather than any existing tab. Stub content only, same as the initial tabs;
-        the shared counter keeps labels unique across every pane rather than restarting per-pane."""
-        label = f"Tab {self._next_tab_number}"
+        """Adds a fresh "Untitled-N.txt" text-editor tab to ``pane`` -- called when a click lands
+        on the tab bar's own empty space rather than any existing tab. The shared counter keeps
+        labels unique across every pane rather than restarting per-pane."""
+        label = f"Untitled-{self._next_tab_number}.txt"
         self._next_tab_number += 1
-        new_index = pane.addTab(_stub_tab_content(label), label)
+        editor = TextEditorWidget()
+        _connect_modification_tracking(editor)
+        new_index = pane.addTab(editor, label)
+        pane._track_tab(new_index, editor)
         pane.setCurrentIndex(new_index)
 
     def find_pane(self, pane_id: int) -> TabPane | None:

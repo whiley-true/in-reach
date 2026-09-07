@@ -1,5 +1,7 @@
-"""The far-left activity bar: a magnifying-glass icon at the top (toggles the primary sidebar) and
-a settings cog pinned at the bottom (a no-op for now).
+"""The far-left activity bar: an Explorer icon and a Search icon at the top -- exactly one of
+their views is ever active, switching the primary sidebar's content, VSCode-style: clicking the
+already-active one collapses the sidebar instead of switching -- and a settings cog pinned at the
+bottom (a no-op for now).
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ _BACKGROUND_COLOR = "#2c2c2c"
 _ICON_COLOR = "#cccccc"
 _BORDER_COLOR = "#3f3f3f"
 
+DEFAULT_VIEW = "explorer"
+
 
 def _bar_button(
     icon_name: str, tooltip: str, *, checkable: bool = False, checked: bool = False
@@ -40,7 +44,11 @@ def _bar_button(
 class ActivityBar(QWidget):
     """Fixed-width vertical bar on the far left of the IDE window."""
 
-    search_toggled = pyqtSignal(bool)
+    # Emitted with "explorer" or "search" when a view button switches the sidebar to that view
+    # (opening it if it was closed). Emitted with no args when the already-active view's button is
+    # clicked again, requesting the sidebar collapse instead.
+    view_selected = pyqtSignal(str)
+    view_collapsed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -57,13 +65,23 @@ class ActivityBar(QWidget):
         layout.setContentsMargins(0, 8, 0, 8)
         layout.setSpacing(4)
 
-        # Checked by default -- the primary sidebar starts open, and this button's checked state
-        # mirrors that (see MainWindow._set_primary_sidebar_visible()).
-        self.search_button = _bar_button(
-            "search", "Search (toggle primary sidebar)", checkable=True, checked=True
+        self._active_view: str | None = DEFAULT_VIEW
+
+        # Checked by default -- the primary sidebar starts open on the Explorer view, matching
+        # vscode's own default.
+        self.explorer_button = _bar_button(
+            "explorer", "Explorer (toggle primary sidebar)", checkable=True, checked=True
         )
-        self.search_button.toggled.connect(self.search_toggled)
+        self.explorer_button.clicked.connect(lambda: self._handle_click("explorer"))
+        layout.addWidget(self.explorer_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.search_button = _bar_button(
+            "search", "Search (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.search_button.clicked.connect(lambda: self._handle_click("search"))
         layout.addWidget(self.search_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._buttons = {"explorer": self.explorer_button, "search": self.search_button}
 
         layout.addStretch(1)
 
@@ -72,8 +90,29 @@ class ActivityBar(QWidget):
         self.settings_button = _bar_button("settings", "Settings")
         layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-    def set_primary_sidebar_open(self, open_: bool) -> None:
-        """Syncs the search button's checked state without re-emitting search_toggled."""
-        self.search_button.blockSignals(True)
-        self.search_button.setChecked(open_)
-        self.search_button.blockSignals(False)
+    def _handle_click(self, view: str) -> None:
+        if self._active_view == view:
+            self._active_view = None
+            self._sync_buttons()
+            self.view_collapsed.emit()
+        else:
+            self._active_view = view
+            self._sync_buttons()
+            self.view_selected.emit(view)
+
+    def _sync_buttons(self) -> None:
+        for name, button in self._buttons.items():
+            button.blockSignals(True)
+            button.setChecked(name == self._active_view)
+            button.blockSignals(False)
+
+    def set_active_view(self, view: str | None) -> None:
+        """Syncs which view button (if any) reads as active without re-emitting a signal --
+        called by MainWindow when the sidebar's visibility changes via some other control (the top
+        bar's own sidebar toggle)."""
+        self._active_view = view
+        self._sync_buttons()
+
+    @property
+    def active_view(self) -> str | None:
+        return self._active_view

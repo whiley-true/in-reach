@@ -58,7 +58,7 @@ def run(project_dir: Path) -> int:
     app.setWindowIcon(icons.app_icon())
     theme = theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)
 
-    window = MainWindow()
+    window = MainWindow(root_dir=project_dir.parent)
     window.on_theme_applied(theme)
     window.showMaximized()
     # refresh_icon_colors() reads isMaximized() to pick win_maximize vs win_restore -- on_theme_

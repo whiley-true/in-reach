@@ -8,9 +8,11 @@ from PyQt6.QtWidgets import QApplication, QTabWidget
 from in_reach.ide import app as ide_app
 from in_reach.ide import icons, style, theme
 from in_reach.ide.activity_bar import ActivityBar
+from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import _ICON_SIZE, MainWindow
-from in_reach.ide.tabs import _INITIAL_TAB_COUNT, _MAX_H_SPLITS, _MAX_V_SPLITS
+from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
+from in_reach.ide.welcome import WelcomeTab
 
 
 @pytest.fixture
@@ -128,11 +130,11 @@ def test_toggle_maximize_shows_restore_icon_when_maximizing(window: MainWindow) 
     assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
 
 
-def test_main_window_opens_on_eight_stub_tabs(window: MainWindow) -> None:
+def test_main_window_opens_on_the_welcome_tab(window: MainWindow) -> None:
     pane = window.main_panel.panes[0]
-    assert [pane.tabText(i) for i in range(pane.count())] == [
-        f"Tab {n}" for n in range(1, _INITIAL_TAB_COUNT + 1)
-    ]
+    assert pane.count() == 1
+    assert pane.tabText(0) == "Welcome"
+    assert isinstance(pane.widget(0), WelcomeTab)
 
 
 def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
@@ -143,22 +145,44 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
     assert bottom.tabText(bottom.currentIndex()) == "text2"
 
 
-def test_search_icon_toggles_the_primary_sidebar(window: MainWindow) -> None:
+def test_sidebar_starts_open_on_the_explorer_view(window: MainWindow) -> None:
     assert window.primary_sidebar.isVisible() is True
+    assert window.activity_bar.explorer_button.isChecked() is True
+    assert window.activity_bar.search_button.isChecked() is False
+    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["explorer"]
 
-    window.activity_bar.search_button.click()
+
+def test_clicking_the_active_view_icon_collapses_the_sidebar(window: MainWindow) -> None:
+    window.activity_bar.explorer_button.click()
+
     assert window.primary_sidebar.isVisible() is False
     assert window.top_bar.sidebar_toggle.isChecked() is False
+    assert window.activity_bar.explorer_button.isChecked() is False
 
-    window.activity_bar.search_button.click()
+    window.activity_bar.explorer_button.click()
     assert window.primary_sidebar.isVisible() is True
-    assert window.top_bar.sidebar_toggle.isChecked() is True
+    assert window.activity_bar.explorer_button.isChecked() is True
+    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["explorer"]
+
+
+def test_clicking_a_different_view_icon_switches_the_sidebar(window: MainWindow) -> None:
+    window.activity_bar.search_button.click()
+
+    assert window.primary_sidebar.isVisible() is True
+    assert window.activity_bar.search_button.isChecked() is True
+    assert window.activity_bar.explorer_button.isChecked() is False
+    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["search"]
 
 
 def test_topbar_toggle_also_drives_the_sidebar_and_stays_synced(window: MainWindow) -> None:
     window.top_bar.sidebar_toggle.setChecked(False)
     assert window.primary_sidebar.isVisible() is False
-    assert window.activity_bar.search_button.isChecked() is False
+    assert window.activity_bar.explorer_button.isChecked() is False
+
+    window.top_bar.sidebar_toggle.setChecked(True)
+    assert window.primary_sidebar.isVisible() is True
+    # Reopening restores whichever view was last active -- still Explorer, the default.
+    assert window.activity_bar.explorer_button.isChecked() is True
 
 
 def test_panel_toggle_hides_and_shows_the_bottom_panel(window: MainWindow) -> None:
@@ -173,24 +197,53 @@ def test_settings_button_has_no_wired_action(window: MainWindow) -> None:
     assert window.activity_bar.settings_button.isCheckable() is False
 
 
-def test_activity_bar_starts_with_search_checked_and_settings_not_checkable(qtbot) -> None:
+def test_activity_bar_starts_with_explorer_checked_and_settings_not_checkable(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
 
-    assert bar.search_button.isChecked() is True
+    assert bar.explorer_button.isChecked() is True
+    assert bar.search_button.isChecked() is False
     assert bar.settings_button.isCheckable() is False
 
 
-def test_activity_bar_set_primary_sidebar_open_does_not_reemit_search_toggled(qtbot) -> None:
+def test_activity_bar_set_active_view_does_not_reemit_view_signals(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
-    emitted = []
-    bar.search_toggled.connect(emitted.append)
+    selected = []
+    collapsed = []
+    bar.view_selected.connect(selected.append)
+    bar.view_collapsed.connect(collapsed.append)
 
-    bar.set_primary_sidebar_open(False)
+    bar.set_active_view(None)
 
+    assert bar.explorer_button.isChecked() is False
     assert bar.search_button.isChecked() is False
-    assert emitted == []
+    assert selected == []
+    assert collapsed == []
+
+    bar.set_active_view("search")
+    assert bar.search_button.isChecked() is True
+    assert bar.explorer_button.isChecked() is False
+    assert selected == []
+    assert collapsed == []
+
+
+def test_activity_bar_clicking_switches_and_collapses(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    selected = []
+    collapsed = []
+    bar.view_selected.connect(selected.append)
+    bar.view_collapsed.connect(lambda: collapsed.append(True))
+
+    bar.search_button.click()
+    assert selected == ["search"]
+    assert bar.search_button.isChecked() is True
+    assert bar.explorer_button.isChecked() is False
+
+    bar.search_button.click()
+    assert collapsed == [True]
+    assert bar.search_button.isChecked() is False
 
 
 def test_split_panel_can_be_split_horizontally_up_to_the_max(window: MainWindow) -> None:
@@ -211,6 +264,8 @@ def test_split_panel_can_be_split_horizontally_up_to_the_max(window: MainWindow)
 def test_splitting_a_pane_duplicates_its_current_tab(window: MainWindow) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
+    main_panel.new_tab_in(first_pane)
+    main_panel.new_tab_in(first_pane)
     first_pane.setCurrentIndex(2)
     current_label = first_pane.tabText(first_pane.currentIndex())
 
@@ -282,15 +337,17 @@ def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainW
     assert main_panel.split_count == 0
 
 
-def test_new_tab_in_adds_a_uniquely_labeled_placeholder_tab(window: MainWindow) -> None:
+def test_new_tab_in_adds_a_uniquely_labeled_untitled_editor_tab(window: MainWindow) -> None:
     main_panel = window.main_panel
     pane = main_panel.panes[0]
     before = pane.count()
+    next_number = main_panel._next_tab_number
 
     main_panel.new_tab_in(pane)
 
     assert pane.count() == before + 1
-    assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
+    assert pane.tabText(pane.currentIndex()) == f"Untitled-{next_number}.txt"
+    assert isinstance(pane.widget(pane.currentIndex()), TextEditorWidget)
 
 
 def test_single_clicking_the_tab_bars_empty_space_does_not_create_a_tab(
@@ -320,10 +377,11 @@ def test_double_clicking_the_tab_bars_empty_space_creates_a_new_tab(
     empty_point = QPoint(tab_bar.width() - 5, tab_bar.height() // 2)
     assert tab_bar.tabAt(empty_point) == -1
 
+    next_number = window.main_panel._next_tab_number
     qtbot.mouseDClick(tab_bar, Qt.MouseButton.LeftButton, pos=empty_point)
 
     assert pane.count() == before + 1
-    assert pane.tabText(pane.currentIndex()) == f"Tab {before + 1}"
+    assert pane.tabText(pane.currentIndex()) == f"Untitled-{next_number}.txt"
 
 
 def test_tab_bar_height_and_split_buttons_survive_overflow(window: MainWindow) -> None:
@@ -356,6 +414,8 @@ def test_panel_splitters_refuse_to_collapse_children(window: MainWindow) -> None
 def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow) -> None:
     main_panel = window.main_panel
     source = main_panel.panes[0]
+    main_panel.new_tab_in(source)
+    main_panel.new_tab_in(source)
     source.split_button.click()
     dest = main_panel.panes[1]
 
