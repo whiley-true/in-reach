@@ -374,6 +374,7 @@ def test_activity_bar_clicking_switches_and_collapses(qtbot) -> None:
 def test_rvt_button_is_a_plain_action_not_a_sidebar_view(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
+    bar.set_rvt_enabled(True)  # starts disabled -- see test_rvt_button_starts_disabled below
     launched = []
     selected = []
     bar.launch_rvt_requested.connect(lambda: launched.append(True))
@@ -386,11 +387,99 @@ def test_rvt_button_is_a_plain_action_not_a_sidebar_view(qtbot) -> None:
     assert bar.rvt_button.isCheckable() is False
 
 
+def test_rvt_button_starts_disabled(qtbot) -> None:
+    # PROMPT.md: "rvt should not be launchable if no project is open" -- true from construction,
+    # before MainWindow ever gets a chance to enable it once a project opens.
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar.rvt_button.isEnabled() is False
+
+
+def test_apply_button_starts_disabled(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar.apply_button.isEnabled() is False
+
+
+# -- quicklaunch (activity bar) zoom -------------------------------------------------------------
+
+
+def test_refresh_icon_scale_resizes_the_bar_and_every_button(qtbot) -> None:
+    # PROMPT.md: "when zooming in and out the quicklaunch panel and its icons are not resizing".
+    from in_reach.ide.activity_bar import WIDTH, _BUTTON_SIZE
+
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    assert bar.width() == WIDTH
+    assert bar.rvt_button.width() == _BUTTON_SIZE
+
+    bar.refresh_icon_scale(2.0)
+
+    assert bar.width() == WIDTH * 2
+    for button in (bar.explorer_button, bar.search_button, bar.rvt_button, bar.apply_button, bar.settings_button):
+        assert button.width() == _BUTTON_SIZE * 2
+        assert button.iconSize().width() == round(28 * 2)
+
+
+def test_refresh_icon_scale_preserves_the_rvt_disabled_badge(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    assert bar.rvt_button.isEnabled() is False
+
+    bar.refresh_icon_scale(1.5)
+
+    # Still disabled after a rescale -- the icon (and its "blocked" badge) gets re-rendered at the
+    # new size, but the enabled state itself isn't touched by a zoom change.
+    assert bar.rvt_button.isEnabled() is False
+
+
+def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.app import project
+    from in_reach.ide.activity_bar import WIDTH
+
+    window.root_dir = tmp_path
+    project.get_project_dir(tmp_path).mkdir(parents=True)
+
+    window._zoom_in()
+
+    assert window.activity_bar.width() > WIDTH
+
+
+def test_rvt_button_is_disabled_with_no_project_open(window: MainWindow) -> None:
+    # PROMPT.md: "rvt should not be launchable if no project is open (the icon should have a dash
+    # in front of it)".
+    assert window.activity_bar.rvt_button.isEnabled() is False
+
+
+def test_rvt_button_is_enabled_once_a_project_opens(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.rvt_button.isEnabled() is True
+
+
+def test_rvt_button_is_disabled_again_once_the_project_closes(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.explorer_panel.close_active_project()
+
+    assert project_window.activity_bar.rvt_button.isEnabled() is False
+
+
 def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import rvt_launcher
 
+    window.activity_bar.set_rvt_enabled(True)
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: calls.append((a, k)))
 
@@ -399,7 +488,7 @@ def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
     assert len(calls) == 1
 
 
-def test_launch_rvt_with_no_project_open_passes_no_target(
+def test_clicking_the_disabled_rvt_button_does_not_launch_anything(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import rvt_launcher
@@ -407,9 +496,78 @@ def test_launch_rvt_with_no_project_open_passes_no_target(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.activity_bar.rvt_button.click()  # disabled -- no project open
 
-    assert calls == [None]
+    assert calls == []
+
+
+# -- Apply --------------------------------------------------------------------------------------
+
+
+def _make_project_with_settings(tmp_path: Path) -> Path:
+    folder = tmp_path / "abcd1234"
+    (folder / "settings").mkdir(parents=True)
+    (folder / "build").mkdir(parents=True)
+    return folder
+
+
+def test_apply_button_enables_when_the_active_project_has_unapplied_changes(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is True
+
+
+def test_apply_button_stays_disabled_when_settings_matches_build(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 1}', encoding="utf-8")
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+
+
+def test_clicking_apply_copies_settings_into_build_and_disables_the_button(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    assert project_window.activity_bar.apply_button.isEnabled() is True
+
+    project_window.activity_bar.apply_button.click()
+
+    assert (folder / "build" / "settings.autogenerated.json").read_text(encoding="utf-8") == '{"a": 1}'
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+
+
+def test_apply_is_a_no_op_with_no_project_open(window: MainWindow) -> None:
+    window.apply_settings_changes()  # should not raise
+
+
+def test_saving_a_settings_file_refreshes_the_apply_button(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    settings_path = folder / "settings" / "settings.json"
+    settings_path.write_text('{"a": 0}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+
+    settings_path.write_text('{"a": 1}', encoding="utf-8")
+    project_window._on_file_saved(settings_path)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is True
 
 
 def test_launch_rvt_with_a_project_open_passes_its_source_bin_as_the_target(
@@ -593,6 +751,7 @@ def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(
     def _raise(*args, **kwargs):
         raise OSError("access denied")
 
+    window.activity_bar.set_rvt_enabled(True)
     monkeypatch.setattr(rvt_launcher, "launch_rvt", _raise)
     shown: list[str] = []
     monkeypatch.setattr(

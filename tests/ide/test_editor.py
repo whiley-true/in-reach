@@ -112,6 +112,44 @@ def test_breadcrumb_shows_the_folder_and_file_name(qtbot) -> None:
     assert editor._breadcrumb.text() == "rvt > script.txt"
 
 
+def test_breadcrumb_includes_the_project_name_when_inside_a_real_project(qtbot, tmp_path) -> None:
+    # PROMPT.md: "include the project name (not file dir) in the breadcrumb".
+    project = tmp_path / "abcd1234"
+    (project / "edit" / "rvt").mkdir(parents=True)
+    (project / "README.md").write_text("# Slayer Plus\n\nA better slayer.\n", encoding="utf-8")
+    path = project / "edit" / "rvt" / "script.txt"
+    path.write_text("", encoding="utf-8")
+
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    assert editor._breadcrumb.text() == "Slayer Plus > rvt > script.txt"
+
+
+def test_breadcrumb_omits_the_project_name_outside_any_real_project(qtbot) -> None:
+    path = Path("/project/edit/rvt/script.txt")  # no real README.md ancestor on disk
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    assert editor._breadcrumb.text() == "rvt > script.txt"
+
+
+def test_set_path_refreshes_the_project_name_in_the_breadcrumb(qtbot, tmp_path) -> None:
+    project = tmp_path / "abcd1234"
+    (project / "settings").mkdir(parents=True)
+    (project / "README.md").write_text("# Wave Defense\n", encoding="utf-8")
+    path = project / "settings" / "settings.json"
+    path.write_text("{}", encoding="utf-8")
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    assert editor._breadcrumb.text() == ""
+
+    editor.set_path(path)
+
+    assert editor._breadcrumb.text().startswith("Wave Defense > settings > settings.json")
+
+
 def test_breadcrumb_appends_the_live_json_path_for_a_json_file(qtbot) -> None:
     path = Path("/project/edit/settings/settings.json")
     editor = TextEditorWidget(path=path)

@@ -495,3 +495,48 @@ def test_open_projects_changed_fires_on_open_and_close_but_not_on_switch(
     panel.close_project(second)
 
     assert seen == [[first], [first, second], [first]]
+
+
+# -- folder subheading / personal-section placement ----------------------------------------------
+
+
+def test_folder_subheading_is_hidden_with_no_project(panel: ExplorerPanel) -> None:
+    assert panel.folder_subheading.isVisible() is False
+    assert panel.folder_subheading.text() == ""
+
+
+def test_folder_subheading_shows_the_folders_own_name(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    (folder / "README.md").write_text("# Slayer Plus\n", encoding="utf-8")
+
+    panel.open_project(folder)
+
+    # The folder's own id, not the (human-typed) title shown in the tab itself.
+    assert panel.folder_subheading.text() == "abcd1234"
+    assert panel.folder_subheading.isVisible() is True
+
+
+def test_folder_subheading_hides_again_once_the_project_closes(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    panel.open_project(folder)
+
+    panel.close_project(folder)
+
+    assert panel.folder_subheading.isVisible() is False
+    assert panel.folder_subheading.text() == ""
+
+
+def test_no_project_spacer_is_visible_only_with_no_project_open(panel: ExplorerPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "when no project is open, the Personal Game Variants and Personal Map Variants
+    # should appear at the bottom of the file explorer panel".
+    assert panel._no_project_spacer.isVisible() is True
+
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    panel.open_project(folder)
+    assert panel._no_project_spacer.isVisible() is False
+
+    panel.close_project(folder)
+    assert panel._no_project_spacer.isVisible() is True

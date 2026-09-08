@@ -2,7 +2,8 @@
 
 Ported from ``in-reach-v1``'s ``strings_io.py``, trimmed to the dump direction only -- see
 ``settings_io.py``'s docstring for why (no more hand-edited JSON to load back, so ``load_strings``
-and the JSON-Schema (``$schema``) embedding aren't ported).
+wasn't ported). The JSON-Schema (``"$schema"``) embedding v1 also trimmed *is* back now, ported
+from the v2 prototype instead -- see :mod:`in_reach.app.rvt.schema_io`.
 
 Dumps every ReachStringTable ``_reachvarianttool`` exposes on a multiplayer variant -- localized
 name/description/category, each team's name, and the big generic script_strings table (Forge Label
@@ -21,6 +22,7 @@ import json
 from pathlib import Path
 
 from in_reach.app.rvt.rvt_bridge import get_rvt
+from in_reach.app.rvt.schema_io import schema_ref
 
 LANGUAGES = [
     "english",
@@ -76,10 +78,17 @@ def extract_strings(mp) -> dict:
     }
 
 
-def write_strings_json(strings: dict, out_path: Path, comment: str | None = None) -> Path:
+def write_strings_json(
+    strings: dict, out_path: Path, schema_path: Path | None = None, comment: str | None = None
+) -> Path:
+    """``schema_path``, if given, is embedded as a relative ``"$schema"`` key (PROMPT.md: "in
+    settings, please not[e] examples from repo v2 ... re-add this to the top of the files") -- see
+    :func:`~in_reach.app.rvt.schema_io.schema_ref`."""
     document = dict(strings)
     if comment is not None:
         document = {"_comment": comment, **document}
+    if schema_path is not None:
+        document = {"$schema": schema_ref(schema_path, out_path), **document}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(document, f, indent=2, ensure_ascii=False)
         f.write("\n")

@@ -125,6 +125,19 @@ class VerifyDialog(QDialog):
         self._show_prompt_controls(None)
         self._update_progress()
 
+        # PROMPT.md: reserve room for hint_label/choice_combo up front (both start hidden) --
+        # otherwise the dialog only grows into that space partway through a run, the first time a
+        # step needs user input. Windows can't always grant that mid-show resize exactly, which
+        # produces a harmless but noisy "QWindowsWindow::setGeometry: Unable to set geometry"
+        # warning. Sizing for the full layout from the start avoids the resize (and the warning)
+        # entirely, and reads as more stable too -- the dialog no longer visibly grows mid-run.
+        self.hint_label.show()
+        self.choice_combo.show()
+        self.adjustSize()
+        self.setMinimumHeight(self.height())
+        self.hint_label.hide()
+        self.choice_combo.hide()
+
     def _button(self, text: str, slot) -> QPushButton:  # noqa: ANN001 -- bound method/callable
         button = QPushButton(text)
         button.setCursor(Qt.CursorShape.PointingHandCursor)

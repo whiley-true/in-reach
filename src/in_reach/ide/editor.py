@@ -50,6 +50,23 @@ def _indent_level(text: str) -> int:
     return leading // _INDENT_SIZE
 
 
+def _find_project_title(path: Path) -> str | None:
+    """Walks ``path``'s own ancestors looking for a gametype project folder (one holding a
+    ``README.md`` -- every project has exactly one, see
+    :func:`~in_reach.app.new_project.create_gametype_project`) and returns its title (see
+    :func:`~in_reach.app.new_project.read_project_title`).
+
+    Returns ``None`` if no ancestor has one -- ``path`` isn't inside a real project (an Untitled
+    tab later saved somewhere else entirely, say).
+    """
+    from in_reach.app import new_project
+
+    for ancestor in path.parents:
+        if (ancestor / new_project.README_FILENAME).is_file():
+            return new_project.read_project_title(ancestor)
+    return None
+
+
 class _LineNumberArea(QWidget):
     """The gutter widget itself -- just forwards sizing/painting/clicks back to the editor, which
     owns all the actual layout math (it needs the editor's own block geometry either way)."""
@@ -114,6 +131,9 @@ class TextEditorWidget(QPlainTextEdit):
         a real path for the first time. Re-evaluates JSON syntax highlighting and the breadcrumb
         to match."""
         self.path = path
+        # Cached rather than looked up on every _update_breadcrumb() call (cursor moves fire it
+        # constantly) -- it can only actually change when the path itself does, via set_path().
+        self._project_title = _find_project_title(path) if path is not None else None
         if self._highlighter is not None:
             self._highlighter.setDocument(None)
             self._highlighter = None
@@ -305,6 +325,11 @@ class TextEditorWidget(QPlainTextEdit):
     def _update_breadcrumb(self) -> None:
         parts: list[str] = []
         if self.path is not None:
+            # PROMPT.md: "include the project name (not file dir) in the breadcrumb" -- the
+            # gametype project's own title (its README's heading), not just path.parent.name (the
+            # immediate containing folder, e.g. "settings"/"rvt" -- still shown too, right after).
+            if self._project_title is not None:
+                parts.append(self._project_title)
             parts.append(self.path.parent.name)
             parts.append(self.path.name)
             if self.path.suffix.lower() == ".json":

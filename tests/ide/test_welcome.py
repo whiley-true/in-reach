@@ -563,6 +563,22 @@ def test_verify_dialog_shows_the_help_tip_for_a_step_that_has_one(qtbot, root_di
     assert "winget" in dialog.hint_label.text()
 
 
+def test_verify_dialog_does_not_grow_when_a_step_reveals_the_hint_or_choice_controls(
+    qtbot, root_dir: Path
+) -> None:
+    # Regression guard: the dialog used to only grow into the hint_label/choice_combo's own space
+    # partway through a run, which Windows can't always resize into cleanly (a noisy but harmless
+    # "QWindowsWindow::setGeometry: Unable to set geometry" warning). Height is reserved for both
+    # up front now, so the outer window stays a fixed height across the whole run.
+    dialog = _dialog_for(qtbot, root_dir, which=lambda _name: None)
+    height_before = dialog.height()
+
+    dialog.process_next_step()  # reveals hint_label for the winget step
+
+    assert dialog.hint_label.isVisibleTo(dialog) is True
+    assert dialog.height() == height_before
+
+
 def test_verify_dialog_offers_detected_steam_users_as_a_choice(qtbot, root_dir: Path) -> None:
     steam = root_dir / "Steam"
     for account_id, persona in (("111", "Whiley"), ("222", "Someone Else")):

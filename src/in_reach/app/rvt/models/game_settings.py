@@ -17,7 +17,7 @@ mide/settings_io.py dumps/loads a GameSettings to/from game/settings.json (one o
 """
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from in_reach.app.categories import EngineCategory as ProjectCategory
 from in_reach.app.categories import EngineIcon as ProjectIcon
@@ -79,6 +79,33 @@ class Meta(BaseModel):
     # its own baked in at all; this project's own choice is independent either way).
     category: ProjectCategory = ProjectCategory.none
     category_icon: ProjectIcon | None = None
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _parse_category(cls, value):
+        # Accepts the name string dump_game_settings() itself writes ("none", "juggernaut", ...)
+        # -- without this, on-disk settings.json can't be read back through this same model at all
+        # (the schema-validation save-check in the text editor needs exactly this round-trip; see
+        # in_reach.ide.schema_check). Re-raised as ValueError, not left as KeyError -- a bare
+        # KeyError isn't one of the exception types pydantic itself wraps into a ValidationError,
+        # so an unrecognized name would otherwise crash the caller instead of reporting a clean
+        # validation failure.
+        if isinstance(value, str):
+            try:
+                return ProjectCategory[value]
+            except KeyError:
+                raise ValueError(f"{value!r} is not a known category") from None
+        return value
+
+    @field_validator("category_icon", mode="before")
+    @classmethod
+    def _parse_category_icon(cls, value):
+        if isinstance(value, str):
+            try:
+                return ProjectIcon[value]
+            except KeyError:
+                raise ValueError(f"{value!r} is not a known category icon") from None
+        return value
 
     @field_serializer("category")
     def _serialize_category(self, value: ProjectCategory) -> str:

@@ -2,7 +2,9 @@
 their views is ever active, switching the primary sidebar's content, VSCode-style: clicking the
 already-active one collapses the sidebar instead of switching -- a ReachVariantTool launcher icon
 below them (a plain action button, not a view -- it never affects which sidebar view is active),
-and a settings cog pinned at the bottom (a no-op for now).
+an "Apply" icon below that (PROMPT.md: pushes a project's hand-edited ``settings/`` back into
+``edit/``/``build/`` -- see ``MainWindow.apply_settings_changes()``), and a settings cog pinned at
+the bottom (a no-op for now).
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ from in_reach.ide import icons
 from in_reach.ide.style import PANEL_RADIUS
 
 # PROMPT.md, across two passes: +15% on the icons alone, then +10% on "the sidebar and its icons"
-# together -- 22 -> 25 -> 28 (icons), 40 -> 44 (buttons), 48 -> 53 (the bar's own width).
+# together -- 22 -> 25 -> 28 (icons), 40 -> 44 (buttons), 48 -> 53 (the bar's own width). These are
+# the 100%-zoom baseline sizes -- see refresh_icon_scale() for how zoom scales them live.
 WIDTH = 53
 _BUTTON_SIZE = 44
 _ICON_SIZE = 28
@@ -54,9 +57,16 @@ class ActivityBar(QWidget):
     view_collapsed = pyqtSignal()
     # A plain action, not a view switch -- MainWindow resolves/launches RVT itself.
     launch_rvt_requested = pyqtSignal()
+    # Ditto -- MainWindow owns what "apply" actually does.
+    apply_requested = pyqtSignal()
+
+    #: Tracked purely so set_rvt_enabled() can re-render the RVT icon at the *current* scale
+    #: without needing its own scale argument threaded through every caller.
+    _icon_scale = 1.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._rvt_enabled = True
         self.setFixedWidth(WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # A full rounded/bordered card, matching every other top-level panel -- see
@@ -103,12 +113,22 @@ class ActivityBar(QWidget):
         self.rvt_button.clicked.connect(self.launch_rvt_requested.emit)
         layout.addWidget(self.rvt_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
+        # PROMPT.md: "below the rvt icon we want another icon for 'Apply'" -- only enabled once
+        # there's something in settings/ to push into edit/build (see set_apply_enabled()).
+        self.apply_button = _bar_button("apply", "Apply settings changes")
+        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, _ICON_SIZE))
+        self.apply_button.setEnabled(False)
+        self.apply_button.clicked.connect(self.apply_requested.emit)
+        layout.addWidget(self.apply_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
         layout.addStretch(1)
 
         # Settings intentionally does nothing yet -- see PROMPT.md's "for now settings should do
         # nothing".
         self.settings_button = _bar_button("settings", "Settings")
         layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.set_rvt_enabled(False)
 
     def _handle_click(self, view: str) -> None:
         if self._active_view == view:
@@ -136,3 +156,52 @@ class ActivityBar(QWidget):
     @property
     def active_view(self) -> str | None:
         return self._active_view
+
+    # -- RVT / Apply enablement ---------------------------------------------------------------------
+
+    def set_rvt_enabled(self, enabled: bool) -> None:
+        """PROMPT.md: "rvt should not be launchable if no project is open (the icon should have a
+        dash in front of it)" -- disables the button (Qt already dims a disabled QToolButton's icon
+        on its own) and swaps in :func:`~in_reach.ide.icons.rvt_icon`'s own "blocked" badge on top
+        of that, since this icon's own artwork is already fairly muted/grey and doesn't read as
+        clearly disabled from Qt's automatic dimming alone."""
+        self._rvt_enabled = enabled
+        self.rvt_button.setEnabled(enabled)
+        self.rvt_button.setIcon(icons.rvt_icon(enabled=enabled))
+        self.rvt_button.setIconSize(QSize(round(_ICON_SIZE * self._icon_scale), round(_ICON_SIZE * self._icon_scale)))
+
+    def set_apply_enabled(self, enabled: bool) -> None:
+        """Whether ``settings/`` currently has changes worth applying -- see
+        ``MainWindow._refresh_apply_enabled()``."""
+        self.apply_button.setEnabled(enabled)
+
+    # -- zoom ---------------------------------------------------------------------------------------
+
+    def refresh_icon_scale(self, scale: float = 1.0) -> None:
+        """(Re-)sizes the bar itself and every one of its buttons/icons for ``scale`` (PROMPT.md:
+        "when zooming in and out the quicklaunch panel and its icons are not resizing") -- the same
+        live-rescale MainWindow already does for the top bar's own icons via
+        ``refresh_icon_colors()``, just applied to this bar's fixed pixel constants instead.
+        """
+        self._icon_scale = scale
+        button_size = round(_BUTTON_SIZE * scale)
+        icon_size = round(_ICON_SIZE * scale)
+
+        self.setFixedWidth(round(WIDTH * scale))
+
+        for name, button in self._buttons.items():
+            button.setIcon(icons.icon(name, color=_ICON_COLOR, size=icon_size))
+            button.setIconSize(QSize(icon_size, icon_size))
+            button.setFixedSize(button_size, button_size)
+
+        self.rvt_button.setIcon(icons.rvt_icon(enabled=self._rvt_enabled))
+        self.rvt_button.setIconSize(QSize(icon_size, icon_size))
+        self.rvt_button.setFixedSize(button_size, button_size)
+
+        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, icon_size))
+        self.apply_button.setIconSize(QSize(icon_size, icon_size))
+        self.apply_button.setFixedSize(button_size, button_size)
+
+        self.settings_button.setIcon(icons.icon("settings", color=_ICON_COLOR, size=icon_size))
+        self.settings_button.setIconSize(QSize(icon_size, icon_size))
+        self.settings_button.setFixedSize(button_size, button_size)

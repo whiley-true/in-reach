@@ -149,6 +149,15 @@ class ExplorerPanel(QWidget):
         self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         layout.addWidget(self.project_tabs)
 
+        #: The active project's own *folder* name (the generated id, e.g. "abcd1234") -- distinct
+        #: from its tab's own title text -- shown as a subheading underneath the tabs (PROMPT.md:
+        #: "include the name of the folder as subheading on the explorer page (underneath project
+        #: tabs)"). Hidden along with everything else project-related when nothing is open.
+        self.folder_subheading = QLabel()
+        self.folder_subheading.setEnabled(False)
+        self.folder_subheading.hide()
+        layout.addWidget(self.folder_subheading)
+
         self._no_project_label = QLabel(_NO_PROJECT_TEXT)
         self._no_project_label.setWordWrap(True)
         self._no_project_label.setEnabled(False)
@@ -157,6 +166,14 @@ class ExplorerPanel(QWidget):
         self.project_tree, self._project_model = _new_tree()
         self.project_tree.hide()
         layout.addWidget(self.project_tree, 1)
+
+        # PROMPT.md: "when no project is open, the Personal Game Variants and Personal Map
+        # Variants should appear at the bottom of the file explorer panel" -- project_tree's own
+        # stretch=1 above only pushes them down while it's actually visible (a hidden widget in a
+        # QVBoxLayout doesn't claim its stretch share), so this stands in for it whenever there's no
+        # project open, and collapses back to nothing the moment one is (see _activate()).
+        self._no_project_spacer = QWidget()
+        layout.addWidget(self._no_project_spacer, 1)
 
         self.personal_variants_tree, self._personal_variants_model = _new_tree()
         self.personal_variants_placeholder = self._placeholder_label()
@@ -290,8 +307,11 @@ class ExplorerPanel(QWidget):
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
         self.project_tabs.setVisible(self.project_tabs.count() > 0)
+        self.folder_subheading.setText(folder.name if has_project else "")
+        self.folder_subheading.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
         self.project_tree.setVisible(has_project)
+        self._no_project_spacer.setVisible(not has_project)
         _point_tree_at(self.project_tree, self._project_model, folder)
         self.active_project_changed.emit(folder)
 
