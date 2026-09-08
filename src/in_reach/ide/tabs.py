@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt
-from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent
+from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QMouseEvent, QPaintEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -31,6 +31,9 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSplitter,
+    QStyle,
+    QStyleOptionTab,
+    QStylePainter,
     QTabBar,
     QTabWidget,
     QToolButton,
@@ -146,6 +149,41 @@ class _DragTabBar(QTabBar):
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
 
+    def paintEvent(self, event: QPaintEvent) -> None:
+        """Draws every tab exactly as the base implementation would, then re-draws just the dirty
+        ones' own shape+label a second time in italic (PROMPT.md: "if a file has unsaved edits, its
+        tab text should be in italics, and become not italic when saved").
+
+        QTabBar has no per-tab font setter of its own (unlike :meth:`setTabTextColor`); the two
+        approaches that look obvious both turned out to be unsafe in practice against this app's
+        own QSS-styled tab bars (``style.MAIN_TAB_STYLE``/``BOTTOM_TAB_STYLE``, both routed through
+        Qt's ``QStyleSheetStyle`` proxy): directly overwriting a style option's own ``fontMetrics``
+        crashes outright, and calling :meth:`QWidget.setFont` on the bar itself from inside
+        ``initStyleOption()`` re-enters that same override through ``QStyleSheetStyle``'s own
+        style-invalidation machinery, recursing until the stack overflows. Changing the *painter's*
+        font instead (a `QStylePainter`, only for this second, dirty-tabs-only pass) never touches
+        the widget's own styled properties at all, so neither failure mode applies -- redrawing the
+        shape first (not just the label) is what keeps the swapped-in italic text from visibly
+        double-printing over the upright glyphs the first, normal pass already painted underneath
+        it, since italic metrics are rarely pixel-identical to upright ones.
+        """
+        super().paintEvent(event)
+        painter: QStylePainter | None = None
+        for index in range(self.count()):
+            if not _is_modified(self._pane.widget(index)):
+                continue
+            if painter is None:
+                painter = QStylePainter(self)
+            option = QStyleOptionTab()
+            self.initStyleOption(option, index)
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
+            painter.save()
+            font = QFont(painter.font())
+            font.setItalic(True)
+            painter.setFont(font)
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option)
+            painter.restore()
+
 
 class TabPane(QTabWidget):
     """One pane of the main panel area -- a closable, reorderable tab strip that accepts a tab
@@ -225,6 +263,11 @@ class TabPane(QTabWidget):
 
     def _update_close_icon(self, index: int) -> None:
         button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+        # PROMPT.md: "if a file has unsaved edits, its tab text should be in italics, and become
+        # not italic when saved" -- _DragTabBar.paintEvent() reads dirty state fresh on every
+        # paint, so nothing needs updating there directly; it just needs telling to actually repaint
+        # now, since a modificationChanged signal alone doesn't imply the tab bar redraws itself.
+        self.tabBar().update()
         if button is None:
             return
         name = "tab_dirty" if _is_modified(self.widget(index)) else "win_close"
@@ -797,12 +840,20 @@ class MainPanelArea(QWidget):
         """Re-reads every open editor tab's own ancestor-project title and refreshes its
         breadcrumb to match -- called after a project rename (PROMPT.md: "when a project name is
         changed ... the project title should change in the tabs and in the breadcrumb") so an
-        already-open tab doesn't keep showing the old title until its file is reopened."""
+        already-open tab doesn't keep showing the old title until its file is reopened.
+
+        Also re-``refresh()``es any open Welcome tab (PROMPT.md: "when a project is renamed, it
+        needs to be renamed in recents ... and in the welcome window") -- its own Recent list
+        reads the same on-disk title back via :func:`~in_reach.app.new_project.read_project_title`,
+        but only when :meth:`~in_reach.ide.welcome.WelcomeTab.refresh` actually runs, which a
+        rename elsewhere doesn't otherwise trigger."""
         for pane in self.panes:
             for index in range(pane.count()):
                 widget = pane.widget(index)
                 if isinstance(widget, TextEditorWidget):
                     widget.refresh_project_title()
+                elif isinstance(widget, WelcomeTab):
+                    widget.refresh()
 
     def find_pane(self, pane_id: int) -> TabPane | None:
         for pane in self.panes:

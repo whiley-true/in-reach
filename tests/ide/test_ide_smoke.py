@@ -656,6 +656,82 @@ def test_clicking_apply_syncs_a_hand_edited_title_to_the_readme_and_explorer_tab
     assert project_window.explorer_panel.project_tabs.tabText(tab_index) == "Hand-Edited Title"
 
 
+def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No compiled .bin exists yet when the project is first opened (nothing's ever been applied),
+    # so _rewatch_project_bin() (fired on project-open) has nothing to arm the watcher against --
+    # a successful Apply needs to re-arm it itself, once build/dist/*.bin actually starts existing.
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    project_window._on_project_opened(folder)
+    assert project_window._bin_watcher.files() == []
+
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"freshly compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+
+    project_window.apply_settings_changes()
+
+    assert project_window._bin_watcher.files() == [str(compiled_bin)]
+
+
+def _recent_button_labels(welcome) -> list[str]:
+    return [welcome._recent_layout.itemAt(i).widget().text() for i in range(1, welcome._recent_layout.count())]
+
+
+def test_a_rename_refreshes_the_open_welcome_tabs_recent_list(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "when a project is renamed, it needs to be renamed in recents in dropdown and in
+    # the welcome window".
+    from in_reach.app import recent
+    from in_reach.ide.welcome import WelcomeTab
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "README.md").write_text("# Old Title\n", encoding="utf-8")
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
+    env_project_dir = project_window.explorer_panel._env_project_dir
+    recent.add_recent(env_project_dir, folder)
+
+    welcome = project_window.main_panel.active_pane.widget(0)
+    assert isinstance(welcome, WelcomeTab)
+    welcome.refresh()  # populate the Recent list with the stale title first
+    assert any("Old Title" in label for label in _recent_button_labels(welcome))
+
+    project_window._sync_project_title(folder)
+
+    labels = _recent_button_labels(welcome)
+    assert any("New Title" in label for label in labels)
+    assert not any("Old Title" in label for label in labels)
+
+
+def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import recent
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "README.md").write_text("# Old Title\n", encoding="utf-8")
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
+    env_project_dir = project_window.explorer_panel._env_project_dir
+    recent.add_recent(env_project_dir, folder)
+
+    project_window._sync_project_title(folder)
+
+    button = project_window.top_bar.file_menu_button
+    button._populate_open_recent()
+    actions = button.open_recent_menu.actions()
+    assert [a.text() for a in actions] == ["New Title"]
+
+
 def test_clicking_apply_shows_an_error_dialog_and_leaves_the_button_alone_on_failure(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -710,7 +786,7 @@ def test_saving_a_settings_file_refreshes_the_apply_button(
     assert project_window.activity_bar.apply_button.isEnabled() is True
 
 
-def test_launch_rvt_with_a_project_open_passes_its_source_bin_as_the_target(
+def test_launch_rvt_with_a_project_open_passes_its_compiled_bin_as_the_target(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import new_project, project, rvt_launcher
@@ -720,7 +796,7 @@ def test_launch_rvt_with_a_project_open_passes_its_source_bin_as_the_target(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -731,6 +807,43 @@ def test_launch_rvt_with_a_project_open_passes_its_source_bin_as_the_target(
     window.activity_bar.rvt_button.click()
 
     assert calls == [bin_path]
+
+
+def test_launch_rvt_opens_the_compiled_bin_not_the_frozen_source_one(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "when clicking into rvt, it seems to be showing blank gametype and description
+    # not the contents from the saved settings" -- launch_rvt() used to hand RVT the project's
+    # frozen init_gametype/ source .bin (never touched again after project creation) instead of
+    # build/dist/'s freshly-compiled one, so RVT always opened onto whatever the project started
+    # from, never anything actually saved into settings/ since.
+    from in_reach.app import apply_settings, new_project, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    source_bin = new_project.source_variant_path(project_dir, folder)
+    source_bin.parent.mkdir(parents=True)
+    source_bin.write_bytes(b"stale original variant")
+    compiled_bin = new_project.compiled_variant_path(folder)
+    compiled_bin.parent.mkdir(parents=True)
+    compiled_bin.write_bytes(b"freshly compiled variant with saved settings")
+    window._on_project_opened(folder)
+    # A real compile isn't exercised here (see test_launch_rvt_applies_present_settings_before_
+    # launching for that) -- faked so it can't overwrite compiled_bin's own distinguishing content.
+    monkeypatch.setattr(
+        apply_settings, "apply_settings_changes", lambda pd, f: BuildResult(success=True)
+    )
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [compiled_bin]
+    assert calls[0] != source_bin
 
 
 def test_launch_rvt_applies_present_settings_before_launching(
@@ -747,7 +860,7 @@ def test_launch_rvt_applies_present_settings_before_launching(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -777,7 +890,7 @@ def test_launch_rvt_swallows_a_compile_failure_and_still_launches(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -794,7 +907,7 @@ def test_launch_rvt_swallows_a_compile_failure_and_still_launches(
     assert launched == [bin_path]
 
 
-def test_launch_rvt_with_a_project_open_but_no_source_bin_passes_no_target(
+def test_launch_rvt_with_a_project_open_but_no_compiled_bin_passes_no_target(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import rvt_launcher
@@ -812,7 +925,7 @@ def test_launch_rvt_with_a_project_open_but_no_source_bin_passes_no_target(
     assert calls == [None]
 
 
-def test_opening_a_project_with_a_source_bin_watches_it(
+def test_opening_a_project_with_a_compiled_bin_watches_it(
     window: MainWindow, tmp_path: Path
 ) -> None:
     from in_reach.app import new_project, project
@@ -822,7 +935,7 @@ def test_opening_a_project_with_a_source_bin_watches_it(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
 
@@ -831,7 +944,7 @@ def test_opening_a_project_with_a_source_bin_watches_it(
     assert window._bin_watcher.files() == [str(bin_path)]
 
 
-def test_opening_a_project_with_no_source_bin_watches_nothing(window: MainWindow, tmp_path: Path) -> None:
+def test_opening_a_project_with_no_compiled_bin_watches_nothing(window: MainWindow, tmp_path: Path) -> None:
     window.root_dir = tmp_path
     folder = tmp_path / "abcd1234"
     folder.mkdir()
@@ -853,10 +966,11 @@ def test_switching_the_active_project_rewatches_the_new_ones_bin(
     first.mkdir()
     second = tmp_path / "second"
     second.mkdir()
-    first_bin = new_project.source_variant_path(project_dir, first)
+    first_bin = new_project.compiled_variant_path(first)
     first_bin.parent.mkdir(parents=True)
     first_bin.write_bytes(b"")
-    second_bin = new_project.source_variant_path(project_dir, second)
+    second_bin = new_project.compiled_variant_path(second)
+    second_bin.parent.mkdir(parents=True)
     second_bin.write_bytes(b"")
 
     window.explorer_panel.open_project(first)
@@ -877,7 +991,7 @@ def test_the_watched_bin_changing_resyncs_the_build_snapshot(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -918,7 +1032,7 @@ def test_the_watched_bin_changing_carries_category_forward_but_not_title(
         ' "category": "juggernaut", "category_icon": "juggernaut"}}',
         encoding="utf-8",
     )
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -951,7 +1065,7 @@ def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_readme_and_explor
     (folder / "README.md").write_text("# Old Title\n\nDescription.\n", encoding="utf-8")
     settings_dir = folder / new_project.SETTINGS_DIRNAME
     settings_dir.mkdir(parents=True)
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -980,7 +1094,7 @@ def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)
@@ -1007,7 +1121,7 @@ def test_watched_bin_deleted_then_recreated_is_still_watched_afterward(
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path = new_project.compiled_variant_path(folder)
     bin_path.parent.mkdir(parents=True)
     bin_path.write_bytes(b"")
     window._on_project_opened(folder)

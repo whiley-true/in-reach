@@ -380,6 +380,24 @@ def test_source_variant_path_matches_where_create_gametype_project_copies_it(
     assert expected.read_bytes() == b"\x00variant"
 
 
+# -- compiled_variant_path ----------------------------------------------------------------------
+
+
+def test_compiled_variant_path_is_under_build_dist_named_after_the_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "abcd1234"
+
+    assert new_project.compiled_variant_path(folder) == folder / "build" / "dist" / "abcd1234.bin"
+
+
+def test_compiled_variant_path_differs_from_source_variant_path(project_dir: Path) -> None:
+    # PROMPT.md: "when clicking into rvt, it seems to be showing blank gametype and description
+    # not the contents from the saved settings" -- these must never resolve to the same file, or
+    # RVT would still open the frozen original instead of whatever was actually compiled.
+    folder, _warning = new_project.create_gametype_project(project_dir, "Slayer Plus")
+
+    assert new_project.compiled_variant_path(folder) != new_project.source_variant_path(project_dir, folder)
+
+
 # -- is_generated_file -------------------------------------------------------------------------
 
 

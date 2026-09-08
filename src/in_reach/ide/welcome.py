@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 
 import in_reach
 from in_reach.app import env_file, new_project, project, recent, system_verify
-from in_reach.ide import icons, style
+from in_reach.ide import icons
 from in_reach.ide.new_project_dialog import NewProjectDialog
 from in_reach.ide.settings_info_dialog import SettingsInfoDialog
 from in_reach.ide.verify_dialog import VerifyDialog
@@ -175,14 +175,13 @@ class WelcomeTab(QWidget):
         return header
 
     def _build_quadrant(self, heading: str) -> tuple[QWidget, QVBoxLayout]:
-        # Bordered like every other top-level panel card in the IDE (see style.PANEL_BORDER_STYLE)
-        # -- PROMPT.md's "more of a border around the edge" -- so each quadrant reads as its own
-        # contained box rather than four floating text blocks separated by pure whitespace.
+        # PROMPT.md: "please remove the border outlines around the welcome window texts/links" --
+        # no border/background on the quadrant itself (a first pass tried that, per an earlier
+        # PROMPT.md's "more of a border around the edge" -- reverted here); the outer page's own
+        # tightened margins/spacing (see __init__) are what's still doing that job.
         frame = QFrame()
-        frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        frame.setStyleSheet(style.PANEL_BORDER_STYLE)
         outer = QVBoxLayout(frame)
-        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
         label = QLabel(heading)

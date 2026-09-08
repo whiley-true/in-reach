@@ -64,6 +64,59 @@ def test_dirty_tab_shows_a_dot_and_clean_tab_shows_the_close_x(window: MainWindo
     assert _close_icon_image(button) == _expected_icon_image("win_close")
 
 
+def _tab_label_image(pane, index: int):
+    # Renders (not a direct initStyleOption() call -- see below) the real tab strip and crops to
+    # just this tab's own rect, so a font change (italic vs not) shows up as a pixel difference.
+    return pane.tabBar().grab(pane.tabBar().tabRect(index)).toImage()
+
+
+def test_dirty_tabs_own_text_is_italic_and_clean_tabs_is_not(window: MainWindow) -> None:
+    # PROMPT.md: "if a file has unsaved edits, its tab text should be in italics, and become not
+    # italic when saved" -- rendered through the real paint pipeline (QTabBar.grab()) rather than
+    # calling initStyleOption() directly, which -- called out of Qt's own paint cycle rather than
+    # from within it -- recurses into itself instead of reaching QTabBar's own base implementation.
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    editor = pane.widget(index)
+    window.show()
+    QApplication.processEvents()
+    clean_image = _tab_label_image(pane, index)
+
+    editor.document().setModified(True)
+    QApplication.processEvents()
+    dirty_image = _tab_label_image(pane, index)
+
+    assert dirty_image != clean_image
+
+    editor.document().setModified(False)
+    QApplication.processEvents()
+    clean_again_image = _tab_label_image(pane, index)
+
+    assert clean_again_image == clean_image
+
+
+def test_only_the_dirty_tabs_own_text_is_italic_not_its_neighbors(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    dirty_index = pane.currentIndex()
+    main_panel.new_tab_in(pane)
+    clean_index = pane.currentIndex()
+    window.show()
+    QApplication.processEvents()
+    clean_before = _tab_label_image(pane, clean_index)
+
+    pane.widget(dirty_index).document().setModified(True)
+    QApplication.processEvents()
+
+    # The dirty tab's own rendering changed, but its (still clean) neighbor's didn't -- confirms
+    # the font swap in initStyleOption() is correctly scoped per-tab, not leaked onto the whole bar.
+    assert _tab_label_image(pane, clean_index) == clean_before
+    assert pane.tabBar().font().italic() is False
+
+
 # -- close routing / save prompt --------------------------------------------------------------
 
 

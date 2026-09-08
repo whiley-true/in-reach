@@ -166,10 +166,8 @@ def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
         settings_writer.apply_meta_header(None, content_header, settings.meta.title, settings.meta.description)
 
     if save:
-        build_dir = folder / new_project.BUILD_DIRNAME
-        dist_dir = build_dir / new_project.BUILD_DIST_SUBDIR
-        dist_dir.mkdir(parents=True, exist_ok=True)
-        out_path = dist_dir / f"{folder.name}.bin"
+        out_path = new_project.compiled_variant_path(folder)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             variant.save(str(out_path))
         except Exception as exc:  # noqa: BLE001 -- native save code can raise almost anything

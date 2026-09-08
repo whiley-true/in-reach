@@ -57,18 +57,16 @@ def test_scroll_area_uses_the_pane_background_not_the_window_background(welcome:
         assert widget.autoFillBackground() is True
 
 
-def test_each_quadrant_is_a_bordered_card(welcome: WelcomeTab) -> None:
-    # PROMPT.md: "add more of a border around the edge - so that there is less central space
-    # wasted between components".
-    from in_reach.ide import style
-
+def test_quadrants_have_no_border_outline(welcome: WelcomeTab) -> None:
+    # PROMPT.md: "please remove the border outlines around the welcome window texts/links" -- an
+    # earlier pass drew a bordered card around each quadrant; this is the regression guard that it
+    # stays gone.
     for frame in (
         welcome.new_blank_button.parentWidget(),
         welcome._recent_layout.parentWidget(),
         welcome.verify_tabs.parentWidget(),
     ):
-        assert "border" in frame.styleSheet()
-        assert frame.styleSheet() == style.PANEL_BORDER_STYLE
+        assert frame.styleSheet() == ""
 
 
 # -- the verify quadrant -----------------------------------------------------------------------------

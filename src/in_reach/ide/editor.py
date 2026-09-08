@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QKeyEvent,
@@ -121,20 +121,30 @@ class _BreadcrumbBar(QLabel):
         return QSize(0, _BREADCRUMB_HEIGHT)
 
 
-class _Minimap(QWidget):
-    """A shrunk, whole-document preview pinned along the editor's right edge, next to its vertical
-    scrollbar (PROMPT.md: "a live code preview on the right hand side next to the scrollbar").
+#: Fixed pixel height per rendered line in the minimap (PROMPT.md: "the live code preview ... it
+#: should scroll with the editor, and should contain text instead of blocks") -- a real (if tiny)
+#: rendering of the actual glyphs, shrunk down via a painter scale rather than an unreadably small
+#: point size (see :meth:`_Minimap._paint_lines`), same density VS Code's own minimap uses.
+_MINI_LINE_HEIGHT = 3.0
 
-    Each line is drawn as a short horizontal bar -- its length proportional to that line's own
-    trimmed length -- rather than actual glyphs: legible code at minimap scale reads as a "shape"
-    more than literal text either way (VS Code's own minimap included at any real zoom-out level),
-    and a bar is exact and cheap to draw regardless of file size, where laying out real glyphs a
-    handful of pixels tall per line would not be. A line the live schema check currently flags (see
-    :meth:`TextEditorWidget._update_schema_validation`) draws as a full-width red bar instead, so a
-    problem stays visible even scrolled out of the main view (PROMPT.md: "it should highlight
-    errors as a line in colour"). A translucent band over the whole width shows which slice of the
-    document the main view currently shows, and both clicking and dragging inside it scroll the
-    editor to match -- clicking anywhere else jumps straight there.
+
+class _Minimap(QWidget):
+    """A shrunk, *scrolling* preview of the surrounding text pinned along the editor's right edge,
+    next to its vertical scrollbar (PROMPT.md: "a live code preview on the right hand side next to
+    the scrollbar").
+
+    Unlike a traditional whole-document overview, this always starts from the same line the main
+    view itself currently starts from (:meth:`QPlainTextEdit.firstVisibleBlock`) and draws real
+    text at a fixed, tiny line height -- PROMPT.md: "it should scroll with the editor" (rather than
+    staying static while squashing the entire file to fit) "and should contain text instead of
+    blocks". A short file simply runs out of lines partway down rather than being stretched to fill
+    the column (PROMPT.md: "if the editor file is not long, the preview does not need to fill the
+    full screen vertically"). A translucent band over the top of it shows how much of that same
+    stretch the main view currently shows, and a line the live schema check currently flags (see
+    :meth:`TextEditorWidget._update_schema_validation`) draws as a full-width red bar behind its own
+    text, so a problem stays visible even where it's only a page or two away (PROMPT.md: "it should
+    highlight errors as a line in colour"). Clicking or dragging inside it scrolls the editor to
+    match.
     """
 
     def __init__(self, editor: "TextEditorWidget") -> None:
@@ -143,6 +153,10 @@ class _Minimap(QWidget):
         #: 0-based block numbers the live schema check currently flags -- see
         #: :meth:`set_error_lines`.
         self.error_lines: set[int] = set()
+        #: Set for the duration of a press-drag -- ``(press_y, scrollbar_value_at_press)``, so a
+        #: drag's own scroll delta is measured from where the mouse went down, not from wherever it
+        #: last was (which would compound movement rather than track the pointer 1:1).
+        self._drag_anchor: tuple[float, int] | None = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def sizeHint(self) -> QSize:
@@ -156,70 +170,104 @@ class _Minimap(QWidget):
             self.error_lines = lines
             self.update()
 
-    def _line_height(self) -> float:
-        return max(self.height(), 1) / max(self._editor.document().blockCount(), 1)
+    def _visible_block_count(self) -> int:
+        """How many of the main editor's own blocks currently fit in its viewport -- walking block
+        geometry (same technique :meth:`TextEditorWidget._draw_indent_guides` already uses) rather
+        than a fixed guess, so it stays correct as a block wraps across several visual lines."""
+        editor = self._editor
+        viewport_height = editor.viewport().height()
+        block = editor.firstVisibleBlock()
+        top = round(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
+        count = 0
+        while block.isValid() and top < viewport_height:
+            top += round(editor.blockBoundingRect(block).height())
+            count += 1
+            block = block.next()
+        return count
 
-    def _visible_band(self) -> QRectF:
-        """The vertical slice of the minimap corresponding to what the main view currently shows,
-        derived from the vertical scrollbar's own range/page step rather than block geometry --
-        exact regardless of line-wrapping, unlike a computation based on block numbers alone."""
-        scrollbar = self._editor.verticalScrollBar()
-        extent = scrollbar.maximum() - scrollbar.minimum() + scrollbar.pageStep()
-        if extent <= 0:
-            return QRectF(0, 0, self.width(), self.height())
-        height = self.height()
-        top = height * ((scrollbar.value() - scrollbar.minimum()) / extent)
-        band_height = max(4.0, height * (scrollbar.pageStep() / extent))
-        return QRectF(0, top, self.width(), band_height)
+    def _line_offset(self, y: float) -> int:
+        """How many minimap lines below its own top edge ``y`` sits -- the unit both a click's own
+        jump and a drag's own delta are measured in."""
+        return round(y / _MINI_LINE_HEIGHT)
 
-    def _scroll_to(self, y: int) -> None:
-        doc = self._editor.document()
-        last = max(0, doc.blockCount() - 1)
-        fraction = min(max(y / max(self.height(), 1), 0.0), 1.0)
-        block = doc.findBlockByNumber(round(fraction * last))
-        cursor = QTextCursor(block)
-        self._editor.setTextCursor(cursor)
-        self._editor.centerCursor()
+    def _first_line(self) -> int:
+        """The 0-based block number the minimap starts rendering from -- always the main editor's
+        own current :meth:`~QPlainTextEdit.firstVisibleBlock`, which is what makes this a *scrolling*
+        preview (PROMPT.md: "it should scroll with the editor") rather than a static, whole-document
+        overview."""
+        return self._editor.firstVisibleBlock().blockNumber()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._scroll_to(round(event.position().y()))
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        scrollbar = self._editor.verticalScrollBar()
+        scrollbar.setValue(scrollbar.value() + self._line_offset(event.position().y()))
+        self._drag_anchor = (event.position().y(), scrollbar.value())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if event.buttons() & Qt.MouseButton.LeftButton:
-            self._scroll_to(round(event.position().y()))
+        if self._drag_anchor is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        start_y, start_value = self._drag_anchor
+        delta = self._line_offset(event.position().y() - start_y)
+        self._editor.verticalScrollBar().setValue(start_value + delta)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_anchor = None
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        palette = self._editor.palette()
-        line_height = self._line_height()
-
+        editor = self._editor
+        palette = editor.palette()
         painter = QPainter(self)
         painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
 
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText))
-        bar_height = max(1.0, line_height * 0.7)
-        max_bar_width = max(1, self.width() - 4)
-        block = self._editor.document().firstBlock()
-        index = 0
-        while block.isValid():
-            length = len(block.text().strip())
-            if length:
-                y = index * line_height
-                painter.drawRect(QRectF(2, y, min(length, max_bar_width), bar_height))
-            block = block.next()
-            index += 1
+        max_lines = int(self.height() / _MINI_LINE_HEIGHT) + 1
+        first_line = self._first_line()
 
         if self.error_lines:
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(_ERROR_COLOR))
             for line in self.error_lines:
-                painter.drawRect(QRectF(0, line * line_height, self.width(), max(2.0, line_height)))
+                offset = line - first_line
+                if 0 <= offset < max_lines:
+                    painter.drawRect(QRectF(0, offset * _MINI_LINE_HEIGHT, self.width(), _MINI_LINE_HEIGHT))
 
+        self._paint_lines(painter, max_lines)
+
+        visible = self._visible_block_count()
         band_color = palette.color(QPalette.ColorRole.Highlight)
         band_color.setAlpha(70)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(band_color)
-        painter.drawRect(self._visible_band())
+        painter.drawRect(QRectF(0, 0, self.width(), visible * _MINI_LINE_HEIGHT))
         painter.end()
+
+    def _paint_lines(self, painter: QPainter, max_lines: int) -> None:
+        """Draws each line starting from the main view's own :meth:`~QPlainTextEdit.
+        firstVisibleBlock` as real (if shrunken) text -- a scaled-down transform around an ordinary
+        ``drawText()`` call, rather than an unreadably small point size, is what keeps the glyphs
+        looking like antialiased text rather than illegible pixel noise."""
+        editor = self._editor
+        real_line_height = editor.fontMetrics().height()
+        if real_line_height <= 0:
+            return
+        scale = _MINI_LINE_HEIGHT / real_line_height
+        ascent = editor.fontMetrics().ascent()
+
+        painter.setFont(editor.font())
+        painter.setPen(editor.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText))
+
+        block = editor.firstVisibleBlock()
+        index = 0
+        while block.isValid() and index < max_lines:
+            text = block.text()
+            if text.strip():
+                painter.save()
+                painter.translate(2.0, index * _MINI_LINE_HEIGHT)
+                painter.scale(scale, scale)
+                painter.drawText(QPointF(0, ascent), text)
+                painter.restore()
+            block = block.next()
+            index += 1
 
 
 class TextEditorWidget(QPlainTextEdit):

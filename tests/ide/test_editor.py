@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.ide.editor import TextEditorWidget, _indent_level
@@ -341,7 +343,7 @@ def test_indent_guides_paint_a_line_at_each_indent_level(qtbot) -> None:
 
     space_width = editor.fontMetrics().horizontalAdvance(" ")
     base_x = round(editor.contentOffset().x())
-    background = editor.palette().color(editor.backgroundRole())
+    background = editor.palette().color(QPalette.ColorRole.Base)  # the minimap's own fill color
 
     pixmap = editor.viewport().grab()
     image = pixmap.toImage()
@@ -494,15 +496,131 @@ def test_minimap_paints_without_raising_on_an_empty_document(qtbot) -> None:
     assert not editor._minimap.grab().isNull()
 
 
-def test_minimap_scroll_to_moves_the_editors_cursor(qtbot) -> None:
+def _non_background_pixels(image, background) -> int:
+    return sum(
+        1
+        for x in range(image.width())
+        for y in range(image.height())
+        if image.pixelColor(x, y) != background
+    )
+
+
+def test_minimap_renders_text_not_solid_blocks(qtbot) -> None:
+    # PROMPT.md: "and should contain text instead of blocks" -- a real (if tiny) glyph rendering
+    # paints a sparser set of pixels than a filled bar covering the same line would, so a document
+    # with real content still leaves most of its own line height untouched, unlike the old
+    # solid-bar rendering it replaced.
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.show()
+    QApplication.processEvents()
+    background = editor.palette().color(QPalette.ColorRole.Base)  # the minimap's own fill color
+    empty_count = _non_background_pixels(editor._minimap.grab().toImage(), background)
+
+    editor.setPlainText("\n".join(f"some real code on line {i}" for i in range(20)))
+    QApplication.processEvents()
+
+    filled_count = _non_background_pixels(editor._minimap.grab().toImage(), background)
+    assert filled_count > empty_count
+
+
+def test_minimap_does_not_stretch_to_fill_a_short_document(qtbot) -> None:
+    # PROMPT.md: "if the editor file is not long, the preview does not need to fill the full
+    # screen vertically" -- the bottom of a tall minimap column should stay untouched background
+    # when the document itself only has a few lines.
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 400)
+    editor.setPlainText("only\na few\nlines")
+    editor.show()
+    QApplication.processEvents()
+
+    background = editor.palette().color(QPalette.ColorRole.Base)  # the minimap's own fill color
+    image = editor._minimap.grab().toImage()
+    bottom_row = image.height() - 1
+    assert all(image.pixelColor(x, bottom_row) == background for x in range(image.width()))
+
+
+def test_minimap_starts_from_the_editors_own_first_visible_block_and_tracks_scrolling(qtbot) -> None:
+    # PROMPT.md: "it should scroll with the editor" -- rather than always squashing the whole
+    # document to fit, the minimap's own first rendered line follows firstVisibleBlock().
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
     editor.resize(300, 200)
     editor.setPlainText("\n".join(f"line {i}" for i in range(500)))
     editor.show()
     QApplication.processEvents()
-    before = editor.textCursor().blockNumber()
+    assert editor._minimap._first_line() == editor.firstVisibleBlock().blockNumber() == 0
 
-    editor._minimap._scroll_to(editor._minimap.height() - 1)  # click near the bottom
+    editor.verticalScrollBar().setValue(editor.verticalScrollBar().maximum())
+    QApplication.processEvents()
 
-    assert editor.textCursor().blockNumber() > before
+    assert editor._minimap._first_line() == editor.firstVisibleBlock().blockNumber() > 0
+
+
+def test_clicking_the_minimap_scrolls_the_editor(qtbot) -> None:
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText("\n".join(f"line {i}" for i in range(500)))
+    editor.show()
+    QApplication.processEvents()
+    before = editor.verticalScrollBar().value()
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(2, editor._minimap.height() - 1),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    editor._minimap.mousePressEvent(press)
+
+    assert editor.verticalScrollBar().value() > before
+
+
+def test_dragging_the_minimap_scrolls_the_editor_further(qtbot) -> None:
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText("\n".join(f"line {i}" for i in range(500)))
+    editor.show()
+    QApplication.processEvents()
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(2, 0),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    editor._minimap.mousePressEvent(press)
+    after_press = editor.verticalScrollBar().value()
+
+    move = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(2, 60),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    editor._minimap.mouseMoveEvent(move)
+
+    assert editor.verticalScrollBar().value() > after_press
+
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(2, 60),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    editor._minimap.mouseReleaseEvent(release)
+    assert editor._minimap._drag_anchor is None
