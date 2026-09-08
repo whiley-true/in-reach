@@ -1,19 +1,15 @@
-"""Scans a project's map-variant folders (personal + built-in) into ``maps/master.json`` and
-``maps.json``.
+"""Scans a project's map-variant folders (personal + built-in) into the shared ``maps.json``, and
+filters that master list down to what one gametype can actually be played on.
 
-Ported, in reduced form, from the v2 prototype's ``app/maps_io.py``: that module also filtered
-``master.json`` down to ``maps.json`` against a gametype's own ``script_settings.json``
-(``map_permissions``/``forge_labels``) -- nothing here has a ``script_settings.json`` yet (this
-repo's ``edit/rvt`` starts empty, see :mod:`in_reach.app.new_project`), so :func:`write_maps_json`
-only ever writes the unfiltered scan to both files for now. Re-filtering ``maps.json`` down once a
-real ``script_settings.json`` exists is future work, ported the same deliberate way this was.
-
-PROMPT.md: ``maps.json`` used to duplicate at ``<project_folder>/maps.json`` -- one identical copy
-per gametype project, even though the scan itself only depends on the personal/standard/hopper map
-folders (shared, project-independent state), not on the gametype that triggered it. It now writes
-once, centrally, to ``<in_reach_dir>/maps.json`` (the ``.in-reach`` folder every project shares)
-instead. ``<project_folder>/maps/master.json`` is unaffected -- still a per-project snapshot, kept
-as the future filtering base :func:`write_maps_json`'s own docstring already described.
+Ported, in reduced form, from the v2 prototype's ``app/maps_io.py``. PROMPT.md, across two passes:
+the unfiltered master scan writes once, centrally, to ``<in_reach_dir>/maps.json`` (the
+``.in-reach`` folder every project shares) rather than duplicating a copy per gametype project --
+first as ``<project_folder>/maps.json``, then (once decompiling actually produced a real
+``script_settings.json`` to filter against) the leftover ``<project_folder>/maps/master.json``
+per-project snapshot was dropped too ("there should be no maps dir anymore") in favor of
+:func:`filter_maps_for_gametype`'s real output, ``<project_folder>/settings/valid_maps.json`` (see
+:mod:`in_reach.app.rvt.decompile`, which calls both of these once it has a loaded ``.bin``'s
+``script_settings`` in hand).
 """
 
 from __future__ import annotations
@@ -23,19 +19,21 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from in_reach.app.map_variant import parse_mvar_forge_labels, parse_mvar_header
+from in_reach.app.rvt.models.enums import MapPermissionType
+from in_reach.app.rvt.models.script_settings import ScriptSettings
 
 MAP_VARIANT_EXTENSION = ".mvar"
-MAPS_DIRNAME = "maps"
-MAPS_MASTER_FILENAME = "master.json"
 MAPS_FILENAME = "maps.json"
+VALID_MAPS_FILENAME = "valid_maps.json"
 
-MASTER_MAPS_FILE_COMMENT = (
-    "Every Forge map variant in-reach found across the personal/standard/hopper map-variant "
-    "folders, regenerated wholesale whenever a project is scanned -- do not hand-edit."
-)
 MAPS_FILE_COMMENT = (
-    "Every Forge map variant in-reach found, shared across every project (PROMPT.md) -- "
-    "unfiltered for now (no script_settings.json yet to filter against). Do not hand-edit."
+    "Every Forge map variant in-reach found across the personal/standard/hopper map-variant "
+    "folders, shared across every project -- regenerated wholesale whenever a project is created. "
+    "Do not hand-edit."
+)
+VALID_MAPS_FILE_COMMENT = (
+    "maps.json (in .in-reach/), narrowed down to the maps this gametype can actually be played on "
+    "-- see in_reach.app.maps_io.filter_maps_for_gametype. Do not hand-edit."
 )
 
 SOURCE_PERSONAL = "personal"
@@ -130,23 +128,82 @@ def _write_entries_json(entries: list[MapEntry], out_path: Path, comment: str) -
     return out_path
 
 
-def write_maps_json(entries: list[MapEntry], project_folder: Path, in_reach_dir: Path) -> tuple[Path, Path]:
-    """Writes ``entries`` to ``<project_folder>/maps/master.json`` (this project's own unfiltered
-    snapshot) and ``<in_reach_dir>/maps.json`` (identical content for now -- see this module's own
-    docstring -- but written once, shared by every project, not duplicated per one).
+def write_maps_json(entries: list[MapEntry], in_reach_dir: Path) -> Path:
+    """Writes ``entries`` to ``<in_reach_dir>/maps.json`` -- the one shared master scan every
+    project reads, not duplicated per one.
 
     Args:
         entries: Scanned entries, as returned by :func:`scan_maps`.
-        project_folder: The gametype project's own folder (the generated-id folder, not
-            ``.in-reach``).
-        in_reach_dir: The project's ``.in-reach`` folder (PROMPT.md: "the maps.json master file"
-            belongs here, not inside ``project_folder``).
+        in_reach_dir: The project's ``.in-reach`` folder.
 
     Returns:
-        ``(master_path, maps_path)``.
+        The written path.
     """
-    master_path = _write_entries_json(
-        entries, project_folder / MAPS_DIRNAME / MAPS_MASTER_FILENAME, MASTER_MAPS_FILE_COMMENT
-    )
-    maps_path = _write_entries_json(entries, in_reach_dir / MAPS_FILENAME, MAPS_FILE_COMMENT)
-    return master_path, maps_path
+    return _write_entries_json(entries, in_reach_dir / MAPS_FILENAME, MAPS_FILE_COMMENT)
+
+
+def read_maps_json(in_reach_dir: Path) -> list[MapEntry]:
+    """Reads back ``<in_reach_dir>/maps.json`` (normally to re-filter it into a
+    ``valid_maps.json`` -- see :func:`filter_maps_for_gametype` -- without a full folder rescan).
+
+    Returns an empty list if the file doesn't exist or fails to parse, same "never raise" reasoning
+    as :func:`~in_reach.app.rvt.settings_io.load_script_settings`.
+    """
+    path = in_reach_dir / MAPS_FILENAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    try:
+        return [MapEntry(**entry) for entry in data.get("maps", [])]
+    except TypeError:
+        return []
+
+
+def filter_maps_for_gametype(entries: list[MapEntry], script_settings: ScriptSettings) -> list[MapEntry]:
+    """Narrows ``entries`` (normally ``maps.json``'s full list) down to the maps this gametype can
+    actually be played on, per its own ``script_settings``:
+
+    - ``map_permissions``: an allow-list (``only_these_maps``) or deny-list (``never_these_maps``)
+      of base canvas map IDs -- matched against each entry's own ``map_id``.
+    - ``forge_labels``: every named label in ``script_settings.forge_labels`` is a real
+      requirement -- a label only shows up there at all when the gametype's script actually
+      declares/references it, so its mere presence already means the script needs at least one
+      matching object on the map. ``map_must_have_at_least`` is *not* used as the "is this
+      required" gate: real published gametypes commonly leave it at its default ``0`` even though
+      the label is genuinely required. Every required label's name must appear somewhere in the
+      map's own ``forge_labels`` -- a map missing even one is excluded; this checks presence only,
+      not any count.
+
+    A gametype with no configured restrictions and no forge labels at all returns ``entries``
+    unfiltered.
+
+    Args:
+        entries: The unfiltered master scan, as returned by :func:`scan_maps`.
+        script_settings: The gametype's own decompiled ``ScriptSettings``.
+
+    Returns:
+        The entries this gametype can actually be played on.
+    """
+    permissions = script_settings.map_permissions
+    required_labels = {label.name for label in script_settings.forge_labels if label.name}
+
+    result = []
+    for entry in entries:
+        if permissions.type == MapPermissionType.only_these_maps:
+            if entry.map_id not in permissions.map_ids:
+                continue
+        elif entry.map_id in permissions.map_ids:
+            continue
+
+        if required_labels and not required_labels.issubset(entry.forge_labels):
+            continue
+
+        result.append(entry)
+    return result
+
+
+def write_valid_maps_json(entries: list[MapEntry], out_path: Path) -> Path:
+    """Writes ``entries`` (normally :func:`filter_maps_for_gametype`'s own result) to ``out_path``
+    (normally ``<project_folder>/settings/valid_maps.json``)."""
+    return _write_entries_json(entries, out_path, VALID_MAPS_FILE_COMMENT)

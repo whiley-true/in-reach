@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
 
-from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.editor import TextEditorWidget, _indent_level
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
 
 
@@ -279,3 +279,47 @@ def test_clicking_the_gutter_on_a_non_foldable_line_does_nothing(qtbot) -> None:
     editor.toggle_fold_at(QPoint(2, top + 2))
 
     assert editor._collapsed_folds == set()
+
+
+# -- indent guides ------------------------------------------------------------------------------
+
+
+def test_indent_level_counts_complete_two_space_levels() -> None:
+    assert _indent_level("") == 0
+    assert _indent_level('"a": 1') == 0
+    assert _indent_level('  "a": 1') == 1
+    assert _indent_level('    "a": 1') == 2
+    assert _indent_level("   odd single space") == 1  # 3 leading spaces -- 1 complete level
+
+
+def test_indent_guides_paint_a_line_at_each_indent_level(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText('{\n    "a": 1\n}')  # line 1 is indented two levels (4 spaces)
+    editor.show()
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    space_width = editor.fontMetrics().horizontalAdvance(" ")
+    base_x = round(editor.contentOffset().x())
+    background = editor.palette().color(editor.backgroundRole())
+
+    pixmap = editor.viewport().grab()
+    image = pixmap.toImage()
+    block = editor.document().findBlockByNumber(1)
+    y = round(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top()) + 2
+
+    # A guide line should sit at 2 and 4 spaces in -- neither column is the plain background color.
+    for level in (1, 2):
+        x = base_x + level * 2 * space_width
+        assert 0 <= x < image.width()
+        assert image.pixelColor(x, y) != background
+
+
+def test_indent_guides_do_not_crash_on_an_empty_document(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.show()
+    QApplication.processEvents()  # should not raise

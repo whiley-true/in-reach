@@ -76,51 +76,135 @@ def test_scan_maps_reads_real_forge_labels_when_present(tmp_path: Path) -> None:
     assert entries[0].forge_labels == ["team_only", "ctf_flag"]
 
 
-def test_write_maps_json_writes_master_in_the_project_and_maps_json_in_in_reach(tmp_path: Path) -> None:
-    folder = tmp_path / "project"
-    folder.mkdir()
+def test_write_maps_json_writes_to_in_reach(tmp_path: Path) -> None:
     in_reach_dir = tmp_path / ".in-reach"
     in_reach_dir.mkdir()
 
-    master_path, maps_path = maps_io.write_maps_json(
-        [maps_io.MapEntry("x.mvar", maps_io.SOURCE_PERSONAL, "X", "", 0, None)], folder, in_reach_dir
+    maps_path = maps_io.write_maps_json(
+        [maps_io.MapEntry("x.mvar", maps_io.SOURCE_PERSONAL, "X", "", 0, None)], in_reach_dir
     )
 
-    assert master_path == folder / "maps" / "master.json"
     assert maps_path == in_reach_dir / "maps.json"
-    master_doc = json.loads(master_path.read_text(encoding="utf-8"))
     maps_doc = json.loads(maps_path.read_text(encoding="utf-8"))
-    assert master_doc["maps"] == maps_doc["maps"]
-    assert master_doc["maps"][0]["title"] == "X"
+    assert maps_doc["maps"][0]["title"] == "X"
 
 
 def test_write_maps_json_with_no_entries_writes_an_empty_list(tmp_path: Path) -> None:
-    folder = tmp_path / "project"
-    folder.mkdir()
     in_reach_dir = tmp_path / ".in-reach"
     in_reach_dir.mkdir()
 
-    _master, maps_path = maps_io.write_maps_json([], folder, in_reach_dir)
+    maps_path = maps_io.write_maps_json([], in_reach_dir)
 
     assert json.loads(maps_path.read_text(encoding="utf-8"))["maps"] == []
 
 
-def test_write_maps_json_a_second_call_overwrites_the_shared_in_reach_copy(tmp_path: Path) -> None:
-    # PROMPT.md: maps.json is shared across every project now, not duplicated per one -- a second
+def test_write_maps_json_a_second_call_overwrites_the_shared_copy(tmp_path: Path) -> None:
+    # PROMPT.md: maps.json is shared across every project, not duplicated per one -- a second
     # project's own scan should overwrite the one file, not create a second copy.
-    first_folder = tmp_path / "first"
-    first_folder.mkdir()
-    second_folder = tmp_path / "second"
-    second_folder.mkdir()
     in_reach_dir = tmp_path / ".in-reach"
     in_reach_dir.mkdir()
 
-    maps_io.write_maps_json(
-        [maps_io.MapEntry("a.mvar", maps_io.SOURCE_PERSONAL, "A", "", 0, None)], first_folder, in_reach_dir
-    )
-    _master, maps_path = maps_io.write_maps_json(
-        [maps_io.MapEntry("b.mvar", maps_io.SOURCE_PERSONAL, "B", "", 0, None)], second_folder, in_reach_dir
+    maps_io.write_maps_json([maps_io.MapEntry("a.mvar", maps_io.SOURCE_PERSONAL, "A", "", 0, None)], in_reach_dir)
+    maps_path = maps_io.write_maps_json(
+        [maps_io.MapEntry("b.mvar", maps_io.SOURCE_PERSONAL, "B", "", 0, None)], in_reach_dir
     )
 
     maps_doc = json.loads(maps_path.read_text(encoding="utf-8"))
     assert [entry["title"] for entry in maps_doc["maps"]] == ["B"]
+
+
+def test_read_maps_json_round_trips_what_write_maps_json_wrote(tmp_path: Path) -> None:
+    in_reach_dir = tmp_path / ".in-reach"
+    in_reach_dir.mkdir()
+    entry = maps_io.MapEntry("x.mvar", maps_io.SOURCE_PERSONAL, "X", "desc", 42, "Countdown", ["ctf_flag"])
+    maps_io.write_maps_json([entry], in_reach_dir)
+
+    assert maps_io.read_maps_json(in_reach_dir) == [entry]
+
+
+def test_read_maps_json_of_a_missing_file_is_empty(tmp_path: Path) -> None:
+    assert maps_io.read_maps_json(tmp_path / ".in-reach") == []
+
+
+def test_read_maps_json_of_unparsable_json_is_empty(tmp_path: Path) -> None:
+    in_reach_dir = tmp_path / ".in-reach"
+    in_reach_dir.mkdir()
+    (in_reach_dir / maps_io.MAPS_FILENAME).write_text("not json", encoding="utf-8")
+
+    assert maps_io.read_maps_json(in_reach_dir) == []
+
+
+# -- filter_maps_for_gametype --------------------------------------------------------------------
+
+
+def _entry(**overrides) -> "maps_io.MapEntry":
+    defaults = dict(
+        filename="a.mvar", source=maps_io.SOURCE_PERSONAL, title="A", description="", map_id=42,
+        base_canvas_map=None, forge_labels=[],
+    )
+    defaults.update(overrides)
+    return maps_io.MapEntry(**defaults)
+
+
+def test_filter_maps_for_gametype_with_no_restrictions_returns_everything() -> None:
+    from in_reach.app.rvt.models.script_settings import ScriptSettings
+
+    entries = [_entry(map_id=1), _entry(map_id=2)]
+
+    assert maps_io.filter_maps_for_gametype(entries, ScriptSettings()) == entries
+
+
+def test_filter_maps_for_gametype_only_these_maps_is_an_allow_list() -> None:
+    from in_reach.app.rvt.models.enums import MapPermissionType
+    from in_reach.app.rvt.models.script_settings import MapPermissions, ScriptSettings
+
+    allowed = _entry(map_id=1, title="Allowed")
+    excluded = _entry(map_id=2, title="Excluded")
+    settings = ScriptSettings(map_permissions=MapPermissions(type=MapPermissionType.only_these_maps, map_ids=[1]))
+
+    result = maps_io.filter_maps_for_gametype([allowed, excluded], settings)
+
+    assert [e.title for e in result] == ["Allowed"]
+
+
+def test_filter_maps_for_gametype_never_these_maps_is_a_deny_list() -> None:
+    from in_reach.app.rvt.models.enums import MapPermissionType
+    from in_reach.app.rvt.models.script_settings import MapPermissions, ScriptSettings
+
+    allowed = _entry(map_id=1, title="Allowed")
+    excluded = _entry(map_id=2, title="Excluded")
+    settings = ScriptSettings(map_permissions=MapPermissions(type=MapPermissionType.never_these_maps, map_ids=[2]))
+
+    result = maps_io.filter_maps_for_gametype([allowed, excluded], settings)
+
+    assert [e.title for e in result] == ["Allowed"]
+
+
+def test_filter_maps_for_gametype_requires_every_forge_label() -> None:
+    from in_reach.app.rvt.models.script_settings import ForgeLabel, ScriptSettings
+
+    has_both = _entry(title="Has Both", forge_labels=["flag_a", "flag_b"])
+    has_one = _entry(title="Has One", forge_labels=["flag_a"])
+    settings = ScriptSettings(forge_labels=[ForgeLabel(name="flag_a"), ForgeLabel(name="flag_b")])
+
+    result = maps_io.filter_maps_for_gametype([has_both, has_one], settings)
+
+    assert [e.title for e in result] == ["Has Both"]
+
+
+def test_filter_maps_for_gametype_ignores_blank_forge_label_names() -> None:
+    from in_reach.app.rvt.models.script_settings import ForgeLabel, ScriptSettings
+
+    entry = _entry(forge_labels=[])
+    settings = ScriptSettings(forge_labels=[ForgeLabel(name="")])
+
+    assert maps_io.filter_maps_for_gametype([entry], settings) == [entry]
+
+
+def test_write_valid_maps_json_writes_the_filtered_entries(tmp_path: Path) -> None:
+    out_path = tmp_path / "valid_maps.json"
+
+    maps_io.write_valid_maps_json([_entry(title="A")], out_path)
+
+    document = json.loads(out_path.read_text(encoding="utf-8"))
+    assert document["maps"][0]["title"] == "A"

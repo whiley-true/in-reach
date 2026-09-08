@@ -453,6 +453,138 @@ def test_launch_rvt_with_a_project_open_but_no_source_bin_passes_no_target(
     assert calls == [None]
 
 
+def test_opening_a_project_with_a_source_bin_watches_it(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+
+    window._on_project_opened(folder)
+
+    assert window._bin_watcher.files() == [str(bin_path)]
+
+
+def test_opening_a_project_with_no_source_bin_watches_nothing(window: MainWindow, tmp_path: Path) -> None:
+    window.root_dir = tmp_path
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+
+    window._on_project_opened(folder)
+
+    assert window._bin_watcher.files() == []
+
+
+def test_switching_the_active_project_rewatches_the_new_ones_bin(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    first_bin = new_project.source_variant_path(project_dir, first)
+    first_bin.parent.mkdir(parents=True)
+    first_bin.write_bytes(b"")
+    second_bin = new_project.source_variant_path(project_dir, second)
+    second_bin.write_bytes(b"")
+
+    window.explorer_panel.open_project(first)
+    assert window._bin_watcher.files() == [str(first_bin)]
+
+    window.explorer_panel.open_project(second)
+
+    assert window._bin_watcher.files() == [str(second_bin)]
+
+
+def test_the_watched_bin_changing_resyncs_the_build_snapshot(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+
+    calls = []
+    monkeypatch.setattr(
+        "in_reach.app.rvt.decompile.resync_from_bin",
+        lambda bin_path, folder, **k: calls.append((bin_path, folder, k)),
+    )
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert len(calls) == 1
+    assert calls[0][0] == bin_path
+    assert calls[0][1] == folder
+
+
+def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", _raise)
+
+    window._on_watched_bin_changed(str(bin_path))  # should not raise
+
+    assert str(bin_path) in window._bin_watcher.files()
+
+
+def test_watched_bin_deleted_then_recreated_is_still_watched_afterward(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Some writers save via delete-then-recreate, which silently drops a QFileSystemWatcher's own
+    # path -- the handler has to re-add it, or only the *first* RVT save would ever be caught.
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window._bin_watcher.removePaths(window._bin_watcher.files())  # simulate the drop
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", lambda *a, **k: None)
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert str(bin_path) in window._bin_watcher.files()
+
+
 def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:

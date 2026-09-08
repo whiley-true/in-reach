@@ -1,4 +1,4 @@
-"""Pydantic schema for a project's edit/settings/strings.json -- the shape
+"""Pydantic schema for a project's settings/strings.json -- the shape
 strings_io.extract_strings() already produces, formalized here so it has something to validate
 against before strings_writer.apply_strings() applies an edit onto a real variant (compile.py's
 pipeline), and so a real JSON Schema can be generated for it (schema_io.dump_json_schema()) for

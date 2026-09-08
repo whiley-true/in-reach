@@ -163,13 +163,13 @@ def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
     # The folder is a generated id now, not the title -- see new_project.create_gametype_project.
     assert folder.parent == root_dir
     assert folder.name != "Slayer Plus"
-    assert (folder / "edit" / "settings").is_dir()
+    assert (folder / "settings").is_dir()
     assert new_project.read_project_title(folder) == "Slayer Plus"
     assert recent.list_recent(welcome.project_dir) == [folder]
 
     # PROMPT.md: RVT wasn't running for blank gametypes (there was no .bin at all to point it at)
     # -- a blank project now starts from in-reach's own bundled blank multiplayer template, so
-    # there's always something for RVT to open and something that got decompiled into edit/.
+    # there's always something for RVT to open and something that got decompiled into settings/.
     bin_path = new_project.source_variant_path(welcome.project_dir, folder)
     assert bin_path.is_file()
     assert (folder / "edit" / "rvt" / "script.txt").is_file()
@@ -195,7 +195,7 @@ def test_new_blank_firefight_project_starts_from_the_firefight_template_with_no_
     folder = opened[0]
     bin_path = new_project.source_variant_path(welcome.project_dir, folder)
     assert bin_path.read_bytes() == blank_variant.resolve_blank_variant(firefight=True).read_bytes()
-    document = (folder / "user_settings.json").read_text(encoding="utf-8")
+    document = (folder / "settings" / "settings.json").read_text(encoding="utf-8")
     assert '"category": "none"' in document
 
 

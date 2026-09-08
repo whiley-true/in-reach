@@ -19,10 +19,11 @@ def env_path(tmp_path: Path) -> Path:
     return path
 
 
-def test_default_zoom_is_150_percent() -> None:
-    # PROMPT.md: a fresh project should open at 150% of the plain app font, not true 100% -- and
-    # MAX_ZOOM has to leave real headroom above that new default, not sit one step above it.
-    assert zoom.DEFAULT_ZOOM == 1.5
+def test_default_zoom_is_135_percent() -> None:
+    # PROMPT.md: a fresh project should open at 150% of the plain app font (not true 100%), later
+    # reduced 10% to 135% -- and MAX_ZOOM has to leave real headroom above that default, not sit
+    # one step above it.
+    assert zoom.DEFAULT_ZOOM == 1.35
     assert zoom.MAX_ZOOM > zoom.DEFAULT_ZOOM + zoom.ZOOM_STEP
 
 

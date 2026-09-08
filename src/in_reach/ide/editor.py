@@ -7,9 +7,11 @@ Adds, on top of the base ``QPlainTextEdit`` (PROMPT.md, across two passes):
   ``QPlainTextEdit``'s own block-layout geometry rather than tracked as separate state, so it can
   never drift out of sync with the actual text.
 - Fold markers in that same gutter, and the bracket-matching behind them (see
-  :mod:`in_reach.ide.code_folding`) -- "collapsible and expandable snippets" plus the fold-arrow
-  "symbol to show line markers" that triggers them. Bracket-based, not JSON-specific, so it works
-  the same for a Megalo ``script.txt`` as a settings ``.json``.
+  :mod:`in_reach.ide.code_folding`) -- "collapsible and expandable snippets". Bracket-based, not
+  JSON-specific, so it works the same for a Megalo ``script.txt`` as a settings ``.json``.
+- Indent guides -- thin vertical lines through the text area at each indentation level (PROMPT.md:
+  "the | symbol to show line markers"; a first pass read this as the fold arrows above instead, per
+  a later PROMPT.md pass -- "we're still missing the | symbol" -- that one wasn't it).
 - A breadcrumb bar pinned to the top margin (the same reserved-margin trick, just on the opposite
   edge) -- the open file's own path, plus (for a ``.json`` file specifically) the live JSON
   structural path to wherever the cursor currently sits (see :mod:`in_reach.ide.json_breadcrumb`).
@@ -36,6 +38,16 @@ _GUTTER_PADDING = 6
 _FOLD_MARKER_WIDTH = 14
 #: Height of the breadcrumb strip pinned to the editor's top margin.
 _BREADCRUMB_HEIGHT = 22
+#: Spaces per indent level for the vertical guide lines -- matches this project's own generated
+#: ``.json`` files (``json.dump(..., indent=2)``) and ``vs_sample.png`` itself.
+_INDENT_SIZE = 2
+
+
+def _indent_level(text: str) -> int:
+    """How many complete :data:`_INDENT_SIZE`-space indent levels ``text`` (one line) starts
+    with."""
+    leading = len(text) - len(text.lstrip(" "))
+    return leading // _INDENT_SIZE
 
 
 class _LineNumberArea(QWidget):
@@ -150,6 +162,35 @@ class TextEditorWidget(QPlainTextEdit):
                 contents.height() - _BREADCRUMB_HEIGHT,
             )
         )
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        self._draw_indent_guides(event)
+
+    def _draw_indent_guides(self, event: QPaintEvent) -> None:
+        """Thin vertical lines through the viewport at each indentation level -- drawn *after* the
+        base text (super().paintEvent() above) so they sit visually behind the glyphs rather than
+        painting over them, same layering ``QPlainTextEdit``'s own selection/current-line
+        highlighting uses."""
+        space_width = self.fontMetrics().horizontalAdvance(" ")
+        if space_width <= 0:
+            return
+
+        painter = QPainter(self.viewport())
+        painter.setPen(self.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText))
+        base_x = self.contentOffset().x()
+
+        block = self.firstVisibleBlock()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        while block.isValid() and top <= event.rect().bottom():
+            bottom = top + round(self.blockBoundingRect(block).height())
+            if block.isVisible() and bottom >= event.rect().top():
+                for level in range(1, _indent_level(block.text()) + 1):
+                    x = round(base_x + level * _INDENT_SIZE * space_width)
+                    painter.drawLine(x, top, x, bottom)
+            block = block.next()
+            top = bottom
+        painter.end()
 
     def paint_line_numbers(self, event: QPaintEvent) -> None:
         """Draws every visible block's 1-based line number, right-aligned, plus a fold-arrow

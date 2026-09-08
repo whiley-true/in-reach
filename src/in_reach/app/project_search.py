@@ -3,8 +3,8 @@
 Backs the Search sidebar view (PROMPT.md: "should search in project folder and have find and
 replace functionality"). Deliberately simple -- a case-insensitive literal substring match, not a
 regex engine -- since a gametype project's own text files (``edit/``'s settings/strings/script,
-plus ``README.md``/``user_settings.json``) are small in both count and size; nothing here needs to
-be fast against a large codebase the way a real IDE's project-wide search would.
+plus ``README.md``) are small in both count and size; nothing here needs to be fast against a large
+codebase the way a real IDE's project-wide search would.
 
 Every file under the project root is tried as UTF-8 text; anything that fails to decode (a
 compiled ``.bin``/``.mvar``, or ``build/``'s own output) is silently skipped, the same convention

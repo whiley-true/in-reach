@@ -20,11 +20,12 @@ from PyQt6.QtWidgets import QApplication
 from in_reach.app import env_file
 
 ZOOM_KEY = "UI_ZOOM"
-# 150% of the plain (100%) app font -- PROMPT.md asks for this as the out-of-the-box size rather
+# 135% of the plain (100%) app font -- PROMPT.md asks for this as the out-of-the-box size rather
 # than true 100%, so a fresh project already opens at the size that scaling was actually tuned
-# against. MAX_ZOOM is widened to match -- otherwise this default would sit one step from the
-# ceiling, leaving almost no room to zoom in any further.
-DEFAULT_ZOOM = 1.5
+# against. Originally 150%, then reduced 10% (PROMPT.md: "please reduce the default text ui scale
+# by 10%") to 1.5 * 0.9. MAX_ZOOM is widened to match -- otherwise this default would sit one step
+# from the ceiling, leaving almost no room to zoom in any further.
+DEFAULT_ZOOM = 1.35
 MIN_ZOOM = 0.7
 MAX_ZOOM = 2.0
 ZOOM_STEP = 0.1

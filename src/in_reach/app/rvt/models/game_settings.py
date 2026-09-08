@@ -17,7 +17,10 @@ mide/settings_io.py dumps/loads a GameSettings to/from game/settings.json (one o
 """
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_serializer, model_validator
+
+from in_reach.app.categories import EngineCategory as ProjectCategory
+from in_reach.app.categories import EngineIcon as ProjectIcon
 
 from .enums import (
     AIGrenades,
@@ -69,6 +72,21 @@ class Meta(BaseModel):
     description: str = Field(default="", max_length=127)  # MultiplayerData.variant_header.description, same page/header as title above -- NOT Metadata.description below, which is a different field entirely (see that class's docstring); falls back to GameVariant.content_header.description when not is_multiplayer, same as title
     source_file: str
     generated_at: datetime
+    # PROMPT.md: "we can get rid of user_settings.json ad move category and category_icon into
+    # settings.json" -- this project's own in_reach.app.categories classification (chosen in the
+    # New Project dialog), NOT the engine's own Metadata.engine_category/categorization_icon below
+    # -- those two can legitimately disagree (a blank project's source .bin has no real category of
+    # its own baked in at all; this project's own choice is independent either way).
+    category: ProjectCategory = ProjectCategory.none
+    category_icon: ProjectIcon | None = None
+
+    @field_serializer("category")
+    def _serialize_category(self, value: ProjectCategory) -> str:
+        return value.name
+
+    @field_serializer("category_icon")
+    def _serialize_category_icon(self, value: ProjectIcon | None) -> str | None:
+        return value.name if value is not None else None
 
 
 class Metadata(BaseModel):
