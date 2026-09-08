@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from PyQt6.QtGui import QColor
+
 from in_reach.ide import file_icons
 
 
@@ -41,6 +43,18 @@ def test_different_mapped_suffixes_render_different_icons(qtbot) -> None:
     mvar_icon = file_icons.icon_for_suffix(".mvar").pixmap(32, 32).toImage()
 
     assert bin_icon != mvar_icon
+
+
+def test_json_icon_is_yellow_braces(qtbot) -> None:
+    # PROMPT.md: "for the icons please use yellow {} for json".
+    image = file_icons.icon_for_suffix(".json").pixmap(32, 32).toImage()
+
+    colors = [image.pixelColor(x, y) for x in range(32) for y in range(32) if image.pixelColor(x, y).alpha() > 0]
+    expected = QColor(file_icons._JSON_COLOR)
+    assert any(
+        abs(c.red() - expected.red()) < 10 and abs(c.green() - expected.green()) < 10 and abs(c.blue() - expected.blue()) < 10
+        for c in colors
+    )
 
 
 def test_icon_for_suffix_falls_back_for_an_unknown_extension(qtbot) -> None:

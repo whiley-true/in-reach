@@ -32,6 +32,7 @@ from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
 from in_reach.ide.explorer import ExplorerPanel
+from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
@@ -39,7 +40,7 @@ from in_reach.ide.window_resize import cursor_for_edges, resize_edges
 
 _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
-_TOPBAR_MARK_SIZE = 16
+_TOPBAR_MARK_SIZE = 18  # PROMPT.md: 10% bigger than the plain 16px icon size elsewhere
 _WINDOW_BUTTON_WIDTH = 46
 _SIDEBAR_MIN_WIDTH = 180
 
@@ -325,7 +326,9 @@ class MainWindow(QWidget):
         already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
         if already_open:
             self.explorer_panel.set_project_folder(Path(already_open))
+            self.search_panel.set_project_folder(Path(already_open))
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
+        self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
@@ -373,9 +376,10 @@ class MainWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.explorer_panel = ExplorerPanel()
+        self.search_panel = SearchPanel()
         self._sidebar_pages = {
             "explorer": self.explorer_panel,
-            "search": self._build_sidebar_page("Search"),
+            "search": self.search_panel,
         }
         self._sidebar_stack = QStackedWidget()
         for page in self._sidebar_pages.values():
@@ -383,14 +387,6 @@ class MainWindow(QWidget):
         self._sidebar_stack.setCurrentWidget(self._sidebar_pages[DEFAULT_VIEW])
         layout.addWidget(self._sidebar_stack)
         return sidebar
-
-    def _build_sidebar_page(self, label: str) -> QWidget:
-        page = QWidget()
-        page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(12, 12, 12, 12)
-        page_layout.addWidget(QLabel(label))
-        page_layout.addStretch(1)
-        return page
 
     def _show_sidebar(self, visible: bool) -> None:
         self.primary_sidebar.setVisible(visible)
@@ -420,8 +416,9 @@ class MainWindow(QWidget):
         self.activity_bar.set_active_view("explorer")
 
     def _on_project_opened(self, folder: Path) -> None:
-        """Points the Explorer panel's main tree at a newly created/loaded gametype project."""
+        """Points the Explorer and Search panels at a newly created/loaded gametype project."""
         self.explorer_panel.set_project_folder(folder)
+        self.search_panel.set_project_folder(folder)
 
     def _on_settings_changed(self) -> None:
         """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
@@ -433,6 +430,10 @@ class MainWindow(QWidget):
         pane, same as "Open File" from the File menu (and, like that action, switching to the tab
         instead of duplicating it if the file's already open there)."""
         self.main_panel.active_pane.open_file(path)
+
+    def _on_search_file_activated(self, path: Path, line_number: int) -> None:
+        """Opens a search result -- into the active pane, jumping straight to the matched line."""
+        self.main_panel.active_pane.open_file_at_line(path, line_number)
 
     # -- File menu ------------------------------------------------------------------------------
 
@@ -482,9 +483,10 @@ class MainWindow(QWidget):
         self.main_panel.save_all()
 
     def close_project(self) -> None:
-        """"Close Project" -- clears the Explorer panel's main tree; doesn't touch any files, and
+        """"Close Project" -- clears the Explorer and Search panels; doesn't touch any files, and
         doesn't close this window (that's the title bar's own close button)."""
         self.explorer_panel.set_project_folder(None)
+        self.search_panel.set_project_folder(None)
 
     def close_editor(self) -> None:
         self.main_panel.active_pane.close_current()
@@ -563,12 +565,24 @@ class MainWindow(QWidget):
         # and toggle/window-control buttons) needs telling separately, since a font change alone
         # doesn't touch them.
         self.refresh_icon_colors()
+        # Same reasoning as refresh_icon_colors() above -- the Explorer panel's own +10% text
+        # scale is a one-time snapshot of app.font(), not a live binding to it.
+        self.explorer_panel.refresh_font_scale()
 
     def launch_rvt(self) -> None:
         """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
         to a real executable shipped inside the package itself (see
-        :func:`in_reach.app.rvt_launcher.resolve_rvt_exe`)."""
+        :func:`in_reach.app.rvt_launcher.resolve_rvt_exe`) -- against the currently selected
+        project's own source ``.bin``, if one is open and it has one (PROMPT.md: "when rvt is
+        opened, it opens the project in rvt")."""
         try:
-            rvt_launcher.launch_rvt()
+            rvt_launcher.launch_rvt(self._current_project_bin())
         except OSError as exc:
             QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")
+
+    def _current_project_bin(self) -> Path | None:
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return None
+        bin_path = new_project.source_variant_path(project.get_project_dir(self.root_dir), folder)
+        return bin_path if bin_path.is_file() else None

@@ -5,15 +5,15 @@ free text now (any characters, since nothing needs to be a legal Windows name on
 also a folder name), shown instead via the README and ``user_settings.json``. Everything else
 about the shape (``edit/`` hand-editable vs. ``build/`` generated-and-disposable, with the source
 ``.bin`` parked in ``.in-reach/init_gametype/``) is carried over from the v2 prototype's
-``inreach init``, plus two pieces that don't need the native ReachVariantTool extension (not ported
-into this repo yet, see CLAUDE.md): a ``maps.json``/``maps/master.json`` scan of the map-variant
-folders (:mod:`in_reach.app.maps_io`, itself built on a from-scratch ``.mvar`` parser that's
-independent of that extension -- see :mod:`in_reach.app.map_variant`), and a ``user_settings.json``
-carrying the title/description/category/category_icon this project was created with. What v2's
-``inreach init`` did that genuinely needs that extension -- loading a ``.bin``, decompiling it into
-``edit/``, compiling it back as a sanity check -- is left out: ``edit/rvt`` starts empty, and
-``script/stats.json`` (v2's own build-stats output, only ever produced by a real compile) isn't
-written at all yet.
+``inreach init``, plus a ``maps.json``/``maps/master.json`` scan of the map-variant folders
+(:mod:`in_reach.app.maps_io`, itself built on a from-scratch ``.mvar`` parser -- see
+:mod:`in_reach.app.map_variant`), and a ``user_settings.json`` carrying the
+title/description/category/category_icon this project was created with. A ``source_variant`` is
+now also decompiled straight into ``edit/`` (PROMPT.md: "when a project is selected the gametype is
+decompiled as in the previous repos"), via :mod:`in_reach.app.rvt.decompile` -- non-fatally, see
+:func:`_decompile_source_variant`. ``script/stats.json`` (v2's own build-stats output, only ever
+produced by a real compile) still isn't written yet -- that needs the compile-back-and-diff pass,
+not just a decompile.
 """
 
 from __future__ import annotations
@@ -116,6 +116,47 @@ def list_variants(folder: Path) -> list[tuple[str, Path]]:
     )
 
 
+def source_variant_path(project_dir: Path, gametype_folder: Path) -> Path:
+    """The ``.bin`` a gametype project was created from (and decompiled from -- see
+    :mod:`in_reach.app.rvt.decompile`), at ``.in-reach/init_gametype/<id>.bin``.
+
+    Read by :meth:`in_reach.ide.main_window.MainWindow.launch_rvt` to open RVT against the
+    currently selected project (PROMPT.md) instead of empty-handed -- callers should still check
+    :meth:`Path.is_file` on the result, since a project created with no source variant (a genuinely
+    blank one) has nothing here yet.
+
+    Args:
+        project_dir: The project's ``.in-reach`` folder.
+        gametype_folder: The gametype project's own folder, as returned by
+            :func:`create_gametype_project` -- only its ``name`` (the generated id) is used.
+
+    Returns:
+        The expected path, whether or not a file actually exists there yet.
+    """
+    return project_dir / INIT_GAMETYPE_DIRNAME / f"{gametype_folder.name}{_VARIANT_SUFFIX}"
+
+
+_GENERATED_SUFFIX = ".generated.json"
+
+
+def is_generated_file(path: Path) -> bool:
+    """Whether ``path`` is one of a project's own generated outputs -- ``build/``'s compiled
+    ``.bin``/``.mglo`` and its ``*.generated.json`` re-extraction snapshots (PROMPT.md) -- never
+    meant to be hand-edited, since the next successful build overwrites it wholesale from
+    ``edit/``. The IDE opens one read-only rather than letting an edit silently vanish on the next
+    build (see :meth:`in_reach.ide.tabs.TabPane.open_file`).
+
+    Args:
+        path: Any file path -- doesn't have to point inside a real project, or even exist.
+
+    Returns:
+        Whether ``path`` sits inside a ``build/`` folder at any depth, or its own name ends with
+        ``.generated.json`` (a belt-and-braces check -- every such file already lives under
+        ``build/`` today, but the name alone is just as unambiguous a signal on its own).
+    """
+    return BUILD_DIRNAME in path.parts or path.name.endswith(_GENERATED_SUFFIX)
+
+
 def read_project_title(folder: Path) -> str:
     """Reads a project folder's title back out of its own README.md.
 
@@ -136,6 +177,29 @@ def read_project_title(folder: Path) -> str:
             if line.startswith(_README_TITLE_LINE_PREFIX):
                 return line[len(_README_TITLE_LINE_PREFIX):].strip()
     return folder.name
+
+
+def _decompile_source_variant(bin_path: Path, folder: Path) -> str | None:
+    """Decompiles ``bin_path`` into ``folder``'s ``edit/`` (PROMPT.md: "when a project is selected
+    the gametype is decompiled as in the previous repos") -- imported lazily so that creating a
+    blank project (no ``source_variant``) never pays for importing pydantic/the native RVT
+    extension at all.
+
+    Non-fatal by design: a ``.bin`` the native extension can't load or make sense of shouldn't
+    block the project from being created at all -- ``edit/rvt`` is just left as it started (empty),
+    same as it already was before this was wired up, and the caller surfaces the returned message
+    the same way it already surfaces a category/icon mismatch warning.
+
+    Returns:
+        ``None`` on success, else a user-facing message describing what went wrong.
+    """
+    from in_reach.app.rvt.decompile import decompile_into_project
+
+    try:
+        decompile_into_project(bin_path, folder)
+    except Exception as exc:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+        return f"Couldn't decompile {bin_path.name} into this project:\n{exc}"
+    return None
 
 
 def _generate_project_id(root: Path) -> str:
@@ -232,15 +296,20 @@ def create_gametype_project(
         encoding="utf-8",
     )
 
+    decompile_warning = None
     if source_variant is not None:
         gametype_dir = project_dir / INIT_GAMETYPE_DIRNAME
         gametype_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_variant, gametype_dir / f"{project_id}{_VARIANT_SUFFIX}")
+        copied_variant = gametype_dir / f"{project_id}{_VARIANT_SUFFIX}"
+        shutil.copyfile(source_variant, copied_variant)
+        decompile_warning = _decompile_source_variant(copied_variant, folder)
 
     resolved_icon = category_icon if category_icon is not None else (default_icon_for(category) or EngineIcon.capture_the_flag)
     warning = user_settings.write_user_settings(
         folder / user_settings.USER_SETTINGS_FILENAME, title, description, category, resolved_icon
     )
+    if decompile_warning:
+        warning = f"{warning}\n\n{decompile_warning}" if warning else decompile_warning
 
     entries = maps_io.scan_maps(
         personal_dir=personal_maps_dir, standard_dir=standard_maps_dir, hopper_dir=hopper_maps_dir

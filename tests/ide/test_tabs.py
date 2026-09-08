@@ -586,6 +586,19 @@ def test_open_file_adds_a_tab_with_the_files_content(window: MainWindow, tmp_pat
     assert pane.tabText(index) == "script.txt"
     assert pane.widget(index).toPlainText() == "print('hi')"
     assert pane._tab_state_for(pane.widget(index)).path == source
+    assert pane.widget(index).isReadOnly() is False
+
+
+def test_open_file_opens_a_generated_file_read_only(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    source = build_dir / "settings.generated.json"
+    source.write_text("{}", encoding="utf-8")
+
+    pane.open_file(source)
+
+    assert pane.widget(pane.currentIndex()).isReadOnly() is True
 
 
 def test_open_file_switches_to_the_existing_tab_instead_of_duplicating_it(

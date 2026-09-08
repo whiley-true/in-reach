@@ -159,6 +159,44 @@ def test_opening_a_project_from_the_welcome_tab_updates_the_explorer_panel(
     assert Path(window.explorer_panel._project_model.rootPath()) == folder
 
 
+def test_opening_a_project_also_points_the_search_panel_at_it(window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+
+    welcome = window.main_panel.panes[0].widget(0)
+    welcome.project_opened.emit(folder)
+
+    assert window.search_panel._project_folder == folder
+    assert window.search_panel.search_edit.isEnabled() is True
+
+
+def test_close_project_also_clears_the_search_panel(window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    window._on_project_opened(folder)
+
+    window.close_project()
+
+    assert window.search_panel._project_folder is None
+    assert window.search_panel.search_edit.isEnabled() is False
+
+
+def test_activating_a_search_result_opens_the_file_at_that_line(window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    source = folder / "notes.txt"
+    source.write_text("one\ntwo needle three\n", encoding="utf-8")
+    window._on_project_opened(folder)
+    pane = window.main_panel.active_pane
+    before = pane.count()
+
+    window.search_panel.file_activated.emit(source, 2)
+
+    assert pane.count() == before + 1
+    editor = pane.widget(pane.currentIndex())
+    assert editor.textCursor().blockNumber() == 1  # 0-based -- line 2
+
+
 def test_a_welcome_refresh_updates_the_explorer_panels_personal_folders(qtbot, tmp_path: Path) -> None:
     from in_reach.app import env_file, system_verify
 
@@ -318,6 +356,60 @@ def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
     window.activity_bar.rvt_button.click()
 
     assert len(calls) == 1
+
+
+def test_launch_rvt_with_no_project_open_passes_no_target(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [None]
+
+
+def test_launch_rvt_with_a_project_open_passes_its_source_bin_as_the_target(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project, rvt_launcher
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [bin_path]
+
+
+def test_launch_rvt_with_a_project_open_but_no_source_bin_passes_no_target(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    window.root_dir = tmp_path
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    window._on_project_opened(folder)  # no .bin ever created for this one -- a blank project
+
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [None]
 
 
 def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(

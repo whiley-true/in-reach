@@ -172,6 +172,29 @@ def test_clicking_a_file_in_the_project_tree_emits_file_activated(
     assert activated == [file_path]
 
 
+def test_clicking_a_file_in_the_project_tree_via_the_real_signal_emits_file_activated(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    # Unlike the test above (which drives the private handler directly), this fires the tree's own
+    # `clicked` signal -- confirming the project tree really is wired up, the mirror image of the
+    # "personal folders are NOT wired up" tests below.
+    folder = tmp_path / "project"
+    folder.mkdir()
+    file_path = folder / "notes.txt"
+    file_path.write_text("hi", encoding="utf-8")
+    panel.set_project_folder(folder)
+    model = panel._project_model
+    root_index = panel.project_tree.rootIndex()
+    qtbot.waitUntil(lambda: model.rowCount(root_index) > 0, timeout=2000)
+    file_index = model.index(str(file_path))
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+    panel.project_tree.clicked.emit(file_index)
+
+    assert activated == [file_path]
+
+
 def test_clicking_a_folder_in_the_project_tree_does_not_emit_file_activated(
     panel: ExplorerPanel, qtbot, tmp_path: Path
 ) -> None:
@@ -201,9 +224,14 @@ def test_an_invalid_index_does_not_emit_file_activated(panel: ExplorerPanel) -> 
     assert activated == []
 
 
-def test_clicking_a_file_in_a_personal_folder_section_also_emits_file_activated(
+def test_clicking_a_file_in_a_personal_folder_section_does_not_open_it(
     panel: ExplorerPanel, qtbot, tmp_path: Path
 ) -> None:
+    # PROMPT.md: "disable clicking on personal game variants of personal map variants window for
+    # now" -- those are raw .bin/.mvar files, and opening one as text just raised an error. Clicks
+    # in either personal-folder tree are simply never wired to file_activated at all (see
+    # ExplorerPanel.__init__) -- this drives the real `clicked` signal, not the private handler
+    # directly, so it actually exercises that wiring (or lack of it) rather than just the handler.
     project_dir = tmp_path / ".in-reach"
     project_dir.mkdir()
     (project_dir / ".env").write_text("", encoding="utf-8")
@@ -220,6 +248,59 @@ def test_clicking_a_file_in_a_personal_folder_section_also_emits_file_activated(
 
     activated: list[Path] = []
     panel.file_activated.connect(activated.append)
-    panel._on_tree_clicked(model, file_index)
+    panel.personal_variants_tree.clicked.emit(file_index)
 
-    assert activated == [file_path]
+    assert activated == []
+
+
+def test_clicking_a_file_in_the_personal_maps_section_also_does_not_open_it(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    project_dir = tmp_path / ".in-reach"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text("", encoding="utf-8")
+    maps = tmp_path / "maps"
+    maps.mkdir()
+    file_path = maps / "Forge.mvar"
+    file_path.write_bytes(b"")
+    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_MAPS_KEY, str(maps))
+    panel.set_env_project_dir(project_dir)
+    model = panel._personal_maps_model
+    root_index = panel.personal_maps_tree.rootIndex()
+    qtbot.waitUntil(lambda: model.rowCount(root_index) > 0, timeout=2000)
+    file_index = model.index(str(file_path))
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+    panel.personal_maps_tree.clicked.emit(file_index)
+
+    assert activated == []
+
+
+# -- text scale -------------------------------------------------------------------------------
+
+
+def test_panel_font_is_10_percent_larger_than_the_app_font(panel: ExplorerPanel) -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    app_size = QApplication.instance().font().pointSizeF()
+
+    assert panel.font().pointSizeF() == pytest.approx(app_size * ExplorerPanel.TEXT_SCALE)
+
+
+def test_refresh_font_scale_tracks_a_later_app_font_change(panel: ExplorerPanel) -> None:
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 2)
+        app.setFont(bigger)
+
+        panel.refresh_font_scale()
+
+        assert panel.font().pointSizeF() == pytest.approx(bigger.pointSizeF() * ExplorerPanel.TEXT_SCALE)
+    finally:
+        app.setFont(original)

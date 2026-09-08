@@ -38,6 +38,24 @@ def _set(root_dir: Path, key: str, value: str) -> None:
     env_file.update_env_value(root_dir / ".in-reach" / ".env", key, value)
 
 
+# -- background --------------------------------------------------------------------------------
+
+
+def test_scroll_area_uses_the_pane_background_not_the_window_background(welcome: WelcomeTab) -> None:
+    # Regression guard: QScrollArea auto-fills its viewport using the Window palette role by
+    # default, not Base -- which read as "the welcome page shows the IDE's own chrome color
+    # instead of a pane's" (PROMPT.md). Both the scroll area and its separate viewport widget need
+    # to be pinned to Base explicitly.
+    from PyQt6.QtGui import QPalette
+    from PyQt6.QtWidgets import QScrollArea
+
+    scroll = welcome.findChild(QScrollArea)
+    assert scroll is not None
+    for widget in (scroll, scroll.viewport()):
+        assert widget.backgroundRole() == QPalette.ColorRole.Base
+        assert widget.autoFillBackground() is True
+
+
 # -- the verify quadrant -----------------------------------------------------------------------------
 
 
@@ -190,6 +208,10 @@ def test_a_category_icon_mismatch_warning_is_shown_but_does_not_block_creation(
 def test_new_project_from_a_built_in_variant_copies_it_in(
     welcome: WelcomeTab, root_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Decompiling isn't this test's concern (see test_new_project.py for that) -- these fixture
+    # .bins are just placeholder bytes, not a real Reach variant, and the real native extension
+    # failing to parse one would otherwise surface as a warning dialog mid-test.
+    monkeypatch.setattr(new_project, "_decompile_source_variant", lambda *args, **kwargs: None)
     standard = root_dir / "game_variants"
     hopper = root_dir / "hopper_game_variants"
     standard.mkdir()
@@ -370,6 +392,51 @@ def test_description_field_caps_at_137_characters_and_takes_any_text(qtbot) -> N
     from PyQt6.QtWidgets import QDialogButtonBox
 
     assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled() is True
+
+
+def test_description_help_shows_a_live_character_count(qtbot) -> None:
+    dialog = NewProjectDialog()
+    qtbot.addWidget(dialog)
+
+    assert dialog.description_help_label.text() == "0/137 characters"
+
+    dialog.description_edit.setText("Slayer Plus")
+
+    assert dialog.description_help_label.text() == "11/137 characters"
+
+
+def test_description_help_is_muted_until_the_field_is_focused(qtbot) -> None:
+    dialog = NewProjectDialog()
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog.description_help_label.isEnabled() is False
+
+    dialog.description_edit.setFocus()
+    qtbot.waitUntil(lambda: dialog.description_edit.hasFocus(), timeout=2000)
+    assert dialog.description_help_label.isEnabled() is True
+
+    dialog.title_edit.setFocus()
+    qtbot.waitUntil(lambda: dialog.title_edit.hasFocus(), timeout=2000)
+    assert dialog.description_help_label.isEnabled() is False
+
+
+def test_variant_dropdown_caps_its_visible_item_count(qtbot, tmp_path: Path) -> None:
+    variants = [(f"Variant {i}", tmp_path / f"v{i}.bin") for i in range(30)]
+    dialog = NewProjectDialog(variants=variants)
+    qtbot.addWidget(dialog)
+
+    assert dialog.variant_combo.maxVisibleItems() <= 12
+
+
+def test_variant_dropdown_is_editable_and_searchable(qtbot, tmp_path: Path) -> None:
+    variants = [("Slayer", tmp_path / "Slayer.bin"), ("Oddball", tmp_path / "Oddball.bin")]
+    dialog = NewProjectDialog(variants=variants)
+    qtbot.addWidget(dialog)
+
+    assert dialog.variant_combo.isEditable() is True
+    assert dialog.variant_combo.completer() is not None
+    assert dialog.variant_combo.insertPolicy() == dialog.variant_combo.InsertPolicy.NoInsert
 
 
 # -- the Verify Now popout --------------------------------------------------------------------------

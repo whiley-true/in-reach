@@ -7,15 +7,17 @@ and a settings cog pinned at the bottom (a no-op for now).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import QToolButton, QVBoxLayout, QWidget
 
 from in_reach.ide import icons
 from in_reach.ide.style import PANEL_RADIUS
 
-WIDTH = 48
-_BUTTON_SIZE = 40
-_ICON_SIZE = 22
+# PROMPT.md, across two passes: +15% on the icons alone, then +10% on "the sidebar and its icons"
+# together -- 22 -> 25 -> 28 (icons), 40 -> 44 (buttons), 48 -> 53 (the bar's own width).
+WIDTH = 53
+_BUTTON_SIZE = 44
+_ICON_SIZE = 28
 
 # Fixed regardless of the active theme -- matches real vscode, whose own activity bar stays a
 # constant dark shade in both its light and dark themes, so icons never need recoloring on a
@@ -88,9 +90,12 @@ class ActivityBar(QWidget):
 
         layout.addSpacing(8)
 
+        # A full-color PNG (the real RVT icon, see icons.rvt_icon()'s own docstring), not one of
+        # this bar's other monochrome codicon-derived glyphs -- built directly rather than via
+        # _bar_button(), which always renders through icons.icon()'s SVG glyph path.
         self.rvt_button = QToolButton()
         self.rvt_button.setIcon(icons.rvt_icon())
-        self.rvt_button.setIconSize(self.rvt_button.iconSize())
+        self.rvt_button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self.rvt_button.setToolTip("Launch ReachVariantTool")
         self.rvt_button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
         self.rvt_button.setAutoRaise(True)

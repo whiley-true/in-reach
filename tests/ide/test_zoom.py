@@ -191,6 +191,24 @@ def test_zooming_resizes_the_top_left_mark_icon(
     assert after > before
 
 
+def test_zooming_keeps_the_explorer_panel_at_its_own_10_percent_scale(
+    project_window: MainWindow, monkeypatch
+) -> None:
+    from in_reach.ide.explorer import ExplorerPanel
+
+    base_size = _normalize_zoom(monkeypatch)
+    project_window.explorer_panel.refresh_font_scale()
+    assert project_window.explorer_panel.font().pointSizeF() == pytest.approx(
+        base_size * ExplorerPanel.TEXT_SCALE
+    )
+
+    project_window._zoom_in()
+
+    app = QApplication.instance()
+    expected = app.font().pointSizeF() * ExplorerPanel.TEXT_SCALE
+    assert project_window.explorer_panel.font().pointSizeF() == pytest.approx(expected)
+
+
 def test_zooming_resizes_the_top_bar_toggle_icons_too(project_window: MainWindow, monkeypatch) -> None:
     # Each toggle/window-control icon is backed by a single fixed-size source pixmap (baked by
     # icons.icon()), so its own availableSizes() reports that actual baked size -- unlike

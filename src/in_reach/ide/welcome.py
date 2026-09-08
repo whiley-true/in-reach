@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -88,7 +90,36 @@ class WelcomeTab(QWidget):
         self.root_dir = root_dir or Path.cwd()
         self.project_dir = project.get_project_dir(self.root_dir)
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # Scrollable rather than laid out directly on the tab: at the default 150% zoom (see
+        # in_reach.ide.zoom), this page's natural height can exceed a non-maximized window's
+        # available space -- without a scroll area, Qt's own layout engine responds by shrinking
+        # every row below its natural size to force a fit, which reads as the Start/Verify
+        # quadrants' text overlapping into an unreadable smear rather than as a scrollbar
+        # appearing. A scroll area guarantees the content is always laid out at its real preferred
+        # size; only the *view* of it gets clipped, with a scrollbar to reach the rest.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # QAbstractScrollArea (QScrollArea's own base class) auto-fills its viewport using
+        # whatever backgroundRole() it and its viewport report -- Window by default, not Base --
+        # unlike a bare QWidget (transparent by default, so it would have just let the surrounding
+        # tab pane's own palette(base) show through), which read as "the welcome page shows the
+        # IDE's own chrome color instead of a pane's". Setting the role directly (the standard Qt
+        # mechanism for a scroll area specifically -- QSS's background-color alone didn't take,
+        # even with WA_StyledBackground set) is what actually changes the auto-fill color; the
+        # viewport is a separate widget QScrollArea paints into, so it needs the same treatment.
+        for widget in (scroll, scroll.viewport()):
+            widget.setBackgroundRole(QPalette.ColorRole.Base)
+            widget.setAutoFillBackground(True)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(32, 32, 32, 32)
         layout.setSpacing(24)
         layout.addLayout(self._build_header())

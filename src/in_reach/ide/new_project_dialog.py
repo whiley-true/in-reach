@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -28,6 +29,11 @@ from in_reach.app import new_project
 from in_reach.app.categories import EngineCategory, display_name
 
 _TITLE_HELP = f"1-{new_project.MAX_TITLE_LENGTH} characters."
+
+# PROMPT.md: "please limit the size of the dropdown that opens for built-in variant and personal
+# variant (as at present they can fill the entire screen)" -- a project folder with a few hundred
+# .bin files would otherwise open a popup taller than the screen; this caps it to a scrollable list.
+_VARIANT_DROPDOWN_MAX_VISIBLE_ITEMS = 12
 
 
 class NewProjectDialog(QDialog):
@@ -68,6 +74,8 @@ class NewProjectDialog(QDialog):
         self.description_edit = QLineEdit()
         self.description_edit.setMaxLength(new_project.MAX_DESCRIPTION_LENGTH)
         self.description_edit.setPlaceholderText("Optional")
+        self.description_edit.textChanged.connect(self._on_description_changed)
+        self.description_edit.installEventFilter(self)
         form.addRow("Description", self.description_edit)
 
         self.category_combo = QComboBox()
@@ -76,9 +84,19 @@ class NewProjectDialog(QDialog):
         form.addRow("Category", self.category_combo)
 
         self.variant_combo = QComboBox()
+        self.variant_combo.setMaxVisibleItems(_VARIANT_DROPDOWN_MAX_VISIBLE_ITEMS)
         for name, path in self._variants:
             self.variant_combo.addItem(name, str(path))
         if self._variants:
+            # Editable + a filtering completer turns this into a type-to-search combo (PROMPT.md)
+            # -- NoInsert keeps typing from adding whatever's typed as a new, bogus entry.
+            self.variant_combo.setEditable(True)
+            self.variant_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            completer = QCompleter([name for name, _path in self._variants], self.variant_combo)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            self.variant_combo.setCompleter(completer)
             form.addRow(source_label, self.variant_combo)
         else:
             self.variant_combo.hide()
@@ -88,6 +106,11 @@ class NewProjectDialog(QDialog):
         self.title_help_label = QLabel(_TITLE_HELP)
         self.title_help_label.setWordWrap(True)
         layout.addWidget(self.title_help_label)
+
+        self.description_help_label = QLabel()
+        self.description_help_label.setWordWrap(True)
+        self.description_help_label.setEnabled(False)
+        layout.addWidget(self.description_help_label)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -99,6 +122,7 @@ class NewProjectDialog(QDialog):
 
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self._on_title_changed(self.title_edit.text())
+        self._on_description_changed(self.description_edit.text())
 
     def _on_title_changed(self, text: str) -> None:
         valid = new_project.is_valid_title(text.strip())
@@ -110,6 +134,21 @@ class NewProjectDialog(QDialog):
         # current text wouldn't be accepted, muted to the theme's own disabled-text shade (see
         # welcome.py's version/path labels for the same pattern) once it would.
         self.title_help_label.setEnabled(not valid)
+
+    def _on_description_changed(self, text: str) -> None:
+        self.description_help_label.setText(f"{len(text)}/{new_project.MAX_DESCRIPTION_LENGTH} characters")
+
+    def eventFilter(self, obj: object, event) -> bool:  # noqa: ANN001 -- QEvent
+        # Muted (the same disabled-text convention as title_help_label) until the description
+        # field is actually focused -- PROMPT.md: "should show 0-137 characters ... when
+        # description is highlighted" -- rather than competing for attention the whole time the
+        # way the title's own always-relevant validity rule does.
+        if obj is self.description_edit:
+            if event.type() == QEvent.Type.FocusIn:
+                self.description_help_label.setEnabled(True)
+            elif event.type() == QEvent.Type.FocusOut:
+                self.description_help_label.setEnabled(False)
+        return super().eventFilter(obj, event)
 
     def title(self) -> str:
         return self.title_edit.text().strip()

@@ -12,8 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QModelIndex, Qt, pyqtSignal
-from PyQt6.QtGui import QFileSystemModel
+from PyQt6.QtGui import QFileSystemModel, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QLabel,
     QSizePolicy,
@@ -91,13 +92,21 @@ class _CollapsibleSection(QWidget):
 
 
 class ExplorerPanel(QWidget):
-    #: Emitted with a file's path when it's clicked in any of the three trees -- never for a
-    #: directory (clicking one just expands/collapses it, QTreeView's own default behavior).
+    #: Emitted with a file's path when it's clicked in the main project tree -- never for a
+    #: directory (clicking one just expands/collapses it, QTreeView's own default behavior), and
+    #: not from either personal-folder tree (see their own click wiring, below, for why).
     file_activated = pyqtSignal(Path)
+
+    #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
+    #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
+    TEXT_SCALE = 1.1
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._env_project_dir: Path | None = None
+        #: The gametype project folder the main tree currently points at, or ``None`` -- read by
+        #: MainWindow.launch_rvt() to know which project's .bin to open RVT against.
+        self.current_folder: Path | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -126,12 +135,30 @@ class ExplorerPanel(QWidget):
         )
         layout.addWidget(self.personal_maps_section)
 
-        for tree, model in (
-            (self.project_tree, self._project_model),
-            (self.personal_variants_tree, self._personal_variants_model),
-            (self.personal_maps_tree, self._personal_maps_model),
-        ):
-            tree.clicked.connect(lambda index, m=model: self._on_tree_clicked(m, index))
+        # Only the main project tree opens files on click -- the two personal-folder trees hold
+        # raw .bin/.mvar game/map variants, which the plain text editor can't do anything useful
+        # with yet (PROMPT.md: opening one currently "raises an error as trying to open them as if
+        # they were text"). Once those file types are actually processed, this can open up too.
+        self.project_tree.clicked.connect(lambda index: self._on_tree_clicked(self._project_model, index))
+
+        self.refresh_font_scale()
+
+    def refresh_font_scale(self) -> None:
+        """(Re-)applies :data:`TEXT_SCALE` on top of the app's current font.
+
+        Setting a font directly on this widget makes every child that doesn't set its own
+        (every label/tree/section header here) inherit it too -- Qt's ordinary font cascade --
+        but that inheritance is a one-time snapshot, not a live binding: it stops tracking
+        ``QApplication.font()`` the moment this is set. Call this again after a zoom change (see
+        ``MainWindow._adjust_zoom()``) or it'll be stuck at whatever scale was live when it was
+        last called.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        font = QFont(app.font())
+        font.setPointSizeF(font.pointSizeF() * self.TEXT_SCALE)
+        self.setFont(font)
 
     def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
         if not index.isValid() or model.isDir(index):
@@ -157,6 +184,7 @@ class ExplorerPanel(QWidget):
     def set_project_folder(self, folder: Path | None) -> None:
         """Points the main tree at ``folder`` (the current gametype project's own folder), or back
         to the "no project" placeholder for ``None``."""
+        self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
         self._no_project_label.setVisible(not has_project)
         self.project_tree.setVisible(has_project)

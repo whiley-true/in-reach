@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,39 @@ def test_create_gametype_project_copies_the_source_variant_in_named_after_the_id
 
     copied = project_dir / new_project.INIT_GAMETYPE_DIRNAME / f"{folder.name}.bin"
     assert copied.read_bytes() == b"\x00variant"
+
+
+def test_create_gametype_project_decompiles_a_real_source_variant_into_edit(
+    project_dir: Path,
+) -> None:
+    """PROMPT.md: "when a project is selected the gametype is decompiled as in the previous
+    repos" -- exercises the real bundled native extension against a real .bin fixture, not fakes."""
+    source = Path(__file__).parent / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
+
+    folder, warning = new_project.create_gametype_project(project_dir, "Slayer Plus", source_variant=source)
+
+    assert warning is None
+    settings = json.loads((folder / "edit" / "settings" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["meta"]["title"] == "JUGGERNAUT"
+    assert (folder / "edit" / "settings" / "script_settings.json").is_file()
+    assert (folder / "edit" / "settings" / "strings.json").is_file()
+    script = (folder / "edit" / "rvt" / "script.txt").read_text(encoding="utf-8")
+    assert "declare" in script
+
+
+def test_create_gametype_project_surfaces_a_decompile_failure_as_a_warning_not_a_crash(
+    project_dir: Path,
+) -> None:
+    """A .bin the native extension can't load shouldn't block the project from being created --
+    see new_project._decompile_source_variant()'s docstring."""
+    bad_source = project_dir.parent / "not-a-real-variant.bin"
+    bad_source.write_bytes(b"not a real .bin")
+
+    folder, warning = new_project.create_gametype_project(project_dir, "Slayer Plus", source_variant=bad_source)
+
+    assert folder.is_dir()
+    assert warning is not None
+    assert not (folder / "edit" / "rvt" / "script.txt").is_file()
 
 
 def test_create_gametype_project_rejects_an_empty_title(project_dir: Path) -> None:
@@ -218,3 +252,55 @@ def test_list_variants_returns_bins_by_name_case_insensitively(tmp_path: Path) -
 
 def test_list_variants_of_a_missing_folder_is_empty(tmp_path: Path) -> None:
     assert new_project.list_variants(tmp_path / "nope") == []
+
+
+# -- source_variant_path ------------------------------------------------------------------------
+
+
+def test_source_variant_path_matches_where_create_gametype_project_copies_it(
+    project_dir: Path,
+) -> None:
+    source = project_dir.parent / "Original.bin"
+    source.write_bytes(b"\x00variant")
+
+    folder, _warning = new_project.create_gametype_project(
+        project_dir, "Slayer Plus", source_variant=source
+    )
+
+    expected = new_project.source_variant_path(project_dir, folder)
+    assert expected.is_file()
+    assert expected.read_bytes() == b"\x00variant"
+
+
+# -- is_generated_file -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "build/dist/test.bin",
+        "build/dist/test.mglo",
+        "build/settings.generated.json",
+        "build/script_settings.generated.json",
+        "build/strings.generated.json",
+        "settings.generated.json",  # the name alone is enough, regardless of folder
+    ],
+)
+def test_is_generated_file_true_for_build_output(tmp_path: Path, relative: str) -> None:
+    assert new_project.is_generated_file(tmp_path / relative) is True
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "edit/settings/settings.json",
+        "edit/settings/script_settings.json",
+        "edit/settings/strings.json",
+        "edit/rvt/script.txt",
+        "README.md",
+        "user_settings.json",
+        "maps.json",
+    ],
+)
+def test_is_generated_file_false_for_hand_editable_source(tmp_path: Path, relative: str) -> None:
+    assert new_project.is_generated_file(tmp_path / relative) is False
