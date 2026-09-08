@@ -139,9 +139,13 @@ def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
 
     welcome.new_blank_button.click()
 
-    folder = root_dir / "Slayer Plus"
+    assert len(opened) == 1
+    folder = opened[0]
+    # The folder is a generated id now, not the title -- see new_project.create_gametype_project.
+    assert folder.parent == root_dir
+    assert folder.name != "Slayer Plus"
     assert (folder / "edit" / "settings").is_dir()
-    assert opened == [folder]
+    assert new_project.read_project_title(folder) == "Slayer Plus"
     assert recent.list_recent(welcome.project_dir) == [folder]
 
 
@@ -155,26 +159,32 @@ def test_a_cancelled_new_project_dialog_creates_nothing(
     assert list(root_dir.glob("*")) == [root_dir / ".in-reach"]
 
 
-def test_a_duplicate_project_title_is_reported_rather_than_raising(
+def test_a_category_icon_mismatch_warning_is_shown_but_does_not_block_creation(
     welcome: WelcomeTab, root_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (root_dir / "Taken").mkdir()
-
     def accept(dialog: NewProjectDialog) -> int:
-        dialog.title_edit.setText("Taken")
+        dialog.title_edit.setText("Odd Slayer")
         return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(NewProjectDialog, "exec", accept)
+    real_create = new_project.create_gametype_project
+
+    def fake_create(*args, **kwargs):
+        folder, _warning = real_create(*args, **kwargs)
+        return folder, "Category and icon don't match."
+
+    monkeypatch.setattr(new_project, "create_gametype_project", fake_create)
     shown: list[str] = []
     monkeypatch.setattr(
-        "in_reach.ide.welcome.QMessageBox.critical", lambda *args, **kwargs: shown.append(args[2])
+        "in_reach.ide.welcome.QMessageBox.warning", lambda *args, **kwargs: shown.append(args[2])
     )
+    opened: list[Path] = []
+    welcome.project_opened.connect(opened.append)
 
     welcome.new_blank_button.click()
 
-    assert len(shown) == 1
-    assert "already exists" in shown[0]
-    assert recent.list_recent(welcome.project_dir) == []
+    assert shown == ["Category and icon don't match."]
+    assert len(opened) == 1
 
 
 def test_new_project_from_a_built_in_variant_copies_it_in(
@@ -199,6 +209,8 @@ def test_new_project_from_a_built_in_variant_copies_it_in(
         return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(NewProjectDialog, "exec", accept)
+    opened: list[Path] = []
+    welcome.project_opened.connect(opened.append)
 
     welcome.new_builtin_button.click()
 
@@ -206,7 +218,8 @@ def test_new_project_from_a_built_in_variant_copies_it_in(
         "Standard: Slayer",
         "Hopper: Team Slayer",
     ]
-    copied = welcome.project_dir / new_project.INIT_GAMETYPE_DIRNAME / "From Slayer.bin"
+    folder = opened[0]
+    copied = welcome.project_dir / new_project.INIT_GAMETYPE_DIRNAME / f"{folder.name}.bin"
     assert copied.read_bytes() == b"\x00slayer"
 
 
@@ -292,7 +305,7 @@ def test_clicking_a_recent_entry_reopens_it(welcome: WelcomeTab, root_dir: Path)
 # -- the New Project dialog -------------------------------------------------------------------------
 
 
-def test_new_project_dialog_gates_create_on_a_valid_title(qtbot) -> None:
+def test_new_project_dialog_gates_create_on_a_non_empty_title(qtbot) -> None:
     from PyQt6.QtWidgets import QDialogButtonBox
 
     dialog = NewProjectDialog()
@@ -300,10 +313,12 @@ def test_new_project_dialog_gates_create_on_a_valid_title(qtbot) -> None:
     ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
 
     assert ok.isEnabled() is False
-    dialog.title_edit.setText("no/slashes")
-    assert ok.isEnabled() is False
-    dialog.title_edit.setText("Slayer Plus")
+    # No longer folder-name rules -- characters a Windows folder name would reject are fine now,
+    # since the title no longer names the project folder (see new_project.is_valid_title).
+    dialog.title_edit.setText("no/slashes: needed <now>?")
     assert ok.isEnabled() is True
+    dialog.title_edit.setText("   ")
+    assert ok.isEnabled() is False
 
 
 def test_new_project_dialog_title_help_stays_visible_and_only_its_emphasis_changes(qtbot) -> None:
@@ -317,13 +332,12 @@ def test_new_project_dialog_title_help_stays_visible_and_only_its_emphasis_chang
     assert dialog.title_help_label.isHidden() is False
     assert dialog.title_help_label.isEnabled() is True  # empty title -- shown as an active rule
 
-    dialog.title_edit.setText("no/slashes")
-    assert dialog.title_help_label.isHidden() is False
-    assert dialog.title_help_label.isEnabled() is True
-
     dialog.title_edit.setText("Slayer Plus")
     assert dialog.title_help_label.isHidden() is False
     assert dialog.title_help_label.isEnabled() is False  # valid now -- muted, not gone
+
+    dialog.title_edit.setText("")
+    assert dialog.title_help_label.isEnabled() is True
 
 
 def test_new_project_dialog_hides_the_variant_chooser_for_a_blank_project(qtbot) -> None:

@@ -1,10 +1,11 @@
-"""The title/description prompt behind the Welcome tab's three "New ... Project" actions.
+"""The title/description/category prompt behind the Welcome tab's three "New ... Project" actions.
 
 The same dialog serves all three: pass ``variants`` (a game-variants folder's contents, as returned
 by :func:`in_reach.app.new_project.list_variants`) to add the "start from this variant" chooser, or
 leave it out for a blank project. Create stays disabled until the title is one
-:func:`~in_reach.app.new_project.is_valid_title` will accept, so an illegal folder name is caught
-while it's still being typed rather than as an error afterwards.
+:func:`~in_reach.app.new_project.is_valid_title` will accept -- non-empty, within length, nothing
+more (PROMPT.md: the title no longer has to be a legal Windows folder name, since the project
+folder is a generated id now, not the title -- see that function's own docstring).
 """
 
 from __future__ import annotations
@@ -24,11 +25,9 @@ from PyQt6.QtWidgets import (
 )
 
 from in_reach.app import new_project
+from in_reach.app.categories import EngineCategory, display_name
 
-_TITLE_ERROR = (
-    "1-32 characters, and a legal Windows folder name -- no < > : \" / \\ | ? * characters, no "
-    "trailing space or period, and not a reserved name like CON or COM1."
-)
+_TITLE_HELP = f"1-{new_project.MAX_TITLE_LENGTH} characters."
 
 
 class NewProjectDialog(QDialog):
@@ -71,6 +70,11 @@ class NewProjectDialog(QDialog):
         self.description_edit.setPlaceholderText("Optional")
         form.addRow("Description", self.description_edit)
 
+        self.category_combo = QComboBox()
+        for category in EngineCategory:
+            self.category_combo.addItem(display_name(category), category)
+        form.addRow("Category", self.category_combo)
+
         self.variant_combo = QComboBox()
         for name, path in self._variants:
             self.variant_combo.addItem(name, str(path))
@@ -81,7 +85,7 @@ class NewProjectDialog(QDialog):
 
         layout.addLayout(form)
 
-        self.title_help_label = QLabel(_TITLE_ERROR)
+        self.title_help_label = QLabel(_TITLE_HELP)
         self.title_help_label.setWordWrap(True)
         layout.addWidget(self.title_help_label)
 
@@ -112,6 +116,9 @@ class NewProjectDialog(QDialog):
 
     def description(self) -> str:
         return self.description_edit.text().strip()
+
+    def category(self) -> EngineCategory:
+        return self.category_combo.currentData()
 
     def selected_variant(self) -> Path | None:
         """The chosen starting variant, or ``None`` for a blank project."""

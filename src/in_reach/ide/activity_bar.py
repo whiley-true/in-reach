@@ -1,7 +1,8 @@
 """The far-left activity bar: an Explorer icon and a Search icon at the top -- exactly one of
 their views is ever active, switching the primary sidebar's content, VSCode-style: clicking the
-already-active one collapses the sidebar instead of switching -- and a settings cog pinned at the
-bottom (a no-op for now).
+already-active one collapses the sidebar instead of switching -- a ReachVariantTool launcher icon
+below them (a plain action button, not a view -- it never affects which sidebar view is active),
+and a settings cog pinned at the bottom (a no-op for now).
 """
 
 from __future__ import annotations
@@ -49,6 +50,8 @@ class ActivityBar(QWidget):
     # clicked again, requesting the sidebar collapse instead.
     view_selected = pyqtSignal(str)
     view_collapsed = pyqtSignal()
+    # A plain action, not a view switch -- MainWindow resolves/launches RVT itself.
+    launch_rvt_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,6 +85,18 @@ class ActivityBar(QWidget):
         layout.addWidget(self.search_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self._buttons = {"explorer": self.explorer_button, "search": self.search_button}
+
+        layout.addSpacing(8)
+
+        self.rvt_button = QToolButton()
+        self.rvt_button.setIcon(icons.rvt_icon())
+        self.rvt_button.setIconSize(self.rvt_button.iconSize())
+        self.rvt_button.setToolTip("Launch ReachVariantTool")
+        self.rvt_button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
+        self.rvt_button.setAutoRaise(True)
+        self.rvt_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.rvt_button.clicked.connect(self.launch_rvt_requested.emit)
+        layout.addWidget(self.rvt_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         layout.addStretch(1)
 

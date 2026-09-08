@@ -283,6 +283,57 @@ class TabPane(QTabWidget):
         widget.document().setModified(False)
         return True
 
+    # -- File menu entry points (New File/Open File/Save/Save As/Save All/Close Editor) ---------
+
+    def save_current(self) -> bool:
+        """"Save" -- saves the current tab, prompting for a path only if it doesn't have one yet.
+        A no-op (returns ``False``) if this pane has no tabs at all."""
+        if self.count() == 0:
+            return False
+        return self._save_tab(self.currentIndex())
+
+    def save_current_as(self) -> bool:
+        """"Save As" -- always prompts for a path, even if the current tab already has one."""
+        if self.count() == 0:
+            return False
+        index = self.currentIndex()
+        state = self._tab_state_for(self.widget(index))
+        previous_path = state.path
+        state.path = None
+        if self._save_tab(index):
+            return True
+        state.path = previous_path  # restore -- the prompt was cancelled, or the write failed
+        return False
+
+    def save_all(self) -> None:
+        """"Save All" -- saves every modified tab in this pane that already has a path; a tab with
+        no path yet (never saved) is left alone rather than popping a Save As prompt per tab."""
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if _is_modified(widget) and self._tab_state_for(widget).path is not None:
+                self._save_tab(index)
+
+    def open_file(self, path: Path) -> None:
+        """"Open File" -- adds ``path`` as a new tab, reading its content in."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't open {path.name}:\n{exc}")
+            return
+        editor = TextEditorWidget()
+        editor.setPlainText(text)
+        _connect_modification_tracking(editor)
+        new_index = self.addTab(editor, path.name)
+        self._track_tab(new_index, editor, state=_TabState(path=path))
+        self.setCurrentIndex(new_index)
+
+    def close_current(self) -> bool:
+        """"Close Editor" -- closes the current tab, same prompt-if-dirty behavior as its own close
+        button. A no-op (returns ``False``) if this pane has no tabs at all."""
+        if self.count() == 0:
+            return False
+        return self._maybe_close(self.currentIndex())
+
     def _close_many(self, widgets: list[QWidget]) -> None:
         for widget in widgets:
             index = self.indexOf(widget)
@@ -508,10 +559,14 @@ class MainPanelArea(QWidget):
         *,
         root_dir: Path | None = None,
         reveal_in_explorer: Callable[[], None] | None = None,
+        on_project_opened: Callable[[Path], None] | None = None,
+        on_settings_changed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.root_dir = root_dir or Path.cwd()
         self.reveal_in_explorer = reveal_in_explorer
+        self.on_project_opened = on_project_opened
+        self.on_settings_changed = on_settings_changed
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -526,7 +581,7 @@ class MainPanelArea(QWidget):
         self.groups: list[_PaneGroup] = []
         first_group = self._new_group()
         first_pane = self._new_pane()
-        welcome = WelcomeTab(root_dir=self.root_dir)
+        welcome = self._new_welcome_tab()
         welcome_index = first_pane.addTab(welcome, "Welcome")
         first_pane._track_tab(welcome_index, welcome)
         first_group.add_pane(first_pane)
@@ -538,15 +593,38 @@ class MainPanelArea(QWidget):
         return [pane for group in self.groups for pane in group.panes]
 
     @property
+    def active_pane(self) -> TabPane:
+        """The pane the File menu's New File/Open File/Save/Close Editor actions target.
+
+        Always the first pane for now -- this area doesn't yet track which pane last had keyboard
+        focus across a multi-pane split, so a File-menu action always lands in the same place
+        regardless of which split the user was just looking at.
+        """
+        return self.panes[0]
+
+    @property
     def split_count(self) -> int:
         """Horizontal split count -- ``len(self.groups) - 1``."""
         return len(self.groups) - 1
+
+    def save_all(self) -> None:
+        """"Save All" across every pane, not just the active one."""
+        for pane in self.panes:
+            pane.save_all()
 
     def _new_pane(self) -> TabPane:
         return TabPane(self)
 
     def _new_group(self) -> _PaneGroup:
         return _PaneGroup(self)
+
+    def _new_welcome_tab(self) -> WelcomeTab:
+        welcome = WelcomeTab(root_dir=self.root_dir)
+        if self.on_project_opened is not None:
+            welcome.project_opened.connect(self.on_project_opened)
+        if self.on_settings_changed is not None:
+            welcome.settings_changed.connect(self.on_settings_changed)
+        return welcome
 
     def _add_group(self, group: _PaneGroup) -> None:
         self._splitter.addWidget(group)
@@ -586,7 +664,7 @@ class MainPanelArea(QWidget):
             duplicate.setDocument(widget.document())
             _connect_modification_tracking(duplicate)
         else:
-            duplicate = WelcomeTab(root_dir=self.root_dir)
+            duplicate = self._new_welcome_tab()
 
         new_index = target.addTab(duplicate, label)
         target._track_tab(new_index, duplicate, state=_TabState(path=source_state.path))

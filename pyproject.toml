@@ -31,4 +31,6 @@ in_reach = [
     ".in-reach/example.env",
     "ide/themes/*.json",
     "ide/assets/*.svg",
+    "ide/assets/*.png",
+    "app/rvt_tool/bin/**/*",
 ]

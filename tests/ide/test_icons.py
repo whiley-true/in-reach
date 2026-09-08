@@ -42,3 +42,7 @@ def test_every_window_control_glyph_renders(qtbot) -> None:
 def test_app_icon_and_topbar_icon_load(qtbot) -> None:
     assert not icons.app_icon().isNull()
     assert not icons.topbar_icon().isNull()
+
+
+def test_rvt_icon_loads(qtbot) -> None:
+    assert not icons.rvt_icon().isNull()

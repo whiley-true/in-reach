@@ -14,6 +14,7 @@ from in_reach.ide.tabs import (
     MainPanelArea,
     TabPane,
     _SaveChoice,
+    _TabState,
 )
 from in_reach.ide.welcome import WelcomeTab
 
@@ -487,3 +488,168 @@ def test_welcome_tabs_carry_the_panels_root_dir_into_their_duplicates(window, tm
     duplicate = main_panel.panes[-1].widget(0)
     assert isinstance(duplicate, WelcomeTab)
     assert duplicate.root_dir == tmp_path
+
+
+# -- File menu entry points on TabPane/MainPanelArea -----------------------------------------------
+
+
+def test_save_current_saves_the_active_tab_prompting_for_a_path(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    pane.widget(pane.currentIndex()).setPlainText("hello")
+    target = tmp_path / "new.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: target)
+
+    result = pane.save_current()
+
+    assert result is True
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+def test_save_current_on_an_empty_pane_is_a_no_op(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.tabCloseRequested.emit(0)  # empties the pane (the Welcome tab has no unsaved changes)
+    assert pane.count() == 0
+
+    assert pane.save_current() is False
+
+
+def test_save_current_as_always_prompts_even_for_an_already_saved_tab(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    pane.widget(index).setPlainText("v1")
+    first_path = tmp_path / "first.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: first_path)
+    pane.save_current()
+    assert pane._tab_state_for(pane.widget(index)).path == first_path
+
+    second_path = tmp_path / "second.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: second_path)
+    result = pane.save_current_as()
+
+    assert result is True
+    assert pane._tab_state_for(pane.widget(index)).path == second_path
+    assert second_path.read_text(encoding="utf-8") == "v1"
+
+
+def test_save_current_as_cancelled_restores_the_original_path(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    original = tmp_path / "original.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: original)
+    pane.save_current()
+
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: None)
+    result = pane.save_current_as()
+
+    assert result is False
+    assert pane._tab_state_for(widget).path == original
+
+
+def test_save_all_saves_every_modified_tab_that_already_has_a_path(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    saved_index = pane.currentIndex()
+    saved_path = tmp_path / "saved.txt"
+    pane._track_tab(saved_index, pane.widget(saved_index), state=_TabState(path=saved_path))
+    pane.widget(saved_index).setPlainText("v2")
+    pane.widget(saved_index).document().setModified(True)
+
+    window.main_panel.new_tab_in(pane)  # never saved -- no path yet, save_all() must skip it
+    never_saved_index = pane.currentIndex()
+
+    pane.save_all()
+
+    assert saved_path.read_text(encoding="utf-8") == "v2"
+    assert pane._tab_state_for(pane.widget(never_saved_index)).path is None
+
+
+def test_open_file_adds_a_tab_with_the_files_content(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "script.txt"
+    source.write_text("print('hi')", encoding="utf-8")
+
+    pane.open_file(source)
+
+    index = pane.currentIndex()
+    assert pane.tabText(index) == "script.txt"
+    assert pane.widget(index).toPlainText() == "print('hi')"
+    assert pane._tab_state_for(pane.widget(index)).path == source
+
+
+def test_open_file_reports_an_unreadable_file_rather_than_raising(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    pane = window.main_panel.panes[0]
+    before = pane.count()
+    missing = tmp_path / "nope.txt"
+
+    pane.open_file(missing)
+
+    assert pane.count() == before
+
+
+def test_close_current_closes_the_active_tab(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    before = pane.count()
+
+    result = pane.close_current()
+
+    assert result is True
+    assert pane.count() == before - 1
+
+
+def test_close_current_on_an_empty_pane_is_a_no_op(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.tabCloseRequested.emit(0)
+    assert pane.count() == 0
+
+    assert pane.close_current() is False
+
+
+def test_active_pane_is_the_first_pane(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+
+    assert main_panel.active_pane is first_pane
+
+
+def test_main_panel_save_all_covers_every_pane_not_just_the_first(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+
+    path1 = tmp_path / "one.txt"
+    main_panel.new_tab_in(first_pane)
+    idx1 = first_pane.currentIndex()
+    first_pane._track_tab(idx1, first_pane.widget(idx1), state=_TabState(path=path1))
+    first_pane.widget(idx1).setPlainText("one")
+    first_pane.widget(idx1).document().setModified(True)
+
+    path2 = tmp_path / "two.txt"
+    main_panel.new_tab_in(second_pane)
+    idx2 = second_pane.currentIndex()
+    second_pane._track_tab(idx2, second_pane.widget(idx2), state=_TabState(path=path2))
+    second_pane.widget(idx2).setPlainText("two")
+    second_pane.widget(idx2).document().setModified(True)
+
+    main_panel.save_all()
+
+    assert path1.read_text(encoding="utf-8") == "one"
+    assert path2.read_text(encoding="utf-8") == "two"

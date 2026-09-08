@@ -24,6 +24,13 @@ DEFAULT_COLOR = "#cccccc"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _APP_ICON_FILE = "icon-bluegrey-small-windows.svg"
 _TOPBAR_ICON_FILE = "icon-bluegrey-micro.svg"
+# ReachVariantTool's own real icon (github.com/DavidJCobb/ReachVariantEditor, GPLv3) -- a raster
+# PNG, not traced into an SVG glyph like the codicon-derived entries below: there's no vector
+# source for it anywhere in that project (only this PNG and a matching .ico), and hand-tracing a
+# 128x128 logo without one risks shipping something that doesn't actually look like it. QIcon
+# handles a PNG exactly the same way it does the SVGs above (app_icon()/topbar_icon()), so this
+# stays consistent with them despite the different source format.
+_RVT_ICON_FILE = "rvt-icon-128.png"
 
 _SVG_TEMPLATE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" fill="{{color}}">{path}</svg>'
 
@@ -116,3 +123,8 @@ def app_icon() -> QIcon:
 def topbar_icon() -> QIcon:
     """The small mark shown in the top bar's left corner, ahead of the dropdown menus."""
     return QIcon(str(_ASSETS_DIR / _TOPBAR_ICON_FILE))
+
+
+def rvt_icon() -> QIcon:
+    """ReachVariantTool's own icon -- the activity bar's "launch RVT" button."""
+    return QIcon(str(_ASSETS_DIR / _RVT_ICON_FILE))

@@ -14,9 +14,11 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QToolButton,
@@ -24,11 +26,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import project
+from in_reach.app import env_file, new_project, project, recent, rvt_launcher
 from in_reach.ide import icons, style
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
+from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
@@ -53,6 +56,48 @@ class _DropdownButton(QToolButton):
         menu.addAction(f"{label} item 1")
         menu.addAction(f"{label} item 2")
         self.setMenu(menu)
+
+
+class _FileMenuButton(QToolButton):
+    """The top bar's "File" dropdown (PROMPT.md) -- every action delegates straight to a same-named
+    method on ``window``, so this class is purely the menu's own construction/wiring."""
+
+    def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._window = window
+        self.setText("File")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        menu.addAction("New File", window.new_file)
+        menu.addAction("New Window", window.open_new_window)
+        menu.addAction("Open File...", window.open_file)
+        menu.addAction("Open Folder...", window.open_folder)
+        self.open_recent_menu = menu.addMenu("Open Recent")
+        self.open_recent_menu.aboutToShow.connect(self._populate_open_recent)
+        menu.addSeparator()
+        menu.addAction("Save", window.save_current)
+        menu.addAction("Save As...", window.save_current_as)
+        menu.addAction("Save All", window.save_all)
+        menu.addSeparator()
+        menu.addAction("Close Project", window.close_project)
+        menu.addAction("Close Editor", window.close_editor)
+        self.setMenu(menu)
+
+    def _populate_open_recent(self) -> None:
+        self.open_recent_menu.clear()
+        env_project_dir = project.get_project_dir(self._window.root_dir)
+        entries = recent.list_recent(env_project_dir)
+        if not entries:
+            placeholder = self.open_recent_menu.addAction("No Recent Projects")
+            placeholder.setEnabled(False)
+            return
+        for folder in entries:
+            label = new_project.read_project_title(folder)
+            self.open_recent_menu.addAction(
+                label, lambda _checked=False, f=folder: self._window.open_recent_project(f)
+            )
 
 
 class _TopBar(QWidget):
@@ -81,7 +126,8 @@ class _TopBar(QWidget):
         layout.addWidget(self.mark_label)
         layout.addSpacing(4)
 
-        layout.addWidget(_DropdownButton("text1"))
+        self.file_menu_button = _FileMenuButton(window)
+        layout.addWidget(self.file_menu_button)
         layout.addWidget(_DropdownButton("text2"))
         layout.addStretch(1)
 
@@ -212,6 +258,10 @@ class MainWindow(QWidget):
         super().__init__()
         self.root_dir = root_dir or Path.cwd()
         self._active_sidebar_view = DEFAULT_VIEW
+        # Qt never parents a top-level window to another -- without holding a reference somewhere,
+        # a window opened via File > New Window would be garbage-collected (and vanish) as soon as
+        # open_new_window() returns.
+        self._child_windows: list[MainWindow] = []
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
@@ -263,9 +313,18 @@ class MainWindow(QWidget):
         self._side_splitter.setSizes([220, 1000])
 
         self.main_panel = MainPanelArea(
-            root_dir=self.root_dir, reveal_in_explorer=self._reveal_in_explorer_view
+            root_dir=self.root_dir,
+            reveal_in_explorer=self._reveal_in_explorer_view,
+            on_project_opened=self._on_project_opened,
+            on_settings_changed=self._on_settings_changed,
         )
         self._main_splitter.addWidget(self.main_panel)
+
+        env_project_dir = project.get_project_dir(self.root_dir)
+        self.explorer_panel.set_env_project_dir(env_project_dir)
+        already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
+        if already_open:
+            self.explorer_panel.set_project_folder(Path(already_open))
 
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
@@ -279,6 +338,7 @@ class MainWindow(QWidget):
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
+        self.activity_bar.launch_rvt_requested.connect(self.launch_rvt)
         self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
         self.top_bar.panel_toggle.toggled.connect(self._bottom_panel_card.setVisible)
         self.top_bar.minimize_button.clicked.connect(self.showMinimized)
@@ -311,8 +371,9 @@ class MainWindow(QWidget):
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        self.explorer_panel = ExplorerPanel()
         self._sidebar_pages = {
-            "explorer": self._build_sidebar_page("Explorer"),
+            "explorer": self.explorer_panel,
             "search": self._build_sidebar_page("Search"),
         }
         self._sidebar_stack = QStackedWidget()
@@ -349,13 +410,77 @@ class MainWindow(QWidget):
         self.activity_bar.set_active_view(self._active_sidebar_view if visible else None)
 
     def _reveal_in_explorer_view(self) -> None:
-        """Switches the primary sidebar to the Explorer view and ensures it's open -- the one
-        honest effect "Reveal in Explorer View" (a tab's context menu) can have today, since the
-        Explorer view itself has no file tree yet to select anything within."""
+        """Switches the primary sidebar to the Explorer view and ensures it's open -- "Reveal in
+        Explorer View" (a tab's context menu) doesn't yet select the specific file within the tree,
+        just gets the tree itself on screen."""
         self._active_sidebar_view = "explorer"
         self._sidebar_stack.setCurrentWidget(self._sidebar_pages["explorer"])
         self._show_sidebar(True)
         self.activity_bar.set_active_view("explorer")
+
+    def _on_project_opened(self, folder: Path) -> None:
+        """Points the Explorer panel's main tree at a newly created/loaded gametype project."""
+        self.explorer_panel.set_project_folder(folder)
+
+    def _on_settings_changed(self) -> None:
+        """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
+        Entries" on the Welcome tab might have changed either one."""
+        self.explorer_panel.refresh_personal_folders()
+
+    # -- File menu ------------------------------------------------------------------------------
+
+    def new_file(self) -> None:
+        self.main_panel.new_tab_in(self.main_panel.active_pane)
+
+    def open_new_window(self) -> None:
+        """"New Window" -- another MainWindow on the same project, independent of this one."""
+        window = MainWindow(root_dir=self.root_dir)
+        window.showMaximized()
+        self._child_windows.append(window)
+
+    def open_file(self) -> None:
+        chosen = self.ask_open_file()
+        if chosen:
+            self.main_panel.active_pane.open_file(Path(chosen))
+
+    def ask_open_file(self) -> str:
+        """Kept as its own method purely as a test seam (see ``tabs.py``'s ``_ask_save_path``)."""
+        chosen, _selected_filter = QFileDialog.getOpenFileName(self, "Open File", str(self.root_dir))
+        return chosen
+
+    def open_folder(self) -> None:
+        """"Open Folder" -- the same "adopt this folder as the current gametype project" action as
+        the Welcome tab's own "Load Project"."""
+        chosen = self.ask_open_folder()
+        if chosen:
+            self._adopt_project(Path(chosen))
+
+    def ask_open_folder(self) -> str:
+        return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
+
+    def open_recent_project(self, folder: Path) -> None:
+        self._adopt_project(folder)
+
+    def _adopt_project(self, folder: Path) -> None:
+        recent.add_recent(project.get_project_dir(self.root_dir), folder)
+        self._on_project_opened(folder)
+
+    def save_current(self) -> None:
+        self.main_panel.active_pane.save_current()
+
+    def save_current_as(self) -> None:
+        self.main_panel.active_pane.save_current_as()
+
+    def save_all(self) -> None:
+        self.main_panel.save_all()
+
+    def close_project(self) -> None:
+        """"Close Project" -- clears the Explorer panel's main tree; doesn't touch any files, and
+        doesn't close this window (that's the title bar's own close button)."""
+        self.explorer_panel.set_project_folder(None)
+
+    def close_editor(self) -> None:
+        self.main_panel.active_pane.close_current()
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -431,3 +556,12 @@ class MainWindow(QWidget):
         # and toggle/window-control buttons) needs telling separately, since a font change alone
         # doesn't touch them.
         self.refresh_icon_colors()
+
+    def launch_rvt(self) -> None:
+        """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
+        to a real executable shipped inside the package itself (see
+        :func:`in_reach.app.rvt_launcher.resolve_rvt_exe`)."""
+        try:
+            rvt_launcher.launch_rvt()
+        except OSError as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")

@@ -72,6 +72,9 @@ def _flat_button(label: str, icon_name: str | None = None) -> QPushButton:
 class WelcomeTab(QWidget):
     #: Emitted with a gametype project folder whenever one is created or opened from this page.
     project_opened = pyqtSignal(Path)
+    #: Emitted at the end of every refresh() -- a verify run or "Clear Entries" can change the
+    #: personal game/map variant folders the Explorer panel's own collapsible sections point at.
+    settings_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None, *, root_dir: Path | None = None) -> None:
         """
@@ -272,6 +275,7 @@ class WelcomeTab(QWidget):
         )
 
         self._rebuild_recent()
+        self.settings_changed.emit()
 
     def _rebuild_recent(self) -> None:
         while self._recent_layout.count() > 1:  # index 0 is the "nothing yet" label
@@ -284,7 +288,9 @@ class WelcomeTab(QWidget):
         entries = recent.list_recent(self.project_dir)
         self._recent_empty_label.setVisible(not entries)
         for path in entries:
-            button = _flat_button(path.name, "explorer")
+            # The folder itself is just a generated id now (see new_project.create_gametype_
+            # project) -- read the human title back out of its README rather than showing that.
+            button = _flat_button(new_project.read_project_title(path), "explorer")
             button.setToolTip(str(path))
             button.clicked.connect(lambda _checked=False, p=path: self._open_project(p))
             self._recent_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
@@ -352,13 +358,28 @@ class WelcomeTab(QWidget):
         """Runs ``dialog`` and, if it's accepted, scaffolds the project it describes."""
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        env_values = self._env_values()
+
+        def _resolved(key: str) -> Path | None:
+            raw = env_values.get(key) or ""
+            return Path(raw) if raw else None
+
         try:
-            folder = new_project.create_gametype_project(
-                self.project_dir, dialog.title(), dialog.description(), dialog.selected_variant()
+            folder, category_warning = new_project.create_gametype_project(
+                self.project_dir,
+                dialog.title(),
+                dialog.description(),
+                dialog.selected_variant(),
+                category=dialog.category(),
+                personal_maps_dir=_resolved(system_verify.PERSONAL_MAPS_KEY),
+                standard_maps_dir=_resolved(system_verify.STANDARD_MAP_VARIANTS_KEY),
+                hopper_maps_dir=_resolved(system_verify.HOPPER_MAP_VARIANTS_KEY),
             )
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "in-reach", f"Couldn't create the project:\n{exc}")
             return
+        if category_warning:
+            QMessageBox.warning(self, "in-reach", category_warning)
         self._open_project(folder)
 
     def _open_project(self, folder: Path) -> None:

@@ -147,6 +147,42 @@ def test_main_window_opens_on_the_welcome_tab(window: MainWindow) -> None:
     assert isinstance(pane.widget(0), WelcomeTab)
 
 
+def test_opening_a_project_from_the_welcome_tab_updates_the_explorer_panel(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+
+    welcome = window.main_panel.panes[0].widget(0)
+    welcome.project_opened.emit(folder)
+
+    assert Path(window.explorer_panel._project_model.rootPath()) == folder
+
+
+def test_a_welcome_refresh_updates_the_explorer_panels_personal_folders(qtbot, tmp_path: Path) -> None:
+    from in_reach.app import env_file, system_verify
+
+    # A real (tmp_path-rooted) MainWindow rather than the shared `window` fixture -- its explorer
+    # panel's env project dir is resolved once, at construction, off root_dir, so a test that needs
+    # to write to that exact .env has to control root_dir from the start rather than reassigning it
+    # afterward.
+    project_dir = tmp_path / ".in-reach"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text("", encoding="utf-8")
+    win = MainWindow(root_dir=tmp_path)
+    qtbot.addWidget(win)
+
+    variants = tmp_path / "variants"
+    variants.mkdir()
+    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
+
+    welcome = win.main_panel.panes[0].widget(0)
+    welcome.refresh()
+
+    body = win.explorer_panel.personal_variants_section.body
+    assert win.explorer_panel.personal_variants_tree.isVisibleTo(body) is True
+
+
 def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
     bottom = window.bottom_panel
     labels = [bottom.tabText(i) for i in range(bottom.count())]
@@ -254,6 +290,54 @@ def test_activity_bar_clicking_switches_and_collapses(qtbot) -> None:
     bar.search_button.click()
     assert collapsed == [True]
     assert bar.search_button.isChecked() is False
+
+
+def test_rvt_button_is_a_plain_action_not_a_sidebar_view(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    launched = []
+    selected = []
+    bar.launch_rvt_requested.connect(lambda: launched.append(True))
+    bar.view_selected.connect(selected.append)
+
+    bar.rvt_button.click()
+
+    assert launched == [True]
+    assert selected == []
+    assert bar.rvt_button.isCheckable() is False
+
+
+def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: calls.append((a, k)))
+
+    window.activity_bar.rvt_button.click()
+
+    assert len(calls) == 1
+
+
+def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    def _raise(*args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", _raise)
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "in_reach.ide.main_window.QMessageBox.critical", lambda *a, **k: shown.append(a[2])
+    )
+
+    window.activity_bar.rvt_button.click()
+
+    assert len(shown) == 1
+    assert "access denied" in shown[0]
 
 
 def test_split_panel_can_be_split_horizontally_up_to_the_max(window: MainWindow) -> None:
@@ -571,3 +655,171 @@ def test_run_shows_the_restore_icon_since_it_launches_maximized(
     window = new_windows[0]
     assert window.isMaximized() is True
     assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
+
+
+# -- File menu --------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def project_window(qtbot, tmp_path: Path):
+    """A :class:`MainWindow` rooted at ``tmp_path`` with a real ``.in-reach/.env`` -- the File
+    menu's Open Recent submenu and folder-adoption actions read/write that file, so (like the
+    zoom tests) this avoids the shared ``window`` fixture's ``Path.cwd()`` root touching the
+    actual repo checkout."""
+    project_dir = tmp_path / ".in-reach"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text("", encoding="utf-8")
+    win = MainWindow(root_dir=tmp_path)
+    qtbot.addWidget(win)
+    win.show()
+    return win
+
+
+def test_file_menu_has_every_action_prompt_md_asks_for(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.file_menu_button.menu()
+    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+
+    assert labels == [
+        "New File",
+        "New Window",
+        "Open File...",
+        "Open Folder...",
+        "Open Recent",
+        "Save",
+        "Save As...",
+        "Save All",
+        "Close Project",
+        "Close Editor",
+    ]
+
+
+def test_new_file_adds_a_tab_to_the_active_pane(project_window: MainWindow) -> None:
+    pane = project_window.main_panel.active_pane
+    before = pane.count()
+
+    project_window.new_file()
+
+    assert pane.count() == before + 1
+
+
+def test_open_new_window_creates_and_tracks_another_mainwindow(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+    project_window.open_new_window()
+
+    assert len(project_window._child_windows) == 1
+    child = project_window._child_windows[0]
+    assert child.root_dir == project_window.root_dir
+    assert child.isMaximized() is True
+
+
+def test_open_file_reads_the_chosen_file_into_the_active_pane(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "script.txt"
+    source.write_text("print(1)", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "ask_open_file", lambda self: str(source))
+    pane = project_window.main_panel.active_pane
+    before = pane.count()
+
+    project_window.open_file()
+
+    assert pane.count() == before + 1
+    assert pane.widget(pane.currentIndex()).toPlainText() == "print(1)"
+
+
+def test_open_file_cancelled_adds_nothing(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(MainWindow, "ask_open_file", lambda self: "")
+    pane = project_window.main_panel.active_pane
+    before = pane.count()
+
+    project_window.open_file()
+
+    assert pane.count() == before
+
+
+def test_open_folder_adopts_it_as_the_current_project(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from in_reach.app import recent as recent_module
+
+    folder = tmp_path / "SomeProject"
+    folder.mkdir()
+    monkeypatch.setattr(MainWindow, "ask_open_folder", lambda self: str(folder))
+
+    project_window.open_folder()
+
+    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+    env_project_dir = project_window.explorer_panel._env_project_dir
+    assert recent_module.list_recent(env_project_dir) == [folder]
+
+
+def test_open_recent_project_menu_shows_a_placeholder_when_empty(project_window: MainWindow) -> None:
+    button = project_window.top_bar.file_menu_button
+    button._populate_open_recent()
+
+    actions = button.open_recent_menu.actions()
+    assert len(actions) == 1
+    assert actions[0].text() == "No Recent Projects"
+    assert actions[0].isEnabled() is False
+
+
+def test_open_recent_project_menu_lists_recent_projects_by_title(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import new_project as new_project_module
+
+    env_project_dir = project_window.explorer_panel._env_project_dir
+    folder, _warning = new_project_module.create_gametype_project(env_project_dir, "Slayer Plus")
+    from in_reach.app import recent as recent_module
+
+    recent_module.add_recent(env_project_dir, folder)
+
+    button = project_window.top_bar.file_menu_button
+    button._populate_open_recent()
+
+    actions = button.open_recent_menu.actions()
+    assert [a.text() for a in actions] == ["Slayer Plus"]
+
+    actions[0].trigger()
+    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+
+
+def test_save_current_delegates_to_the_active_panes_current_tab(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from in_reach.ide.tabs import TabPane
+
+    pane = project_window.main_panel.active_pane
+    project_window.main_panel.new_tab_in(pane)
+    pane.widget(pane.currentIndex()).setPlainText("hi")
+    target = tmp_path / "out.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: target)
+
+    project_window.save_current()
+
+    assert target.read_text(encoding="utf-8") == "hi"
+
+
+def test_close_project_clears_the_explorer_panel(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "Project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    assert project_window.explorer_panel.project_tree.isVisibleTo(project_window.explorer_panel) is True
+
+    project_window.close_project()
+
+    assert project_window.explorer_panel._no_project_label.isVisibleTo(project_window.explorer_panel) is True
+
+
+def test_close_editor_closes_the_active_panes_current_tab(project_window: MainWindow) -> None:
+    pane = project_window.main_panel.active_pane
+    before = pane.count()
+
+    project_window.close_editor()
+
+    assert pane.count() == before - 1
