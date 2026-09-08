@@ -1,12 +1,12 @@
 """Per-extension icons for the Explorer panel's file tree.
 
-Two different sources, deliberately: ``.txt``/``.md``/``.json`` reuse this codebase's existing
-codicon-derived "new_file" glyph (see ``icons.py``'s own docstring on why only *verified* real path
-data gets traced into an SVG glyph here -- there's no second, per-type codicon glyph already
-vetted in this repo, and fabricating new path data risks exactly the "stray artifact" that
-docstring warns against). Everything PROMPT.md asked for by emoji (map/game-variant/gitignore/
-pickle/Megalo script) is rendered as the literal Unicode character instead -- no vector tracing
-needed, and Windows' own Segoe UI Emoji already renders them in full color.
+Every mapped extension (including ``.txt``/``.md``/``.json`` -- originally left sharing this
+codebase's generic codicon "new_file" glyph, which read as "every file looks the same" rather than
+a deliberate fallback) gets its own Unicode emoji glyph, rendered via the literal character rather
+than a hand-traced SVG: no vector tracing needed (avoiding the "stray artifact" risk ``icons.py``'s
+own docstring warns about for hand-drawn glyph data), and Windows' own Segoe UI Emoji already
+renders them in full color. Only a genuinely unmapped extension falls back to the shared generic
+file glyph now.
 """
 
 from __future__ import annotations
@@ -26,14 +26,15 @@ _FOLDER_EMOJI_OPEN = "\U0001F4C2"  # 📂
 # Suffix (lowercase, with the leading dot) -> emoji. Anything not listed here falls back to the
 # generic codicon file glyph rather than a blank/default icon.
 _EMOJI_BY_SUFFIX = {
+    ".txt": "\U0001F4C4",  # 📄 -- plain text
+    ".md": "\U0001F4DD",  # 📝 -- markdown/notes
+    ".json": "\U0001F4CB",  # 📋 -- structured/config data
     ".mvar": "\U0001F310",  # 🌐 -- a map variant
     ".bin": "\U0001F3AE",  # 🎮 -- a game variant
     ".gitignore": "\U0001F6AB",  # 🚫 -- a file whose entire purpose is exclusion
     ".pkl": "\U0001F952",  # 🥒 -- a pickle
     ".mglo": "\U0001F607",  # 😇 -- closest thing Unicode has to a literal "halo"
 }
-
-_CODICON_SUFFIXES = {".txt", ".md", ".json"}
 
 
 def _emoji_icon(emoji: str, size: int = 64) -> QIcon:
@@ -59,8 +60,8 @@ def icon_for_suffix(suffix: str) -> QIcon:
             a dotfile with no further extension, since there's nothing after its one leading dot).
 
     Returns:
-        The mapped emoji icon, or the shared generic file glyph for anything unmapped (including
-        ``.txt``/``.md``/``.json``, and a bare/missing suffix).
+        The mapped emoji icon, or the shared generic file glyph for anything not in
+        :data:`_EMOJI_BY_SUFFIX` (including a bare/missing suffix).
     """
     suffix = suffix.lower()
     emoji = _EMOJI_BY_SUFFIX.get(suffix)

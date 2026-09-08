@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QModelIndex, Qt, pyqtSignal
 from PyQt6.QtGui import QFileSystemModel
 from PyQt6.QtWidgets import (
     QFrame,
@@ -91,6 +91,10 @@ class _CollapsibleSection(QWidget):
 
 
 class ExplorerPanel(QWidget):
+    #: Emitted with a file's path when it's clicked in any of the three trees -- never for a
+    #: directory (clicking one just expands/collapses it, QTreeView's own default behavior).
+    file_activated = pyqtSignal(Path)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._env_project_dir: Path | None = None
@@ -121,6 +125,18 @@ class ExplorerPanel(QWidget):
             "Personal Map Variants", self._folder_body(self.personal_maps_tree, self.personal_maps_placeholder)
         )
         layout.addWidget(self.personal_maps_section)
+
+        for tree, model in (
+            (self.project_tree, self._project_model),
+            (self.personal_variants_tree, self._personal_variants_model),
+            (self.personal_maps_tree, self._personal_maps_model),
+        ):
+            tree.clicked.connect(lambda index, m=model: self._on_tree_clicked(m, index))
+
+    def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
+        if not index.isValid() or model.isDir(index):
+            return
+        self.file_activated.emit(Path(model.filePath(index)))
 
     def _placeholder_label(self) -> QLabel:
         label = QLabel(_NOT_RESOLVED_TEXT)

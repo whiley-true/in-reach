@@ -588,6 +588,25 @@ def test_open_file_adds_a_tab_with_the_files_content(window: MainWindow, tmp_pat
     assert pane._tab_state_for(pane.widget(index)).path == source
 
 
+def test_open_file_switches_to_the_existing_tab_instead_of_duplicating_it(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "script.txt"
+    source.write_text("print('hi')", encoding="utf-8")
+    pane.open_file(source)
+    first_index = pane.currentIndex()
+
+    window.main_panel.new_tab_in(pane)  # moves focus elsewhere first
+    assert pane.currentIndex() != first_index
+    before = pane.count()
+
+    pane.open_file(source)
+
+    assert pane.count() == before
+    assert pane.currentIndex() == first_index
+
+
 def test_open_file_reports_an_unreadable_file_rather_than_raising(
     window: MainWindow, monkeypatch, tmp_path: Path
 ) -> None:

@@ -325,6 +325,7 @@ class MainWindow(QWidget):
         already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
         if already_open:
             self.explorer_panel.set_project_folder(Path(already_open))
+        self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
 
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
@@ -426,6 +427,12 @@ class MainWindow(QWidget):
         """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
         Entries" on the Welcome tab might have changed either one."""
         self.explorer_panel.refresh_personal_folders()
+
+    def _on_explorer_file_activated(self, path: Path) -> None:
+        """Opens a file clicked in any of the Explorer panel's three trees -- into the active
+        pane, same as "Open File" from the File menu (and, like that action, switching to the tab
+        instead of duplicating it if the file's already open there)."""
+        self.main_panel.active_pane.open_file(path)
 
     # -- File menu ------------------------------------------------------------------------------
 

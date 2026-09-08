@@ -715,6 +715,20 @@ def test_open_new_window_creates_and_tracks_another_mainwindow(
     assert child.isMaximized() is True
 
 
+def test_clicking_a_file_in_the_explorer_panel_opens_it_in_the_active_pane(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    source = tmp_path / "script.txt"
+    source.write_text("print('hi')", encoding="utf-8")
+    pane = project_window.main_panel.active_pane
+    before = pane.count()
+
+    project_window.explorer_panel.file_activated.emit(source)
+
+    assert pane.count() == before + 1
+    assert pane.widget(pane.currentIndex()).toPlainText() == "print('hi')"
+
+
 def test_open_file_reads_the_chosen_file_into_the_active_pane(
     project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

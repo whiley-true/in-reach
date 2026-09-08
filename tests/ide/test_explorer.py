@@ -147,3 +147,79 @@ def test_clicking_a_section_header_expands_it(panel: ExplorerPanel, qtbot) -> No
 
     assert panel.personal_variants_section.expanded is True
     assert panel.personal_variants_section.body.isVisible() is True
+
+
+# -- clicking a file opens it ----------------------------------------------------------------------
+
+
+def test_clicking_a_file_in_the_project_tree_emits_file_activated(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    file_path = folder / "notes.txt"
+    file_path.write_text("hi", encoding="utf-8")
+    panel.set_project_folder(folder)
+    model = panel._project_model
+    root_index = panel.project_tree.rootIndex()
+    qtbot.waitUntil(lambda: model.rowCount(root_index) > 0, timeout=2000)
+    file_index = model.index(str(file_path))
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+    panel._on_tree_clicked(model, file_index)
+
+    assert activated == [file_path]
+
+
+def test_clicking_a_folder_in_the_project_tree_does_not_emit_file_activated(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    (folder / "subfolder").mkdir(parents=True)
+    panel.set_project_folder(folder)
+    model = panel._project_model
+    root_index = panel.project_tree.rootIndex()
+    qtbot.waitUntil(lambda: model.rowCount(root_index) > 0, timeout=2000)
+    dir_index = model.index(str(folder / "subfolder"))
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+    panel._on_tree_clicked(model, dir_index)
+
+    assert activated == []
+
+
+def test_an_invalid_index_does_not_emit_file_activated(panel: ExplorerPanel) -> None:
+    from PyQt6.QtCore import QModelIndex
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+
+    panel._on_tree_clicked(panel._project_model, QModelIndex())
+
+    assert activated == []
+
+
+def test_clicking_a_file_in_a_personal_folder_section_also_emits_file_activated(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    project_dir = tmp_path / ".in-reach"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text("", encoding="utf-8")
+    variants = tmp_path / "variants"
+    variants.mkdir()
+    file_path = variants / "Slayer.bin"
+    file_path.write_bytes(b"")
+    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
+    panel.set_env_project_dir(project_dir)
+    model = panel._personal_variants_model
+    root_index = panel.personal_variants_tree.rootIndex()
+    qtbot.waitUntil(lambda: model.rowCount(root_index) > 0, timeout=2000)
+    file_index = model.index(str(file_path))
+
+    activated: list[Path] = []
+    panel.file_activated.connect(activated.append)
+    panel._on_tree_clicked(model, file_index)
+
+    assert activated == [file_path]

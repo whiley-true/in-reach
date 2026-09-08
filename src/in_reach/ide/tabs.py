@@ -314,7 +314,13 @@ class TabPane(QTabWidget):
                 self._save_tab(index)
 
     def open_file(self, path: Path) -> None:
-        """"Open File" -- adds ``path`` as a new tab, reading its content in."""
+        """"Open File" (the File menu, and clicking a file in the Explorer panel) -- adds ``path``
+        as a new tab, reading its content in. Switches to the existing tab instead of duplicating
+        it if ``path`` is already open in this pane."""
+        for index in range(self.count()):
+            if self._tab_state_for(self.widget(index)).path == path:
+                self.setCurrentIndex(index)
+                return
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:

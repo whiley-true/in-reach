@@ -12,11 +12,21 @@ def _has_opaque_pixel(image) -> bool:
 
 
 def test_icon_for_suffix_renders_something_for_every_mapped_extension(qtbot) -> None:
-    for suffix in (".mvar", ".bin", ".gitignore", ".pkl", ".mglo"):
+    for suffix in (".txt", ".md", ".json", ".mvar", ".bin", ".gitignore", ".pkl", ".mglo"):
         icon = file_icons.icon_for_suffix(suffix)
         pixmap = icon.pixmap(32, 32)
         assert not pixmap.isNull()
         assert _has_opaque_pixel(pixmap.toImage())
+
+
+def test_txt_md_and_json_each_render_a_distinct_icon(qtbot) -> None:
+    images = {
+        suffix: file_icons.icon_for_suffix(suffix).pixmap(32, 32).toImage()
+        for suffix in (".txt", ".md", ".json")
+    }
+    assert images[".txt"] != images[".md"]
+    assert images[".txt"] != images[".json"]
+    assert images[".md"] != images[".json"]
 
 
 def test_icon_for_suffix_is_case_insensitive() -> None:
@@ -31,13 +41,6 @@ def test_different_mapped_suffixes_render_different_icons(qtbot) -> None:
     mvar_icon = file_icons.icon_for_suffix(".mvar").pixmap(32, 32).toImage()
 
     assert bin_icon != mvar_icon
-
-
-def test_icon_for_suffix_falls_back_to_the_generic_file_glyph_for_txt_md_json(qtbot) -> None:
-    generic = file_icons.icons.icon(file_icons._GENERIC_FILE_ICON_NAME, size=16).pixmap(16, 16).toImage()
-    for suffix in (".txt", ".md", ".json"):
-        rendered = file_icons.icon_for_suffix(suffix).pixmap(16, 16).toImage()
-        assert rendered == generic
 
 
 def test_icon_for_suffix_falls_back_for_an_unknown_extension(qtbot) -> None:
