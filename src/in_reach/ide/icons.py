@@ -174,12 +174,18 @@ def _with_disabled_badge(pixmap: QPixmap) -> QPixmap:
     return badged
 
 
-def apply_icon(color: str = DEFAULT_COLOR, size: int = 24) -> QIcon:
+def apply_icon(color: str = DEFAULT_COLOR, size: int = 24, *, enabled: bool = True) -> QIcon:
     """A checkmark glyph -- the activity bar's "Apply" button (PROMPT.md: "below the rvt icon we
     want another icon for 'Apply'"). Rendered as a real Unicode checkmark character rather than
     hand-traced SVG path data, same reasoning as :mod:`in_reach.ide.file_icons`'s own glyph icons
     -- a mis-plotted checkmark polygon is an easy, easy-to-miss mistake; a font glyph can't be
     wrong the same way.
+
+    Args:
+        enabled: When ``False`` (PROMPT.md: "please also use the red no entry icon (like you do
+            for rvt) when the apply button can not be pressed"), overlays the same "no entry"
+            circle-and-dash badge :func:`rvt_icon` uses, registered for both Normal and Disabled
+            icon modes for the same reason documented there.
     """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -192,7 +198,13 @@ def apply_icon(color: str = DEFAULT_COLOR, size: int = 24) -> QIcon:
     painter.setPen(QColor(color))
     painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "✓")
     painter.end()
-    return QIcon(pixmap)
+    if enabled:
+        return QIcon(pixmap)
+    badged = _with_disabled_badge(pixmap)
+    icon = QIcon()
+    icon.addPixmap(badged, QIcon.Mode.Normal)
+    icon.addPixmap(badged, QIcon.Mode.Disabled)
+    return icon
 
 
 def lock_icon(size: int = 16) -> QIcon:

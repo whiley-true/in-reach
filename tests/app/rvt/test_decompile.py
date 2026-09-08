@@ -260,6 +260,60 @@ def test_decompile_into_project_stamps_category_and_icon_into_settings_json(
     assert settings_json["meta"]["category_icon"] == "juggernaut"
 
 
+def test_decompile_into_project_stamps_title_and_description_into_settings_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.decompile_into_project(bin_path, folder, title="My Gametype", description="A test gametype")
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["title"] == "My Gametype"
+    assert settings_json["meta"]["description"] == "A test gametype"
+
+
+def test_decompile_into_project_truncates_description_to_meta_max_length(tmp_path: Path, monkeypatch) -> None:
+    # Meta.description's real max_length (127) is shorter than the New Project dialog's own -- a
+    # decompile shouldn't fail over a few characters this field was never going to keep anyway.
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.decompile_into_project(bin_path, folder, description="x" * 200)
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["description"] == "x" * 127
+
+
+def test_resync_from_bin_carries_title_and_description_through(tmp_path: Path, monkeypatch) -> None:
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.resync_from_bin(bin_path, folder, title="Kept Title", description="Kept description")
+
+    document = json.loads((folder / "build" / decompile.GENERATED_SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert document["meta"]["title"] == "Kept Title"
+    assert document["meta"]["description"] == "Kept description"
+
+
 def test_decompile_into_project_defaults_to_no_category(tmp_path: Path, monkeypatch) -> None:
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())
@@ -306,12 +360,16 @@ def test_decompile_into_project_against_a_real_bin(tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
 
-    decompile.decompile_into_project(_FIXTURES_DIR / "juggernaut" / "juggernaut.bin", folder)
+    decompile.decompile_into_project(
+        _FIXTURES_DIR / "juggernaut" / "juggernaut.bin", folder, title="My Project Title"
+    )
 
     settings_dir = folder / "settings"
     settings = json.loads((settings_dir / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
     assert settings["meta"]["is_multiplayer"] is True
-    assert settings["meta"]["title"]
+    # This project's own title (passed in above) overrides the .bin's own header title -- see
+    # test_decompile_into_project_stamps_title_and_description_into_settings_json.
+    assert settings["meta"]["title"] == "My Project Title"
 
     strings = json.loads((settings_dir / decompile.STRINGS_FILENAME).read_text(encoding="utf-8"))
     assert set(strings.keys()) == {"$schema", "meta", "teams", "script_strings"}

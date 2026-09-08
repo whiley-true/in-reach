@@ -76,3 +76,44 @@ def test_matches_by_filename_regardless_of_folder() -> None:
     text = '{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}'
 
     assert schema_check.validate_before_save(Path("/some/deep/path/settings.json"), text) is None
+
+
+# -- find_errors (PROMPT.md: live inline highlighting) -------------------------------------------
+
+
+def test_find_errors_is_none_for_a_non_schema_file() -> None:
+    assert schema_check.find_errors(Path("script.txt"), "not json at all") is None
+
+
+def test_find_errors_is_empty_for_a_valid_document() -> None:
+    text = '{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}'
+
+    assert schema_check.find_errors(Path("settings.json"), text) == []
+
+
+def test_find_errors_locates_the_offending_value_for_an_invalid_enum() -> None:
+    text = '{"meta": {"category": "not_a_real_category", "source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}'
+
+    errors = schema_check.find_errors(Path("settings.json"), text)
+
+    assert len(errors) == 1
+    assert errors[0].loc == ("meta", "category")
+    assert errors[0].span is not None
+    start, end = errors[0].span
+    assert text[start:end] == '"not_a_real_category"'
+
+
+def test_find_errors_has_no_span_for_a_missing_required_field() -> None:
+    # "field required" errors have nothing in the text to point at.
+    errors = schema_check.find_errors(Path("strings.json"), "{}")
+
+    assert errors
+    assert all(e.span is None for e in errors)
+
+
+def test_find_errors_reports_bad_json_syntax_with_no_loc() -> None:
+    errors = schema_check.find_errors(Path("settings.json"), "{not valid json")
+
+    assert len(errors) == 1
+    assert errors[0].loc == ()
+    assert "settings.json" in errors[0].message

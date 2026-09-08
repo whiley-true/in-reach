@@ -23,10 +23,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt
-from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPainterPath, QPalette, QResizeEvent
-from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QWidget
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QPaintEvent,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QResizeEvent,
+    QTextCharFormat,
+    QTextCursor,
+)
+from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QTextEdit, QWidget
 
+from in_reach.ide import schema_check
 from in_reach.ide.code_folding import compute_fold_ranges
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
@@ -38,6 +51,11 @@ _GUTTER_PADDING = 6
 _FOLD_MARKER_WIDTH = 14
 #: Height of the breadcrumb strip pinned to the editor's top margin.
 _BREADCRUMB_HEIGHT = 22
+#: Height of the schema-error banner overlaid just below the breadcrumb.
+_ERROR_BANNER_HEIGHT = 22
+#: Fixed error red -- same reasoning as json_highlighter.py's own fixed token palette: a schema
+#: error reads as unambiguously wrong regardless of which of this app's themes is active.
+_ERROR_COLOR = "#f14c4c"
 #: Spaces per indent level for the vertical guide lines -- matches this project's own generated
 #: ``.json`` files (``json.dump(..., indent=2)``) and ``vs_sample.png`` itself.
 _INDENT_SIZE = 2
@@ -101,12 +119,34 @@ class _BreadcrumbBar(QLabel):
         return QSize(0, _BREADCRUMB_HEIGHT)
 
 
+class _ErrorBanner(QLabel):
+    """A single-line strip overlaid just below the breadcrumb, floating on top of the text rather
+    than reserving its own layout margin -- shown only while the current document fails its own
+    schema (PROMPT.md: "highlighting and error message if schema is incorrect"), hidden the rest
+    of the time so a valid file never loses any vertical space to it."""
+
+    def __init__(self, editor: "TextEditorWidget") -> None:
+        super().__init__(editor)
+        self.setContentsMargins(6, 0, 6, 0)
+        self.setStyleSheet(f"background-color: {_ERROR_COLOR}; color: #ffffff;")
+        self.setAutoFillBackground(True)
+        self.hide()
+
+    def sizeHint(self) -> QSize:
+        return QSize(0, _ERROR_BANNER_HEIGHT)
+
+
 class TextEditorWidget(QPlainTextEdit):
     """One text-editor tab's content.
 
     Dirty tracking rides ``QTextDocument``'s own ``isModified()``/``modificationChanged`` --
     no extra state lives here.
     """
+
+    #: PROMPT.md: "make ctrl + S a save shortcut on the keyboard when on text editor" -- emitted
+    #: from keyPressEvent() below rather than a window-level QShortcut, so the binding only ever
+    #: fires while a text editor genuinely has focus (see TabPane's connection of this signal).
+    save_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None, *, path: Path | None = None) -> None:
         super().__init__(parent)
@@ -117,6 +157,7 @@ class TextEditorWidget(QPlainTextEdit):
 
         self._line_number_area = _LineNumberArea(self)
         self._breadcrumb = _BreadcrumbBar(self)
+        self._error_banner = _ErrorBanner(self)
 
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_on_scroll)
@@ -182,6 +223,18 @@ class TextEditorWidget(QPlainTextEdit):
                 contents.height() - _BREADCRUMB_HEIGHT,
             )
         )
+        # Floats over the text rather than reserving its own viewport margin -- see _ErrorBanner's
+        # own docstring for why.
+        self._error_banner.setGeometry(
+            QRect(contents.left(), contents.top() + _BREADCRUMB_HEIGHT, contents.width(), _ERROR_BANNER_HEIGHT)
+        )
+        self._error_banner.raise_()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.matches(QKeySequence.StandardKey.Save):
+            self.save_requested.emit()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
@@ -319,6 +372,47 @@ class TextEditorWidget(QPlainTextEdit):
         self._collapsed_folds &= self._fold_ranges.keys()
         self._apply_fold_visibility()
         self._update_breadcrumb()
+        self._update_schema_validation()
+
+    # -- live schema validation -----------------------------------------------------------------
+
+    def _update_schema_validation(self) -> None:
+        """VS Code-style live feedback (PROMPT.md: "highlighting and error message if schema is
+        incorrect") -- a wavy red underline under every offending value plus a summary banner,
+        re-evaluated on every keystroke. Purely advisory: the actual reject-on-save enforcement is
+        :func:`~in_reach.ide.schema_check.validate_before_save`, called separately by
+        :meth:`~in_reach.ide.tabs.TabPane._save_tab`."""
+        errors = schema_check.find_errors(self.path, self.toPlainText()) if self.path is not None else None
+        if not errors:
+            self.setExtraSelections([])
+            self._error_banner.hide()
+            return
+
+        selections = []
+        for error in errors:
+            if error.span is None:
+                continue
+            start, end = error.span
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+            fmt.setUnderlineColor(QColor(_ERROR_COLOR))
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = fmt
+            selections.append(selection)
+        self.setExtraSelections(selections)
+
+        summary = errors[0].message
+        if len(errors) > 1:
+            summary += f" (+{len(errors) - 1} more)"
+        metrics = self._error_banner.fontMetrics()
+        self._error_banner.setText(metrics.elidedText(summary, Qt.TextElideMode.ElideRight, self.width() - 12))
+        self._error_banner.setToolTip(summary)
+        self._error_banner.show()
+        self._error_banner.raise_()
 
     # -- breadcrumb ---------------------------------------------------------------------------------
 

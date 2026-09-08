@@ -361,3 +361,65 @@ def test_indent_guides_do_not_crash_on_an_empty_document(qtbot) -> None:
     editor.resize(300, 200)
     editor.show()
     QApplication.processEvents()  # should not raise
+
+
+# -- live schema validation (PROMPT.md: "highlighting and error message if schema is incorrect") -
+
+
+def test_a_valid_settings_json_shows_no_error_banner_or_underline(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    editor.setPlainText('{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}')
+
+    assert editor._error_banner.isHidden()
+    assert editor.extraSelections() == []
+
+
+def test_an_invalid_settings_json_shows_the_error_banner_and_underline(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    text = '{"meta": {"category": "not_a_real_category", "source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}'
+    editor.setPlainText(text)
+
+    assert not editor._error_banner.isHidden()
+    assert "not_a_real_category" in editor._error_banner.toolTip() or "known category" in editor._error_banner.toolTip()
+    selections = editor.extraSelections()
+    assert len(selections) == 1
+    selected_text = selections[0].cursor.selectedText()
+    assert selected_text == '"not_a_real_category"'
+
+
+def test_fixing_the_error_clears_the_banner_and_underline(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{"meta": {"category": "not_a_real_category"}}')
+    assert not editor._error_banner.isHidden()
+
+    editor.setPlainText('{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}')
+
+    assert editor._error_banner.isHidden()
+    assert editor.extraSelections() == []
+
+
+def test_a_non_schema_backed_file_never_shows_the_error_banner(qtbot) -> None:
+    path = Path("/project/edit/rvt/script.txt")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    editor.setPlainText("this is not json at all, but this file has no schema anyway")
+
+    assert editor._error_banner.isHidden()
+
+
+def test_an_untitled_tab_with_no_path_never_shows_the_error_banner(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    editor.setPlainText("{not even valid json")
+
+    assert editor._error_banner.isHidden()

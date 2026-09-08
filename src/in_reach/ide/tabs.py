@@ -76,10 +76,24 @@ def _on_editor_modified(widget: TextEditorWidget, modified: bool) -> None:
         pane._update_close_icon(index)
 
 
-def _connect_modification_tracking(editor: TextEditorWidget) -> None:
+def _on_editor_save_requested(widget: TextEditorWidget) -> None:
+    # PROMPT.md: "make ctrl + S a save shortcut on the keyboard when on text editor". Looked up
+    # dynamically via _owner_pane (same as _on_editor_modified above) rather than bound at connect
+    # time, since a tab can move to a different pane later (cross-pane drag, split) without this
+    # signal ever being reconnected.
+    pane = getattr(widget, "_owner_pane", None)
+    if pane is None:
+        return
+    index = pane.indexOf(widget)
+    if index >= 0:
+        pane._save_tab(index)
+
+
+def _connect_editor_signals(editor: TextEditorWidget) -> None:
     editor.document().modificationChanged.connect(
         lambda modified, w=editor: _on_editor_modified(w, modified)
     )
+    editor.save_requested.connect(lambda w=editor: _on_editor_save_requested(w))
 
 
 class _DragTabBar(QTabBar):
@@ -344,7 +358,7 @@ class TabPane(QTabWidget):
         # build/resync, so an edit made here would just silently vanish rather than doing anything.
         generated = is_generated_file(path)
         editor.setReadOnly(generated)
-        _connect_modification_tracking(editor)
+        _connect_editor_signals(editor)
         # PROMPT.md: "they have a padlock symbol in the tab" -- a generated file's read-only status
         # never changes for the tab's own lifetime, unlike the dirty-state icon on its close
         # button, so this is set once here rather than needing its own refresh hook.
@@ -722,7 +736,7 @@ class MainPanelArea(QWidget):
             # view of a generated file would otherwise silently become editable.
             generated = widget.isReadOnly()
             duplicate.setReadOnly(generated)
-            _connect_modification_tracking(duplicate)
+            _connect_editor_signals(duplicate)
         else:
             duplicate = self._new_welcome_tab()
 
@@ -761,7 +775,7 @@ class MainPanelArea(QWidget):
         label = f"Untitled-{self._next_tab_number}.txt"
         self._next_tab_number += 1
         editor = TextEditorWidget()
-        _connect_modification_tracking(editor)
+        _connect_editor_signals(editor)
         new_index = pane.addTab(editor, label)
         pane._track_tab(new_index, editor)
         pane.setCurrentIndex(new_index)

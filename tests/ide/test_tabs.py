@@ -169,6 +169,56 @@ def test_saving_an_already_saved_tab_does_not_reprompt_for_a_path(
     assert prompted == []
 
 
+def test_ctrl_s_in_the_text_editor_saves_the_active_tab(
+    window: MainWindow, qtbot, tmp_path: Path
+) -> None:
+    # PROMPT.md: "make ctrl + S a save shortcut on the keyboard when on text editor".
+    from PyQt6.QtCore import Qt
+
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    widget.setPlainText("v1")
+    target = tmp_path / "gametype.txt"
+    pane._tab_state_for(widget).path = target
+
+    qtbot.keyClick(widget, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+
+    assert target.read_text(encoding="utf-8") == "v1"
+    assert widget.document().isModified() is False
+
+
+def test_ctrl_s_saves_via_whichever_pane_currently_owns_the_tab_after_a_move(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    # A tab dragged into a different pane re-tracks _owner_pane without recreating the editor
+    # widget -- the Ctrl+S handler has to look that up dynamically each time, not bind it once at
+    # connect time, or a save after a cross-pane move would silently go nowhere.
+    main_panel = window.main_panel
+    source = main_panel.panes[0]
+    main_panel.new_tab_in(source)
+    index = source.currentIndex()
+    widget = source.widget(index)
+    widget.setPlainText("v1")
+    target = tmp_path / "gametype.txt"
+    source._tab_state_for(widget).path = target
+
+    other_group = main_panel._new_group()
+    other_pane = main_panel._new_pane()
+    other_group.add_pane(other_pane)
+    main_panel._add_group(other_group)
+    state = source._tab_state.pop(widget)
+    source.removeTab(index)
+    new_index = other_pane.addTab(widget, "gametype.txt")
+    other_pane._track_tab(new_index, widget, state=state)
+
+    widget.save_requested.emit()
+
+    assert target.read_text(encoding="utf-8") == "v1"
+
+
 def test_save_failure_reports_the_error_and_keeps_the_tab_open(
     window: MainWindow, monkeypatch, tmp_path: Path
 ) -> None:

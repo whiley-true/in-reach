@@ -49,3 +49,30 @@ def test_load_meta_category_defaults_for_an_unknown_category_name(tmp_path: Path
     path.write_text('{"meta": {"category": "not_a_real_category"}}', encoding="utf-8")
 
     assert settings_io.load_meta_category(path) == (EngineCategory.none, None)
+
+
+def test_load_meta_title_description_round_trips_what_dump_game_settings_wrote(tmp_path: Path) -> None:
+    settings = GameSettings(
+        meta=Meta(
+            source_file="x.bin",
+            generated_at=datetime.now(timezone.utc),
+            title="My Gametype",
+            description="A test gametype",
+        )
+    )
+    out_path = tmp_path / "settings.json"
+
+    settings_io.dump_game_settings(settings, out_path)
+
+    assert settings_io.load_meta_title_description(out_path) == ("My Gametype", "A test gametype")
+
+
+def test_load_meta_title_description_defaults_for_a_missing_file(tmp_path: Path) -> None:
+    assert settings_io.load_meta_title_description(tmp_path / "nope.json") == ("", "")
+
+
+def test_load_meta_title_description_defaults_for_unparsable_json(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text("not json", encoding="utf-8")
+
+    assert settings_io.load_meta_title_description(path) == ("", "")

@@ -1,9 +1,13 @@
-"""String table export, extraction-only.
+"""String table export (plus, now, JSON -> dict load-back for the compile pipeline).
 
-Ported from ``in-reach-v1``'s ``strings_io.py``, trimmed to the dump direction only -- see
-``settings_io.py``'s docstring for why (no more hand-edited JSON to load back, so ``load_strings``
-wasn't ported). The JSON-Schema (``"$schema"``) embedding v1 also trimmed *is* back now, ported
-from the v2 prototype instead -- see :mod:`in_reach.app.rvt.schema_io`.
+Ported from ``in-reach-v1``'s ``strings_io.py``, originally trimmed to the dump direction only --
+:func:`load_strings` is now ported too, from ``in-reach-v2``'s own version of this module, since
+PROMPT.md's "applying changes should try and compile the jsons into a gametype" means
+``settings/strings.json`` really is hand-edited (or RVT-edited) input again, for
+:mod:`in_reach.app.rvt.compile`'s ``run_compile()`` to read back and apply via
+:mod:`in_reach.app.rvt.strings_writer`'s ``apply_strings()``. The JSON-Schema (``"$schema"``)
+embedding v1 also trimmed *is* back too, ported from the v2 prototype instead -- see
+:mod:`in_reach.app.rvt.schema_io`.
 
 Dumps every ReachStringTable ``_reachvarianttool`` exposes on a multiplayer variant -- localized
 name/description/category, each team's name, and the big generic script_strings table (Forge Label
@@ -21,6 +25,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from in_reach.app.rvt.models.strings import StringsDocument
 from in_reach.app.rvt.rvt_bridge import get_rvt
 from in_reach.app.rvt.schema_io import schema_ref
 
@@ -93,3 +100,28 @@ def write_strings_json(
         json.dump(document, f, indent=2, ensure_ascii=False)
         f.write("\n")
     return out_path
+
+
+def load_strings(path: Path) -> dict:
+    """Reads+validates ``path`` (a ``strings.json``), returning the same plain dict shape
+    :func:`extract_strings` produces (``_comment``/``$schema`` stripped) for
+    :func:`~in_reach.app.rvt.strings_writer.apply_strings` to consume unchanged. Validation is
+    against :class:`~in_reach.app.rvt.models.strings.StringsDocument` purely to catch a malformed
+    hand-edit early with a clear message; the dict handed back is the original, not a
+    ``model_dump()`` reshaping of it, so ``apply_strings()``'s existing plain-dict contract is
+    untouched.
+
+    Raises:
+        ValueError: ``path`` isn't valid JSON, or doesn't match ``StringsDocument``'s schema.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    data.pop("_comment", None)
+    data.pop("$schema", None)
+    try:
+        StringsDocument.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"{path} does not match the strings schema: {exc}") from exc
+    return data

@@ -1,16 +1,24 @@
-"""Pydantic model -> JSON, extraction-only (plus one narrow load-back path).
+"""Pydantic model -> JSON (plus, now, JSON -> model load-back for the compile pipeline).
 
-Ported from ``in-reach-v1``'s ``settings_io.py``, trimmed to the dump direction only: there is no
-more hand-edited JSON to load back (editing happens through ReachVariantTool itself, not by hand),
-so ``load_game_settings`` wasn't ported. The JSON-Schema (``"$schema"``) embedding v1 also trimmed
-*is* back now, ported from the v2 prototype's own version of this module instead (PROMPT.md: "in
-settings, please not[e] examples from repo v2 ... where we have a schema, please re-add this to the
-top of the files") -- see :mod:`in_reach.app.rvt.schema_io`.
+Ported from ``in-reach-v1``'s ``settings_io.py``, originally trimmed to the dump direction only
+(editing happened through ReachVariantTool itself, not by hand) -- :func:`load_game_settings` is
+now ported too, from ``in-reach-v2``'s own version of this module, since PROMPT.md's "applying
+changes should try and compile the jsons into a gametype" means ``settings/settings.json`` really
+is hand-edited (or RVT-edited) input again, this time for
+:mod:`in_reach.app.rvt.compile`'s ``run_compile()`` to read back and apply onto a loaded variant.
+The JSON-Schema (``"$schema"``) embedding v1 also trimmed *is* back too, ported from the v2
+prototype's own version of this module (PROMPT.md: "in settings, please not[e] examples from repo
+v2 ... where we have a schema, please re-add this to the top of the files") -- see
+:mod:`in_reach.app.rvt.schema_io`.
 
-:func:`load_script_settings` is the one load-back exception -- not for hand-editing, but so a
-read-only UI can read back a project's already-extracted ``settings/script_settings.json`` (see
-:mod:`in_reach.app.rvt.decompile`) to know each Scripted Option's current shape (values/range)
-without re-deriving that from a loaded ``.bin``.
+:func:`load_script_settings` predates :func:`load_game_settings` and stays intentionally lenient
+(never raises, falls back to a bare default) -- it backs a read-only UI reading back a project's
+already-extracted ``settings/script_settings.json`` (see :mod:`in_reach.app.rvt.decompile`) to know
+each Scripted Option's current shape (values/range) without re-deriving that from a loaded ``.bin``,
+where a parse failure should just mean "show nothing" rather than blocking anything.
+:func:`load_game_settings` is the opposite case (compiling on genuinely-wrong input needs to fail
+loudly, not silently fall back to defaults), so it raises ``ValueError`` on any problem rather than
+reusing :func:`load_script_settings`'s lenient behavior for its own script_settings-merging step.
 """
 
 from __future__ import annotations
@@ -109,3 +117,79 @@ def load_meta_category(path: Path) -> tuple[EngineCategory, EngineIcon | None]:
     except KeyError:
         category_icon = None
     return category, category_icon
+
+
+def load_meta_title_description(path: Path) -> tuple[str, str]:
+    """Reads back just ``meta.title``/``meta.description`` from an already-decompiled
+    ``settings.json`` -- used by :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own callers
+    to carry this project's own title/description forward into a resync (PROMPT.md: "when setting
+    a title and description, this is not being set in settings.json"), rather than losing them back
+    to the source ``.bin``'s own header every time RVT saves over it.
+
+    Returns ``("", "")`` if ``path`` doesn't exist or fails to parse -- same "never raise, just
+    fall back" reasoning as :func:`load_meta_category`.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", ""
+    meta = data.get("meta") or {}
+    return meta.get("title") or "", meta.get("description") or ""
+
+
+def _load_script_settings_strict(path: Path) -> ScriptSettings:
+    """A raising counterpart to :func:`load_script_settings` -- used only by
+    :func:`load_game_settings` below, which needs to fail loudly on a genuinely malformed
+    ``script_settings.json`` rather than silently substituting a bare default (see this module's
+    own docstring for why the two loaders can't share behavior here)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    data.pop("$schema", None)
+    data.pop("_comment", None)
+    try:
+        return ScriptSettings.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"{path} does not match the script_settings schema: {exc}") from exc
+
+
+def load_game_settings(settings_path: Path, script_settings_path: Path | None = None) -> GameSettings:
+    """Reads ``settings_path`` (normally ``settings/settings.json``) back into a validated
+    :class:`GameSettings`, merging in its ``script_settings.json`` sibling (``script_settings_path``,
+    defaulting to one next to ``settings_path`` -- the layout :func:`dump_game_settings`/
+    :func:`dump_script_settings` write) as ``multiplayer.script_settings`` -- the two are split
+    across separate files/schemas (see :mod:`in_reach.app.rvt.models.script_settings`'s own
+    docstring) but ``GameSettings`` itself still models them as one nested tree, same as before
+    that split.
+
+    Used by :mod:`in_reach.app.rvt.compile`'s ``run_compile()`` to read back a project's current
+    hand-edited (or RVT-edited) settings for applying onto a freshly-loaded variant (PROMPT.md:
+    "applying changes should try and compile the jsons into a gametype").
+
+    Raises:
+        ValueError: Either file doesn't parse as JSON, or the merged document doesn't validate
+            against :class:`GameSettings`'s own schema.
+    """
+    if script_settings_path is None:
+        script_settings_path = settings_path.parent / "script_settings.json"
+
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid JSON in {settings_path}: {exc}") from exc
+    data.pop("$schema", None)
+    data.pop("_comment", None)
+    script_settings = _load_script_settings_strict(script_settings_path)
+
+    meta = data.get("meta")
+    is_multiplayer = meta.get("is_multiplayer", True) if isinstance(meta, dict) else True
+    if is_multiplayer:
+        if not isinstance(data.get("multiplayer"), dict):
+            data["multiplayer"] = {}
+        data["multiplayer"]["script_settings"] = script_settings.model_dump(mode="json")
+
+    try:
+        return GameSettings.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"{settings_path} does not match the settings schema: {exc}") from exc

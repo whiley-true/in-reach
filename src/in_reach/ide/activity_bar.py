@@ -2,9 +2,10 @@
 their views is ever active, switching the primary sidebar's content, VSCode-style: clicking the
 already-active one collapses the sidebar instead of switching -- a ReachVariantTool launcher icon
 below them (a plain action button, not a view -- it never affects which sidebar view is active),
-an "Apply" icon below that (PROMPT.md: pushes a project's hand-edited ``settings/`` back into
-``edit/``/``build/`` -- see ``MainWindow.apply_settings_changes()``), and a settings cog pinned at
-the bottom (a no-op for now).
+an "Apply" icon below that (PROMPT.md: compiles a project's hand-edited ``settings/*.json`` +
+``edit/rvt/script.txt`` into a real gametype ``.bin`` -- see
+``MainWindow.apply_settings_changes()``), and a settings cog pinned at the bottom (a no-op for
+now).
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ class ActivityBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._rvt_enabled = True
+        self._apply_enabled = False
         self.setFixedWidth(WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # A full rounded/bordered card, matching every other top-level panel -- see
@@ -116,7 +118,7 @@ class ActivityBar(QWidget):
         # PROMPT.md: "below the rvt icon we want another icon for 'Apply'" -- only enabled once
         # there's something in settings/ to push into edit/build (see set_apply_enabled()).
         self.apply_button = _bar_button("apply", "Apply settings changes")
-        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, _ICON_SIZE))
+        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, _ICON_SIZE, enabled=False))
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested.emit)
         layout.addWidget(self.apply_button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -172,8 +174,13 @@ class ActivityBar(QWidget):
 
     def set_apply_enabled(self, enabled: bool) -> None:
         """Whether ``settings/`` currently has changes worth applying -- see
-        ``MainWindow._refresh_apply_enabled()``."""
+        ``MainWindow._refresh_apply_enabled()``. PROMPT.md: "please also use the red no entry icon
+        (like you do for rvt) when the apply button can not be pressed" -- same "no entry" badge
+        treatment as :meth:`set_rvt_enabled`, for the same reason (Qt's automatic disabled-dimming
+        alone doesn't read clearly enough on its own)."""
+        self._apply_enabled = enabled
         self.apply_button.setEnabled(enabled)
+        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, round(_ICON_SIZE * self._icon_scale), enabled=enabled))
 
     # -- zoom ---------------------------------------------------------------------------------------
 
@@ -198,7 +205,7 @@ class ActivityBar(QWidget):
         self.rvt_button.setIconSize(QSize(icon_size, icon_size))
         self.rvt_button.setFixedSize(button_size, button_size)
 
-        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, icon_size))
+        self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, icon_size, enabled=self._apply_enabled))
         self.apply_button.setIconSize(QSize(icon_size, icon_size))
         self.apply_button.setFixedSize(button_size, button_size)
 
