@@ -274,6 +274,17 @@ class ExplorerPanel(QWidget):
         self._activate(folder)
         self.open_projects_changed.emit(self.open_projects)
 
+    def refresh_project_title(self, folder: Path) -> None:
+        """Re-reads ``folder``'s own title (its README's heading -- see
+        :func:`~in_reach.app.new_project.read_project_title`) and relabels its tab to match --
+        called after a rename (PROMPT.md: "when a project name is changed [via rvt or via apply
+        settings.json change] - the project title should change in the tabs and in the
+        breadcrumb"). A no-op if ``folder`` isn't currently open as a tab."""
+        for index in range(self.project_tabs.count()):
+            if Path(self.project_tabs.tabData(index)) == folder:
+                self.project_tabs.setTabText(index, new_project.read_project_title(folder))
+                return
+
     def close_project(self, folder: Path) -> None:
         """Closes ``folder``'s own tab, if it's open -- Qt's own ``QTabBar`` picks a neighboring
         tab to switch to (or, if this was the last one, falls back to the "no project"

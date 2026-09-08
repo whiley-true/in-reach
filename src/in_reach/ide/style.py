@@ -22,6 +22,22 @@ SIDEBAR_CONTENT_GAP = 16
 # second boundary line drawn on top of each card's own border.
 GAP_SPLITTER_HANDLE_STYLE = "QSplitter::handle { background-color: transparent; }"
 
+# Every dropdown menu in the app (the top bar's File/text2 buttons, a tab's right-click context
+# menu, the Open Recent submenu, ...) -- applied globally (see theme.py's apply_theme()) rather
+# than per-menu, so a submenu opened from any of them picks it up too without needing its own copy.
+# PROMPT.md: "for the drop down menu options, instead of changing highlighted text colour, please
+# apply background" -- Fusion's own default QMenu::item:selected swaps in HighlightedText (a
+# different, often low-contrast-on-Highlight foreground) alongside the background; pinning color to
+# the same palette(window-text) every other state already uses means only the background changes on
+# hover/selection, not the text color.
+MENU_STYLE = (
+    "QMenu { background-color: palette(window); border: 1px solid palette(mid); }"
+    "QMenu::item { background-color: transparent; color: palette(window-text); padding: 4px 24px 4px 20px; }"
+    "QMenu::item:selected { background-color: palette(highlight); color: palette(window-text); }"
+    "QMenu::item:disabled { color: palette(mid); }"
+    "QMenu::separator { height: 1px; background-color: palette(mid); margin: 4px 6px; }"
+)
+
 # A plain (non-tabbed) panel card -- the primary sidebar.
 PANEL_BORDER_STYLE = (
     f"border: 1px solid palette(mid); border-radius: {PANEL_RADIUS}px; background-color: palette(base);"

@@ -780,6 +780,30 @@ class MainPanelArea(QWidget):
         pane._track_tab(new_index, editor)
         pane.setCurrentIndex(new_index)
 
+    def open_welcome_tab_in(self, pane: TabPane) -> None:
+        """"Load Welcome Tab" (the File menu) -- switches to ``pane``'s own Welcome tab if it
+        already has one open, else adds a fresh one, same "switch instead of duplicating" rule
+        :meth:`TabPane.open_file` already follows for a real file."""
+        for index in range(pane.count()):
+            if isinstance(pane.widget(index), WelcomeTab):
+                pane.setCurrentIndex(index)
+                return
+        welcome = self._new_welcome_tab()
+        new_index = pane.addTab(welcome, "Welcome")
+        pane._track_tab(new_index, welcome)
+        pane.setCurrentIndex(new_index)
+
+    def refresh_project_titles(self) -> None:
+        """Re-reads every open editor tab's own ancestor-project title and refreshes its
+        breadcrumb to match -- called after a project rename (PROMPT.md: "when a project name is
+        changed ... the project title should change in the tabs and in the breadcrumb") so an
+        already-open tab doesn't keep showing the old title until its file is reopened."""
+        for pane in self.panes:
+            for index in range(pane.count()):
+                widget = pane.widget(index)
+                if isinstance(widget, TextEditorWidget):
+                    widget.refresh_project_title()
+
     def find_pane(self, pane_id: int) -> TabPane | None:
         for pane in self.panes:
             if id(pane) == pane_id:

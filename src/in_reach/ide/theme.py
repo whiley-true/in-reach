@@ -21,6 +21,8 @@ from pathlib import Path
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QStyleFactory, QToolTip
 
+from in_reach.ide import style
+
 THEMES_PATH = Path(__file__).resolve().parent / "themes" / "themes.json"
 DEFAULT_THEME_NAME = "Light"
 DEFAULT_STATUS_BAR_COLOR = "#007acc"
@@ -125,6 +127,7 @@ def apply_theme(app: QApplication, theme_name: str) -> Theme:
         f"QToolTip {{ background-color: {theme.palette_colors.get('tooltip_base', '#ffffdc')};"
         f" color: {theme.palette_colors.get('tooltip_text', '#000000')};"
         f" border: 1px solid {theme.palette_colors.get('mid', '#767676')}; padding: 2px; }}"
+        f"{style.MENU_STYLE}"
     )
     # A per-widget stylesheet rule that references the dynamic palette() QSS function is cached as
     # a "render rule" the first time a widget is polished -- a bare PaletteChange event doesn't

@@ -17,13 +17,15 @@ Adds, on top of the base ``QPlainTextEdit`` (PROMPT.md, across two passes):
   structural path to wherever the cursor currently sits (see :mod:`in_reach.ide.json_breadcrumb`).
 - JSON syntax highlighting (see :mod:`in_reach.ide.json_highlighter`), attached only when the
   file's own extension is ``.json``.
+- A minimap pinned along the right edge, next to the vertical scrollbar (PROMPT.md: "a live code
+  preview on the right hand side next to the scrollbar") -- see :class:`_Minimap`.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QKeyEvent,
@@ -37,7 +39,7 @@ from PyQt6.QtGui import (
     QTextCharFormat,
     QTextCursor,
 )
-from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QTextEdit, QWidget
+from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QTextEdit, QToolTip, QWidget
 
 from in_reach.ide import schema_check
 from in_reach.ide.code_folding import compute_fold_ranges
@@ -51,8 +53,8 @@ _GUTTER_PADDING = 6
 _FOLD_MARKER_WIDTH = 14
 #: Height of the breadcrumb strip pinned to the editor's top margin.
 _BREADCRUMB_HEIGHT = 22
-#: Height of the schema-error banner overlaid just below the breadcrumb.
-_ERROR_BANNER_HEIGHT = 22
+#: Width reserved for the minimap, along the editor's right edge.
+_MINIMAP_WIDTH = 72
 #: Fixed error red -- same reasoning as json_highlighter.py's own fixed token palette: a schema
 #: error reads as unambiguously wrong regardless of which of this app's themes is active.
 _ERROR_COLOR = "#f14c4c"
@@ -119,21 +121,105 @@ class _BreadcrumbBar(QLabel):
         return QSize(0, _BREADCRUMB_HEIGHT)
 
 
-class _ErrorBanner(QLabel):
-    """A single-line strip overlaid just below the breadcrumb, floating on top of the text rather
-    than reserving its own layout margin -- shown only while the current document fails its own
-    schema (PROMPT.md: "highlighting and error message if schema is incorrect"), hidden the rest
-    of the time so a valid file never loses any vertical space to it."""
+class _Minimap(QWidget):
+    """A shrunk, whole-document preview pinned along the editor's right edge, next to its vertical
+    scrollbar (PROMPT.md: "a live code preview on the right hand side next to the scrollbar").
+
+    Each line is drawn as a short horizontal bar -- its length proportional to that line's own
+    trimmed length -- rather than actual glyphs: legible code at minimap scale reads as a "shape"
+    more than literal text either way (VS Code's own minimap included at any real zoom-out level),
+    and a bar is exact and cheap to draw regardless of file size, where laying out real glyphs a
+    handful of pixels tall per line would not be. A line the live schema check currently flags (see
+    :meth:`TextEditorWidget._update_schema_validation`) draws as a full-width red bar instead, so a
+    problem stays visible even scrolled out of the main view (PROMPT.md: "it should highlight
+    errors as a line in colour"). A translucent band over the whole width shows which slice of the
+    document the main view currently shows, and both clicking and dragging inside it scroll the
+    editor to match -- clicking anywhere else jumps straight there.
+    """
 
     def __init__(self, editor: "TextEditorWidget") -> None:
         super().__init__(editor)
-        self.setContentsMargins(6, 0, 6, 0)
-        self.setStyleSheet(f"background-color: {_ERROR_COLOR}; color: #ffffff;")
-        self.setAutoFillBackground(True)
-        self.hide()
+        self._editor = editor
+        #: 0-based block numbers the live schema check currently flags -- see
+        #: :meth:`set_error_lines`.
+        self.error_lines: set[int] = set()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def sizeHint(self) -> QSize:
-        return QSize(0, _ERROR_BANNER_HEIGHT)
+        return QSize(_MINIMAP_WIDTH, 0)
+
+    def set_error_lines(self, lines: set[int]) -> None:
+        """Repaints only if ``lines`` (0-based block numbers) actually changed -- called on every
+        keystroke via :meth:`TextEditorWidget._update_schema_validation`, so a document with no
+        errors (the overwhelming common case) never triggers a paint over this alone."""
+        if lines != self.error_lines:
+            self.error_lines = lines
+            self.update()
+
+    def _line_height(self) -> float:
+        return max(self.height(), 1) / max(self._editor.document().blockCount(), 1)
+
+    def _visible_band(self) -> QRectF:
+        """The vertical slice of the minimap corresponding to what the main view currently shows,
+        derived from the vertical scrollbar's own range/page step rather than block geometry --
+        exact regardless of line-wrapping, unlike a computation based on block numbers alone."""
+        scrollbar = self._editor.verticalScrollBar()
+        extent = scrollbar.maximum() - scrollbar.minimum() + scrollbar.pageStep()
+        if extent <= 0:
+            return QRectF(0, 0, self.width(), self.height())
+        height = self.height()
+        top = height * ((scrollbar.value() - scrollbar.minimum()) / extent)
+        band_height = max(4.0, height * (scrollbar.pageStep() / extent))
+        return QRectF(0, top, self.width(), band_height)
+
+    def _scroll_to(self, y: int) -> None:
+        doc = self._editor.document()
+        last = max(0, doc.blockCount() - 1)
+        fraction = min(max(y / max(self.height(), 1), 0.0), 1.0)
+        block = doc.findBlockByNumber(round(fraction * last))
+        cursor = QTextCursor(block)
+        self._editor.setTextCursor(cursor)
+        self._editor.centerCursor()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._scroll_to(round(event.position().y()))
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._scroll_to(round(event.position().y()))
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        palette = self._editor.palette()
+        line_height = self._line_height()
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText))
+        bar_height = max(1.0, line_height * 0.7)
+        max_bar_width = max(1, self.width() - 4)
+        block = self._editor.document().firstBlock()
+        index = 0
+        while block.isValid():
+            length = len(block.text().strip())
+            if length:
+                y = index * line_height
+                painter.drawRect(QRectF(2, y, min(length, max_bar_width), bar_height))
+            block = block.next()
+            index += 1
+
+        if self.error_lines:
+            painter.setBrush(QColor(_ERROR_COLOR))
+            for line in self.error_lines:
+                painter.drawRect(QRectF(0, line * line_height, self.width(), max(2.0, line_height)))
+
+        band_color = palette.color(QPalette.ColorRole.Highlight)
+        band_color.setAlpha(70)
+        painter.setBrush(band_color)
+        painter.drawRect(self._visible_band())
+        painter.end()
 
 
 class TextEditorWidget(QPlainTextEdit):
@@ -154,12 +240,25 @@ class TextEditorWidget(QPlainTextEdit):
         self._highlighter: JsonSyntaxHighlighter | None = None
         self._fold_ranges: dict[int, int] = {}
         self._collapsed_folds: set[int] = set()
+        #: Every current schema error's own ``(start, end, message)`` character span -- what
+        #: :meth:`_error_message_at` hovers against to show the red-underline tooltip (PROMPT.md:
+        #: "it should be a window that appears when hovering on the red underlined text").
+        self._error_spans: list[tuple[int, int, str]] = []
 
         self._line_number_area = _LineNumberArea(self)
         self._breadcrumb = _BreadcrumbBar(self)
-        self._error_banner = _ErrorBanner(self)
+        self._minimap = _Minimap(self)
+        # Needed for mouseMoveEvent() (below) to fire on a plain hover, not just a button-down drag
+        # -- how the red-underline tooltip knows to hide again once the pointer leaves the span.
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
 
         self.blockCountChanged.connect(self._update_gutter_width)
+        # Plain lambdas rather than self._minimap.update directly -- QWidget.update() is overloaded
+        # (no-args, QRect, or four ints), and neither signal's own single `int` argument matches any
+        # of those, so passing the bound method straight to connect() would raise at emit time.
+        self.blockCountChanged.connect(lambda _count: self._minimap.update())
+        self.verticalScrollBar().valueChanged.connect(lambda _value: self._minimap.update())
         self.updateRequest.connect(self._update_gutter_on_scroll)
         self.textChanged.connect(self._on_text_changed)
         self.cursorPositionChanged.connect(self._update_breadcrumb)
@@ -187,6 +286,16 @@ class TextEditorWidget(QPlainTextEdit):
         # textChanged for yet.
         self._on_text_changed()
 
+    def refresh_project_title(self) -> None:
+        """Re-reads this tab's own ancestor project's title (see :func:`_find_project_title`) and
+        refreshes the breadcrumb to match -- called after a project rename (PROMPT.md: "when a
+        project name is changed [via rvt or via apply settings.json change] - the project title
+        should change in the tabs and in the breadcrumb"), since :attr:`_project_title` is otherwise
+        only ever (re-)cached by :meth:`set_path`, which a rename doesn't itself call."""
+        if self.path is not None:
+            self._project_title = _find_project_title(self.path)
+        self._update_breadcrumb()
+
     # -- gutter: line numbers + fold markers -------------------------------------------------------
 
     def line_number_area_width(self) -> int:
@@ -198,10 +307,10 @@ class TextEditorWidget(QPlainTextEdit):
         return _GUTTER_PADDING * 2 + numbers_width + _FOLD_MARKER_WIDTH
 
     def _update_gutter_width(self, _new_block_count: int = 0) -> None:
-        # setViewportMargins() reserves this widget's own left/top edges for the gutter/breadcrumb,
-        # shrinking the text viewport by exactly that much -- both child widgets are positioned to
-        # fill their reserved strip in resizeEvent() below.
-        self.setViewportMargins(self.line_number_area_width(), _BREADCRUMB_HEIGHT, 0, 0)
+        # setViewportMargins() reserves this widget's own left/top/right edges for the gutter/
+        # breadcrumb/minimap, shrinking the text viewport by exactly that much -- every reserved
+        # child is positioned to fill its own strip in resizeEvent() below.
+        self.setViewportMargins(self.line_number_area_width(), _BREADCRUMB_HEIGHT, _MINIMAP_WIDTH, 0)
 
     def _update_gutter_on_scroll(self, rect: QRect, dy: int) -> None:
         if dy:
@@ -223,18 +332,48 @@ class TextEditorWidget(QPlainTextEdit):
                 contents.height() - _BREADCRUMB_HEIGHT,
             )
         )
-        # Floats over the text rather than reserving its own viewport margin -- see _ErrorBanner's
-        # own docstring for why.
-        self._error_banner.setGeometry(
-            QRect(contents.left(), contents.top() + _BREADCRUMB_HEIGHT, contents.width(), _ERROR_BANNER_HEIGHT)
+        self._minimap.setGeometry(
+            QRect(
+                contents.right() - _MINIMAP_WIDTH + 1,
+                contents.top() + _BREADCRUMB_HEIGHT,
+                _MINIMAP_WIDTH,
+                contents.height() - _BREADCRUMB_HEIGHT,
+            )
         )
-        self._error_banner.raise_()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.matches(QKeySequence.StandardKey.Save):
             self.save_requested.emit()
             return
         super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # PROMPT.md: "where we have a ... red underlined text we are seeing the error message at
+        # the top of the text screen, it should be a window that appears when hovering on the red
+        # underlined text" -- QToolTip.showText() at the live cursor position, rather than the old
+        # always-on banner, so a valid file never loses any space to it and the message only shows
+        # up right where the problem actually is.
+        message = self._error_message_at(event.pos())
+        if message is not None:
+            QToolTip.showText(event.globalPosition().toPoint(), message, self)
+        else:
+            QToolTip.hideText()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 -- QEvent
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def _error_message_at(self, pos: QPoint) -> str | None:
+        """The schema-error message covering the character under ``pos`` (viewport coordinates),
+        if any -- what the red wavy underline's own hover tooltip shows."""
+        if not self._error_spans:
+            return None
+        char_pos = self.cursorForPosition(pos).position()
+        for start, end, message in self._error_spans:
+            if start <= char_pos < end:
+                return message
+        return None
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
@@ -378,22 +517,31 @@ class TextEditorWidget(QPlainTextEdit):
 
     def _update_schema_validation(self) -> None:
         """VS Code-style live feedback (PROMPT.md: "highlighting and error message if schema is
-        incorrect") -- a wavy red underline under every offending value plus a summary banner,
-        re-evaluated on every keystroke. Purely advisory: the actual reject-on-save enforcement is
-        :func:`~in_reach.ide.schema_check.validate_before_save`, called separately by
+        incorrect") -- a wavy red underline under every offending value, its own message shown in
+        a tooltip on hover (see :meth:`mouseMoveEvent`/:meth:`_error_message_at` -- PROMPT.md: "it
+        should be a window that appears when hovering on the red underlined text"), plus a red line
+        in the minimap for each offending line (PROMPT.md: "it should highlight errors as a line in
+        colour"). Re-evaluated on every keystroke. Purely advisory: the actual reject-on-save
+        enforcement is :func:`~in_reach.ide.schema_check.validate_before_save`, called separately by
         :meth:`~in_reach.ide.tabs.TabPane._save_tab`."""
         errors = schema_check.find_errors(self.path, self.toPlainText()) if self.path is not None else None
         if not errors:
             self.setExtraSelections([])
-            self._error_banner.hide()
+            self._error_spans = []
+            self._minimap.set_error_lines(set())
             return
 
+        doc = self.document()
         selections = []
+        spans: list[tuple[int, int, str]] = []
+        error_lines: set[int] = set()
         for error in errors:
             if error.span is None:
+                # A JSON-syntax error at end-of-file, say -- nothing to underline/hover, but it
+                # still blocks the save (validate_before_save doesn't need a span at all).
                 continue
             start, end = error.span
-            cursor = QTextCursor(self.document())
+            cursor = QTextCursor(doc)
             cursor.setPosition(start)
             cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             fmt = QTextCharFormat()
@@ -403,16 +551,11 @@ class TextEditorWidget(QPlainTextEdit):
             selection.cursor = cursor
             selection.format = fmt
             selections.append(selection)
+            spans.append((start, end, error.message))
+            error_lines.add(doc.findBlock(start).blockNumber())
         self.setExtraSelections(selections)
-
-        summary = errors[0].message
-        if len(errors) > 1:
-            summary += f" (+{len(errors) - 1} more)"
-        metrics = self._error_banner.fontMetrics()
-        self._error_banner.setText(metrics.elidedText(summary, Qt.TextElideMode.ElideRight, self.width() - 12))
-        self._error_banner.setToolTip(summary)
-        self._error_banner.show()
-        self._error_banner.raise_()
+        self._error_spans = spans
+        self._minimap.set_error_lines(error_lines)
 
     # -- breadcrumb ---------------------------------------------------------------------------------
 

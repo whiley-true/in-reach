@@ -366,18 +366,19 @@ def test_indent_guides_do_not_crash_on_an_empty_document(qtbot) -> None:
 # -- live schema validation (PROMPT.md: "highlighting and error message if schema is incorrect") -
 
 
-def test_a_valid_settings_json_shows_no_error_banner_or_underline(qtbot, tmp_path) -> None:
+def test_a_valid_settings_json_shows_no_error_underline(qtbot, tmp_path) -> None:
     path = tmp_path / "settings.json"
     editor = TextEditorWidget(path=path)
     qtbot.addWidget(editor)
 
     editor.setPlainText('{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}')
 
-    assert editor._error_banner.isHidden()
     assert editor.extraSelections() == []
+    assert editor._error_spans == []
+    assert editor._minimap.error_lines == set()
 
 
-def test_an_invalid_settings_json_shows_the_error_banner_and_underline(qtbot, tmp_path) -> None:
+def test_an_invalid_settings_json_shows_an_underline_and_hover_message(qtbot, tmp_path) -> None:
     path = tmp_path / "settings.json"
     editor = TextEditorWidget(path=path)
     qtbot.addWidget(editor)
@@ -385,41 +386,123 @@ def test_an_invalid_settings_json_shows_the_error_banner_and_underline(qtbot, tm
     text = '{"meta": {"category": "not_a_real_category", "source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}'
     editor.setPlainText(text)
 
-    assert not editor._error_banner.isHidden()
-    assert "not_a_real_category" in editor._error_banner.toolTip() or "known category" in editor._error_banner.toolTip()
     selections = editor.extraSelections()
     assert len(selections) == 1
     selected_text = selections[0].cursor.selectedText()
     assert selected_text == '"not_a_real_category"'
 
+    assert len(editor._error_spans) == 1
+    start, end, message = editor._error_spans[0]
+    assert text[start:end] == '"not_a_real_category"'
+    assert "not_a_real_category" in message or "known category" in message
+    # The line the offending value sits on (line 0 here) is flagged in the minimap too (PROMPT.md:
+    # "it should highlight errors as a line in colour").
+    assert editor._minimap.error_lines == {0}
 
-def test_fixing_the_error_clears_the_banner_and_underline(qtbot, tmp_path) -> None:
+
+def test_hovering_the_underlined_span_reports_its_error_message_elsewhere_reports_none(qtbot, tmp_path) -> None:
+    # PROMPT.md: "it should be a window that appears when hovering on the red underlined text" --
+    # exercises the lookup mouseMoveEvent()'s tooltip is driven from, without needing a real
+    # (hard to assert against in a headless test) QToolTip popup.
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.resize(400, 200)
+    editor.show()
+    QApplication.processEvents()
+    text = '{"meta": {"category": "not_a_real_category"}}'
+    editor.setPlainText(text)
+    start, end, message = editor._error_spans[0]
+
+    cursor = editor.textCursor()
+    cursor.setPosition((start + end) // 2)
+    inside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(inside_pos) == message
+
+    cursor.setPosition(0)
+    outside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(outside_pos) is None
+
+
+def test_fixing_the_error_clears_the_underline_and_minimap_flag(qtbot, tmp_path) -> None:
     path = tmp_path / "settings.json"
     editor = TextEditorWidget(path=path)
     qtbot.addWidget(editor)
     editor.setPlainText('{"meta": {"category": "not_a_real_category"}}')
-    assert not editor._error_banner.isHidden()
+    assert editor._error_spans != []
 
     editor.setPlainText('{"meta": {"source_file": "x.bin", "generated_at": "2026-01-01T00:00:00Z"}}')
 
-    assert editor._error_banner.isHidden()
     assert editor.extraSelections() == []
+    assert editor._error_spans == []
+    assert editor._minimap.error_lines == set()
 
 
-def test_a_non_schema_backed_file_never_shows_the_error_banner(qtbot) -> None:
+def test_a_non_schema_backed_file_never_shows_an_error(qtbot) -> None:
     path = Path("/project/edit/rvt/script.txt")
     editor = TextEditorWidget(path=path)
     qtbot.addWidget(editor)
 
     editor.setPlainText("this is not json at all, but this file has no schema anyway")
 
-    assert editor._error_banner.isHidden()
+    assert editor._error_spans == []
 
 
-def test_an_untitled_tab_with_no_path_never_shows_the_error_banner(qtbot) -> None:
+def test_an_untitled_tab_with_no_path_never_shows_an_error(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
 
     editor.setPlainText("{not even valid json")
 
-    assert editor._error_banner.isHidden()
+    assert editor._error_spans == []
+
+
+# -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----
+
+
+def test_editor_reserves_viewport_space_for_the_minimap(qtbot) -> None:
+    from in_reach.ide.editor import _MINIMAP_WIDTH
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    assert editor.viewportMargins().right() == _MINIMAP_WIDTH
+
+
+def test_resize_event_positions_the_minimap_along_the_right_edge(qtbot) -> None:
+    from in_reach.ide.editor import _MINIMAP_WIDTH
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.show()
+    editor.resize(400, 300)
+    QApplication.processEvents()
+
+    geometry = editor._minimap.geometry()
+    assert geometry.right() == editor.contentsRect().right()
+    assert geometry.width() == _MINIMAP_WIDTH
+    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
+
+
+def test_minimap_paints_without_raising_on_an_empty_document(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.show()
+    QApplication.processEvents()  # should not raise
+
+    assert not editor._minimap.grab().isNull()
+
+
+def test_minimap_scroll_to_moves_the_editors_cursor(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText("\n".join(f"line {i}" for i in range(500)))
+    editor.show()
+    QApplication.processEvents()
+    before = editor.textCursor().blockNumber()
+
+    editor._minimap._scroll_to(editor._minimap.height() - 1)  # click near the bottom
+
+    assert editor.textCursor().blockNumber() > before

@@ -81,6 +81,7 @@ class _FileMenuButton(QToolButton):
         menu = QMenu(self)
         menu.addAction("New File", window.new_file)
         menu.addAction("New Window", window.open_new_window)
+        menu.addAction("Load Welcome Tab", window.open_welcome_tab)
         menu.addAction("Open File...", window.open_file)
         menu.addAction("Open Folder...", window.open_folder)
         self.open_recent_menu = menu.addMenu("Open Recent")
@@ -484,6 +485,11 @@ class MainWindow(QWidget):
     def new_file(self) -> None:
         self.main_panel.new_tab_in(self.main_panel.active_pane)
 
+    def open_welcome_tab(self) -> None:
+        """"Load Welcome Tab" (PROMPT.md) -- brings the Welcome tab back into the active pane,
+        e.g. after it's been closed."""
+        self.main_panel.open_welcome_tab_in(self.main_panel.active_pane)
+
     def open_new_window(self) -> None:
         """"New Window" -- another MainWindow on the same project, independent of this one."""
         window = MainWindow(root_dir=self.root_dir)
@@ -705,6 +711,30 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", f"Couldn't apply settings:\n{format_build_result(result)}")
             return
         self._refresh_apply_enabled(folder)
+        self._sync_project_title(folder)
+
+    def _sync_project_title(self, folder: Path) -> None:
+        """Re-reads ``folder``'s ``settings/settings.json`` own ``meta.title`` and, if it no longer
+        matches its README's title heading, brings the README -- and every reader of
+        :func:`~in_reach.app.new_project.read_project_title` (the Explorer's own project tab, and
+        any already-open editor's breadcrumb) -- back in sync (PROMPT.md: "when a project name is
+        changed [via rvt or via apply settings.json change] - the project title should change in
+        the tabs and in the breadcrumb").
+
+        Called after a successful Apply (a hand-edited ``settings.json``) and after a resync from a
+        changed ``.bin`` (an RVT-driven rename, now left free to flow through -- see
+        :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring). A no-op if
+        ``settings.json`` has no title to read yet, or it already matches.
+        """
+        from in_reach.app.rvt import settings_io
+
+        settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
+        title, _description = settings_io.load_meta_title_description(settings_path)
+        if not title or title == new_project.read_project_title(folder):
+            return
+        new_project.set_project_title(folder, title)
+        self.explorer_panel.refresh_project_title(folder)
+        self.main_panel.refresh_project_titles()
 
     def _rewatch_project_bin(self, _folder: Path | None) -> None:
         """Re-points :attr:`_bin_watcher` at the newly-active project's own source ``.bin``
@@ -728,6 +758,13 @@ class MainWindow(QWidget):
         swallowed rather than popping an error over a background sync the user didn't explicitly
         ask for.
 
+        Title/description are deliberately *not* carried forward from the old ``settings.json``
+        here (unlike category, which isn't a ``.bin`` concept at all) -- PROMPT.md: "when a project
+        name is changed via rvt ... the project title should change in the tabs and in the
+        breadcrumb". Leaving them out of the call lets resync_from_bin's own freshly-extracted
+        values win, and :meth:`_sync_project_title` (below) is what actually notices a rename and
+        propagates it to the README/Explorer tab/breadcrumb.
+
         Args:
             path: The changed file's path, as ``QFileSystemWatcher.fileChanged`` reports it.
         """
@@ -740,7 +777,6 @@ class MainWindow(QWidget):
 
             settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
             category, category_icon = settings_io.load_meta_category(settings_path)
-            title, description = settings_io.load_meta_title_description(settings_path)
             map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
             try:
                 resync_from_bin(
@@ -749,11 +785,11 @@ class MainWindow(QWidget):
                     category=category,
                     category_icon=category_icon,
                     map_entries=map_entries,
-                    title=title,
-                    description=description,
                 )
             except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
                 pass
+            else:
+                self._sync_project_title(folder)
         # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
         # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so
         # the *next* save still gets caught.

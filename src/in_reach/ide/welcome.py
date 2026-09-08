@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 
 import in_reach
 from in_reach.app import env_file, new_project, project, recent, system_verify
-from in_reach.ide import icons
+from in_reach.ide import icons, style
 from in_reach.ide.new_project_dialog import NewProjectDialog
 from in_reach.ide.settings_info_dialog import SettingsInfoDialog
 from in_reach.ide.verify_dialog import VerifyDialog
@@ -120,13 +120,18 @@ class WelcomeTab(QWidget):
         scroll.setWidget(content)
 
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(24)
+        # PROMPT.md: "add more of a border around the edge - so that there is less central space
+        # wasted between components" -- each quadrant below now draws its own bordered card (see
+        # _build_quadrant()), so the outer margin/inter-quadrant gaps only need to be wide enough to
+        # read as "separate cards", not wide enough to carry all the separation on their own the way
+        # a border-less page needs.
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
         layout.addLayout(self._build_header())
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(48)
-        grid.setVerticalSpacing(28)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
         grid.addWidget(self._build_start_quadrant(), 0, 0)
         grid.addWidget(self._build_verify_quadrant(), 0, 1)
         grid.addWidget(self._build_recent_quadrant(), 1, 0)
@@ -170,9 +175,14 @@ class WelcomeTab(QWidget):
         return header
 
     def _build_quadrant(self, heading: str) -> tuple[QWidget, QVBoxLayout]:
+        # Bordered like every other top-level panel card in the IDE (see style.PANEL_BORDER_STYLE)
+        # -- PROMPT.md's "more of a border around the edge" -- so each quadrant reads as its own
+        # contained box rather than four floating text blocks separated by pure whitespace.
         frame = QFrame()
+        frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        frame.setStyleSheet(style.PANEL_BORDER_STYLE)
         outer = QVBoxLayout(frame)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(8)
 
         label = QLabel(heading)

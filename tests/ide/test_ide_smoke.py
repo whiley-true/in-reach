@@ -74,6 +74,24 @@ def test_apply_theme_sets_an_opaque_tooltip_stylesheet(qtbot) -> None:
     assert "background-color" in app.styleSheet()
 
 
+def test_apply_theme_sets_a_menu_stylesheet_that_only_changes_background_on_selection(qtbot) -> None:
+    # PROMPT.md: "for the drop down menu options, instead of changing highlighted text colour,
+    # please apply background" -- QMenu::item:selected should pin color to the same
+    # palette(window-text) every other state uses, so only the background changes.
+    app = QApplication.instance()
+
+    theme.apply_theme(app, "Dark")
+
+    sheet = app.styleSheet()
+    assert "QMenu::item:selected" in sheet
+    assert "background-color: palette(highlight)" in sheet
+    import re
+
+    selected_rule = re.search(r"QMenu::item:selected\s*\{([^}]*)\}", sheet)
+    assert selected_rule is not None
+    assert "color: palette(window-text)" in selected_rule.group(1)
+
+
 def test_build_palette_applies_disabled_text_to_disabled_roles() -> None:
     loaded = theme.load_theme("Dark")
     palette = loaded.build_palette()
@@ -612,6 +630,32 @@ def test_clicking_apply_runs_the_real_compile_and_disables_the_button_on_success
     assert project_window.activity_bar.apply_button.isEnabled() is False
 
 
+def test_clicking_apply_syncs_a_hand_edited_title_to_the_readme_and_explorer_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "when a project name is changed [via rvt or] via apply settings.json change - the
+    # project title should change in the tabs and in the breadcrumb".
+    from in_reach.app import apply_settings
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "README.md").write_text("# Old Title\n\nDescription.\n", encoding="utf-8")
+    (folder / "settings" / "settings.json").write_text(
+        '{"meta": {"title": "Hand-Edited Title"}}', encoding="utf-8"
+    )
+    project_window._on_project_opened(folder)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", lambda project_dir, target_folder: BuildResult(success=True))
+
+    project_window.apply_settings_changes()
+
+    from in_reach.app import new_project
+
+    assert new_project.read_project_title(folder) == "Hand-Edited Title"
+    tab_index = project_window.explorer_panel.project_tabs.currentIndex()
+    assert project_window.explorer_panel.project_tabs.tabText(tab_index) == "Hand-Edited Title"
+
+
 def test_clicking_apply_shows_an_error_dialog_and_leaves_the_button_alone_on_failure(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -851,13 +895,16 @@ def test_the_watched_bin_changing_resyncs_the_build_snapshot(
     assert calls[0][1] == folder
 
 
-def test_the_watched_bin_changing_carries_title_and_description_through(
+def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # PROMPT.md: "when setting a title and description, this is not being set in settings.json" --
-    # a resync must carry this project's own title/description forward too, same as category, or
-    # they'd silently reset to the .bin's own header values on every RVT save.
+    # PROMPT.md: "when a project name is changed via rvt ... the project title should change in
+    # the tabs and in the breadcrumb" -- a resync must let a rename typed into RVT's own header
+    # flow through, so unlike category (never a .bin concept at all, so it's still read back from
+    # the existing settings.json and carried forward), title/description are deliberately left
+    # unset here rather than pinned to whatever settings.json said before this save.
     from in_reach.app import new_project, project
+    from in_reach.app.categories import EngineCategory, EngineIcon
 
     window.root_dir = tmp_path
     project_dir = project.get_project_dir(tmp_path)
@@ -867,7 +914,9 @@ def test_the_watched_bin_changing_carries_title_and_description_through(
     settings_dir = folder / new_project.SETTINGS_DIRNAME
     settings_dir.mkdir(parents=True)
     (settings_dir / "settings.json").write_text(
-        '{"meta": {"title": "Kept Title", "description": "Kept description"}}', encoding="utf-8"
+        '{"meta": {"title": "Old Title", "description": "Old description",'
+        ' "category": "juggernaut", "category_icon": "juggernaut"}}',
+        encoding="utf-8",
     )
     bin_path = new_project.source_variant_path(project_dir, folder)
     bin_path.parent.mkdir(parents=True)
@@ -883,8 +932,42 @@ def test_the_watched_bin_changing_carries_title_and_description_through(
     window._on_watched_bin_changed(str(bin_path))
 
     assert len(calls) == 1
-    assert calls[0][2]["title"] == "Kept Title"
-    assert calls[0][2]["description"] == "Kept description"
+    assert calls[0][2]["category"] == EngineCategory.juggernaut
+    assert calls[0][2]["category_icon"] == EngineIcon.juggernaut
+    assert "title" not in calls[0][2]
+    assert "description" not in calls[0][2]
+
+
+def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_readme_and_explorer_tab(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    (folder / "README.md").write_text("# Old Title\n\nDescription.\n", encoding="utf-8")
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    bin_path = new_project.source_variant_path(project_dir, folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+
+    def _fake_resync(bin_path, folder, **k):
+        (settings_dir / "settings.json").write_text(
+            '{"meta": {"title": "RVT Renamed"}}', encoding="utf-8"
+        )
+
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", _fake_resync)
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert new_project.read_project_title(folder) == "RVT Renamed"
+    tab_index = window.explorer_panel.project_tabs.currentIndex()
+    assert window.explorer_panel.project_tabs.tabText(tab_index) == "RVT Renamed"
 
 
 def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
@@ -1299,6 +1382,7 @@ def test_file_menu_has_every_action_prompt_md_asks_for(project_window: MainWindo
     assert labels == [
         "New File",
         "New Window",
+        "Load Welcome Tab",
         "Open File...",
         "Open Folder...",
         "Open Recent",
@@ -1317,6 +1401,29 @@ def test_new_file_adds_a_tab_to_the_active_pane(project_window: MainWindow) -> N
     project_window.new_file()
 
     assert pane.count() == before + 1
+
+
+def test_open_welcome_tab_switches_to_the_existing_one(project_window: MainWindow) -> None:
+    pane = project_window.main_panel.active_pane
+    before = pane.count()  # the panel opens on a Welcome tab already
+    project_window.main_panel.new_tab_in(pane)  # switch away from it first
+    assert not isinstance(pane.widget(pane.currentIndex()), WelcomeTab)
+
+    project_window.open_welcome_tab()
+
+    assert pane.count() == before + 1  # switched to the existing Welcome tab, not a new one
+    assert isinstance(pane.widget(pane.currentIndex()), WelcomeTab)
+
+
+def test_open_welcome_tab_reopens_one_after_it_was_closed(project_window: MainWindow) -> None:
+    pane = project_window.main_panel.active_pane
+    pane._close_tab(0)  # closes the initial Welcome tab
+    before = pane.count()
+
+    project_window.open_welcome_tab()
+
+    assert pane.count() == before + 1
+    assert isinstance(pane.widget(pane.currentIndex()), WelcomeTab)
 
 
 def test_open_new_window_creates_and_tracks_another_mainwindow(
