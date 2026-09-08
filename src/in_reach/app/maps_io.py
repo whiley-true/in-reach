@@ -7,6 +7,13 @@ Ported, in reduced form, from the v2 prototype's ``app/maps_io.py``: that module
 repo's ``edit/rvt`` starts empty, see :mod:`in_reach.app.new_project`), so :func:`write_maps_json`
 only ever writes the unfiltered scan to both files for now. Re-filtering ``maps.json`` down once a
 real ``script_settings.json`` exists is future work, ported the same deliberate way this was.
+
+PROMPT.md: ``maps.json`` used to duplicate at ``<project_folder>/maps.json`` -- one identical copy
+per gametype project, even though the scan itself only depends on the personal/standard/hopper map
+folders (shared, project-independent state), not on the gametype that triggered it. It now writes
+once, centrally, to ``<in_reach_dir>/maps.json`` (the ``.in-reach`` folder every project shares)
+instead. ``<project_folder>/maps/master.json`` is unaffected -- still a per-project snapshot, kept
+as the future filtering base :func:`write_maps_json`'s own docstring already described.
 """
 
 from __future__ import annotations
@@ -27,8 +34,8 @@ MASTER_MAPS_FILE_COMMENT = (
     "folders, regenerated wholesale whenever a project is scanned -- do not hand-edit."
 )
 MAPS_FILE_COMMENT = (
-    "This project's maps/master.json -- unfiltered for now (no script_settings.json yet to "
-    "filter against). Do not hand-edit."
+    "Every Forge map variant in-reach found, shared across every project (PROMPT.md) -- "
+    "unfiltered for now (no script_settings.json yet to filter against). Do not hand-edit."
 )
 
 SOURCE_PERSONAL = "personal"
@@ -123,14 +130,17 @@ def _write_entries_json(entries: list[MapEntry], out_path: Path, comment: str) -
     return out_path
 
 
-def write_maps_json(entries: list[MapEntry], project_folder: Path) -> tuple[Path, Path]:
-    """Writes ``entries`` to both ``<project_folder>/maps/master.json`` (the unfiltered scan) and
-    ``<project_folder>/maps.json`` (identical for now -- see this module's own docstring).
+def write_maps_json(entries: list[MapEntry], project_folder: Path, in_reach_dir: Path) -> tuple[Path, Path]:
+    """Writes ``entries`` to ``<project_folder>/maps/master.json`` (this project's own unfiltered
+    snapshot) and ``<in_reach_dir>/maps.json`` (identical content for now -- see this module's own
+    docstring -- but written once, shared by every project, not duplicated per one).
 
     Args:
         entries: Scanned entries, as returned by :func:`scan_maps`.
-        project_folder: The gametype project's own folder (the uuid-named folder, not
+        project_folder: The gametype project's own folder (the generated-id folder, not
             ``.in-reach``).
+        in_reach_dir: The project's ``.in-reach`` folder (PROMPT.md: "the maps.json master file"
+            belongs here, not inside ``project_folder``).
 
     Returns:
         ``(master_path, maps_path)``.
@@ -138,5 +148,5 @@ def write_maps_json(entries: list[MapEntry], project_folder: Path) -> tuple[Path
     master_path = _write_entries_json(
         entries, project_folder / MAPS_DIRNAME / MAPS_MASTER_FILENAME, MASTER_MAPS_FILE_COMMENT
     )
-    maps_path = _write_entries_json(entries, project_folder / MAPS_FILENAME, MAPS_FILE_COMMENT)
+    maps_path = _write_entries_json(entries, in_reach_dir / MAPS_FILENAME, MAPS_FILE_COMMENT)
     return master_path, maps_path

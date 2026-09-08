@@ -76,18 +76,18 @@ def test_scan_maps_reads_real_forge_labels_when_present(tmp_path: Path) -> None:
     assert entries[0].forge_labels == ["team_only", "ctf_flag"]
 
 
-def test_write_maps_json_writes_both_master_and_maps_json_identically(tmp_path: Path) -> None:
-    entries = maps_io.scan_maps()  # empty is fine -- just exercising the writer
+def test_write_maps_json_writes_master_in_the_project_and_maps_json_in_in_reach(tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
-    (folder / "extra.mvar")  # not a real map -- irrelevant, scan_maps() above didn't touch disk
+    in_reach_dir = tmp_path / ".in-reach"
+    in_reach_dir.mkdir()
 
     master_path, maps_path = maps_io.write_maps_json(
-        [maps_io.MapEntry("x.mvar", maps_io.SOURCE_PERSONAL, "X", "", 0, None)], folder
+        [maps_io.MapEntry("x.mvar", maps_io.SOURCE_PERSONAL, "X", "", 0, None)], folder, in_reach_dir
     )
 
     assert master_path == folder / "maps" / "master.json"
-    assert maps_path == folder / "maps.json"
+    assert maps_path == in_reach_dir / "maps.json"
     master_doc = json.loads(master_path.read_text(encoding="utf-8"))
     maps_doc = json.loads(maps_path.read_text(encoding="utf-8"))
     assert master_doc["maps"] == maps_doc["maps"]
@@ -97,7 +97,30 @@ def test_write_maps_json_writes_both_master_and_maps_json_identically(tmp_path: 
 def test_write_maps_json_with_no_entries_writes_an_empty_list(tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
+    in_reach_dir = tmp_path / ".in-reach"
+    in_reach_dir.mkdir()
 
-    _master, maps_path = maps_io.write_maps_json([], folder)
+    _master, maps_path = maps_io.write_maps_json([], folder, in_reach_dir)
 
     assert json.loads(maps_path.read_text(encoding="utf-8"))["maps"] == []
+
+
+def test_write_maps_json_a_second_call_overwrites_the_shared_in_reach_copy(tmp_path: Path) -> None:
+    # PROMPT.md: maps.json is shared across every project now, not duplicated per one -- a second
+    # project's own scan should overwrite the one file, not create a second copy.
+    first_folder = tmp_path / "first"
+    first_folder.mkdir()
+    second_folder = tmp_path / "second"
+    second_folder.mkdir()
+    in_reach_dir = tmp_path / ".in-reach"
+    in_reach_dir.mkdir()
+
+    maps_io.write_maps_json(
+        [maps_io.MapEntry("a.mvar", maps_io.SOURCE_PERSONAL, "A", "", 0, None)], first_folder, in_reach_dir
+    )
+    _master, maps_path = maps_io.write_maps_json(
+        [maps_io.MapEntry("b.mvar", maps_io.SOURCE_PERSONAL, "B", "", 0, None)], second_folder, in_reach_dir
+    )
+
+    maps_doc = json.loads(maps_path.read_text(encoding="utf-8"))
+    assert [entry["title"] for entry in maps_doc["maps"]] == ["B"]

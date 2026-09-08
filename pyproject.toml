@@ -35,4 +35,5 @@ in_reach = [
     "ide/assets/*.png",
     "app/rvt_tool/bin/**/*",
     "app/rvt/native/**/*",
+    "app/blank_variants/*.bin",
 ]

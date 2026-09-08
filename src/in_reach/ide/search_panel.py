@@ -14,7 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -35,6 +37,11 @@ class SearchPanel(QWidget):
     #: Emitted with a match's path and 1-based line number when a result is activated
     #: (double-clicked, or Enter).
     file_activated = pyqtSignal(Path, int)
+
+    #: "same for search relaces texts [make 10% smaller]" -- relative to the app's own current
+    #: zoom-scaled font, same mechanism as :attr:`~in_reach.ide.explorer.ExplorerPanel.TEXT_SCALE`
+    #: (see :meth:`refresh_font_scale`), just shrinking instead of growing.
+    TEXT_SCALE = 0.9
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -71,6 +78,19 @@ class SearchPanel(QWidget):
         layout.addWidget(self.results_list, 1)
 
         self._sync_enabled()
+        self.refresh_font_scale()
+
+    def refresh_font_scale(self) -> None:
+        """(Re-)applies :data:`TEXT_SCALE` on top of the app's current font -- same mechanism (and
+        same caveat: a one-time snapshot, not a live binding) as
+        :meth:`in_reach.ide.explorer.ExplorerPanel.refresh_font_scale`; call again after a zoom
+        change."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        font = QFont(app.font())
+        font.setPointSizeF(font.pointSizeF() * self.TEXT_SCALE)
+        self.setFont(font)
 
     # -- project wiring ---------------------------------------------------------------------------
 

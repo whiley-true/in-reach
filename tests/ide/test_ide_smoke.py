@@ -11,7 +11,7 @@ from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.first_run_dialog import FirstRunDialog
-from in_reach.ide.main_window import _ICON_SIZE, MainWindow
+from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_MIN_WIDTH, MainWindow
 from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 from in_reach.ide.welcome import WelcomeTab
 
@@ -109,6 +109,40 @@ def test_refresh_icon_colors_shows_restore_icon_when_maximized(window: MainWindo
     assert _maximize_icon_image(window) == _expected_icon_image("win_restore", window)
 
 
+def test_adjust_zoom_refreshes_explorer_and_search_panel_fonts(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard: the Explorer/Search panels' own text scale is a one-time snapshot of
+    # app.font() (see each panel's refresh_font_scale() docstring), not a live binding -- a zoom
+    # change has to explicitly re-apply it on both, or their text silently stops tracking zoom.
+    from in_reach.app import project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir(parents=True)
+    (project_dir / ".env").write_text("", encoding="utf-8")
+
+    calls: list[str] = []
+    monkeypatch.setattr(window.explorer_panel, "refresh_font_scale", lambda: calls.append("explorer"))
+    monkeypatch.setattr(window.search_panel, "refresh_font_scale", lambda: calls.append("search"))
+
+    window._adjust_zoom(0)
+
+    assert calls == ["explorer", "search"]
+
+
+def test_sidebar_default_width_fits_the_personal_variant_headers_without_eliding(
+    window: MainWindow,
+) -> None:
+    # Regression guard (PROMPT.md): the sidebar's default/minimum width used to be narrow enough
+    # that "Personal Game Variants"/"Personal Map Variants" middle-elided to "Personal G..e
+    # Variants". sizeHint() is exactly the width QToolButton itself says it needs to show the
+    # whole label unelided, so the sidebar must never be narrower than that.
+    assert window.primary_sidebar.width() == _SIDEBAR_MIN_WIDTH
+    for section in (window.explorer_panel.personal_variants_section, window.explorer_panel.personal_maps_section):
+        assert section._toggle.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+
+
 def test_toggle_maximize_restores_to_half_screen_centered(window: MainWindow) -> None:
     window.showMaximized()
     QApplication.processEvents()
@@ -148,49 +182,56 @@ def test_main_window_opens_on_the_welcome_tab(window: MainWindow) -> None:
 
 
 def test_opening_a_project_from_the_welcome_tab_updates_the_explorer_panel(
-    window: MainWindow, tmp_path: Path
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # project_window, not window -- opening a project now persists the open-tabs list to .env
+    # (see explorer.py's open_project()), which needs a real, isolated .in-reach to write into
+    # rather than the shared window fixture's Path.cwd() root (see project_window's own docstring).
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+
+    welcome = project_window.main_panel.panes[0].widget(0)
+    welcome.project_opened.emit(folder)
+
+    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+
+
+def test_opening_a_project_also_points_the_search_panel_at_it(
+    project_window: MainWindow, tmp_path: Path
 ) -> None:
     folder = tmp_path / "some-project"
     folder.mkdir()
 
-    welcome = window.main_panel.panes[0].widget(0)
+    welcome = project_window.main_panel.panes[0].widget(0)
     welcome.project_opened.emit(folder)
 
-    assert Path(window.explorer_panel._project_model.rootPath()) == folder
+    assert project_window.search_panel._project_folder == folder
+    assert project_window.search_panel.search_edit.isEnabled() is True
 
 
-def test_opening_a_project_also_points_the_search_panel_at_it(window: MainWindow, tmp_path: Path) -> None:
+def test_close_project_also_clears_the_search_panel(project_window: MainWindow, tmp_path: Path) -> None:
     folder = tmp_path / "some-project"
     folder.mkdir()
+    project_window._on_project_opened(folder)
 
-    welcome = window.main_panel.panes[0].widget(0)
-    welcome.project_opened.emit(folder)
+    project_window.close_project()
 
-    assert window.search_panel._project_folder == folder
-    assert window.search_panel.search_edit.isEnabled() is True
-
-
-def test_close_project_also_clears_the_search_panel(window: MainWindow, tmp_path: Path) -> None:
-    folder = tmp_path / "some-project"
-    folder.mkdir()
-    window._on_project_opened(folder)
-
-    window.close_project()
-
-    assert window.search_panel._project_folder is None
-    assert window.search_panel.search_edit.isEnabled() is False
+    assert project_window.search_panel._project_folder is None
+    assert project_window.search_panel.search_edit.isEnabled() is False
 
 
-def test_activating_a_search_result_opens_the_file_at_that_line(window: MainWindow, tmp_path: Path) -> None:
+def test_activating_a_search_result_opens_the_file_at_that_line(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
     folder = tmp_path / "some-project"
     folder.mkdir()
     source = folder / "notes.txt"
     source.write_text("one\ntwo needle three\n", encoding="utf-8")
-    window._on_project_opened(folder)
-    pane = window.main_panel.active_pane
+    project_window._on_project_opened(folder)
+    pane = project_window.main_panel.active_pane
     before = pane.count()
 
-    window.search_panel.file_activated.emit(source, 2)
+    project_window.search_panel.file_activated.emit(source, 2)
 
     assert pane.count() == before + 1
     editor = pane.widget(pane.currentIndex())

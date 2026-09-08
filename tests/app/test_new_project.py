@@ -203,19 +203,44 @@ def test_create_gametype_project_scans_map_folders_into_maps_json(
         project_dir, "Slayer Plus", personal_maps_dir=maps_dir
     )
 
-    assert (folder / "maps.json").is_file()
+    # PROMPT.md: the shared/master scan lives once in .in-reach, not duplicated per project.
+    assert (project_dir / "maps.json").is_file()
+    assert not (folder / "maps.json").exists()
     assert (folder / "maps" / "master.json").is_file()
-    document = (folder / "maps.json").read_text(encoding="utf-8")
+    document = (project_dir / "maps.json").read_text(encoding="utf-8")
     assert "My Forge Map" in document
 
 
 def test_create_gametype_project_with_no_map_folders_still_writes_an_empty_maps_json(
     project_dir: Path,
 ) -> None:
-    folder, _warning = new_project.create_gametype_project(project_dir, "Blank")
+    new_project.create_gametype_project(project_dir, "Blank")
 
-    document = (folder / "maps.json").read_text(encoding="utf-8")
+    document = (project_dir / "maps.json").read_text(encoding="utf-8")
     assert '"maps": []' in document
+
+
+def test_two_projects_created_in_a_row_share_the_same_maps_json(
+    project_dir: Path, tmp_path: Path
+) -> None:
+    from mvar_fixtures import build_chdr_bytes
+
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    (maps_dir / "Forge.mvar").write_bytes(build_chdr_bytes(title="My Forge Map", map_id=3006))
+
+    first, _warning = new_project.create_gametype_project(project_dir, "One")
+    second, _warning = new_project.create_gametype_project(
+        project_dir, "Two", personal_maps_dir=maps_dir
+    )
+
+    # The first project's own creation predates the maps folder existing at all -- confirms the
+    # second project's scan overwrote the one shared file rather than each project getting (or
+    # needing) its own.
+    document = (project_dir / "maps.json").read_text(encoding="utf-8")
+    assert "My Forge Map" in document
+    assert not (first / "maps.json").exists()
+    assert not (second / "maps.json").exists()
 
 
 # -- read_project_title -----------------------------------------------------------------------

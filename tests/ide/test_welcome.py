@@ -4,6 +4,7 @@ import pytest
 from PyQt6.QtWidgets import QDialog
 
 from in_reach.app import env_file, new_project, recent, system_verify
+from in_reach.app.categories import EngineCategory
 from in_reach.app.system_verify import Outcome, VerifyRun
 from in_reach.ide.new_project_dialog import NewProjectDialog
 from in_reach.ide.settings_info_dialog import SettingsInfoDialog
@@ -165,6 +166,37 @@ def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
     assert (folder / "edit" / "settings").is_dir()
     assert new_project.read_project_title(folder) == "Slayer Plus"
     assert recent.list_recent(welcome.project_dir) == [folder]
+
+    # PROMPT.md: RVT wasn't running for blank gametypes (there was no .bin at all to point it at)
+    # -- a blank project now starts from in-reach's own bundled blank multiplayer template, so
+    # there's always something for RVT to open and something that got decompiled into edit/.
+    bin_path = new_project.source_variant_path(welcome.project_dir, folder)
+    assert bin_path.is_file()
+    assert (folder / "edit" / "rvt" / "script.txt").is_file()
+
+
+def test_new_blank_firefight_project_starts_from_the_firefight_template_with_no_category(
+    welcome: WelcomeTab, root_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import blank_variant
+
+    def accept(dialog: NewProjectDialog) -> int:
+        dialog.title_edit.setText("Wave Defense")
+        dialog.firefight_radio.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(NewProjectDialog, "exec", accept)
+    opened: list[Path] = []
+    welcome.project_opened.connect(opened.append)
+
+    welcome.new_blank_button.click()
+
+    assert len(opened) == 1
+    folder = opened[0]
+    bin_path = new_project.source_variant_path(welcome.project_dir, folder)
+    assert bin_path.read_bytes() == blank_variant.resolve_blank_variant(firefight=True).read_bytes()
+    document = (folder / "user_settings.json").read_text(encoding="utf-8")
+    assert '"category": "none"' in document
 
 
 def test_a_cancelled_new_project_dialog_creates_nothing(
@@ -375,6 +407,42 @@ def test_new_project_dialog_returns_the_chosen_variant(qtbot, tmp_path: Path) ->
     qtbot.addWidget(dialog)
 
     assert dialog.selected_variant() == tmp_path / "Slayer.bin"
+
+
+def test_new_project_dialog_asks_game_type_only_for_a_blank_project(qtbot) -> None:
+    dialog = NewProjectDialog(ask_game_type=True)
+    qtbot.addWidget(dialog)
+
+    assert dialog.multiplayer_radio.isChecked() is True
+    assert dialog.is_firefight() is False
+    assert dialog.category_combo.isVisibleTo(dialog) is True
+
+    dialog.firefight_radio.setChecked(True)
+
+    assert dialog.is_firefight() is True
+    assert dialog.category_combo.isVisibleTo(dialog) is False
+    assert dialog.category() == EngineCategory.none
+
+
+def test_new_project_dialog_without_ask_game_type_has_no_game_type_picker(qtbot) -> None:
+    dialog = NewProjectDialog()
+    qtbot.addWidget(dialog)
+
+    assert dialog.is_firefight() is False
+    assert not hasattr(dialog, "multiplayer_radio")
+
+
+def test_new_project_dialog_resolves_a_blank_variant_for_multiplayer_by_default(qtbot) -> None:
+    from in_reach.app import blank_variant
+
+    dialog = NewProjectDialog(ask_game_type=True)
+    qtbot.addWidget(dialog)
+
+    assert dialog.selected_variant() == blank_variant.resolve_blank_variant(firefight=False)
+
+    dialog.firefight_radio.setChecked(True)
+
+    assert dialog.selected_variant() == blank_variant.resolve_blank_variant(firefight=True)
 
 
 def test_description_field_caps_at_137_characters_and_takes_any_text(qtbot) -> None:

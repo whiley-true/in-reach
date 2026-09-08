@@ -70,10 +70,11 @@ project currently has.
   This is the half worth keeping under version control.
 - `{build}/` -- everything generated from `{edit}/`, including the compiled `.bin` under
   `{build}/{dist}/`. Disposable: it can always be rebuilt, and is gitignored on that basis.
-- `{maps}/{master}` -- every Forge map variant found across the personal/standard/hopper map
-  folders; `{maps_json}` narrows that to the ones this gametype can actually be played on.
+- `{maps}/{master}` -- this project's own snapshot of every Forge map variant found across the
+  personal/standard/hopper map folders, taken when it was created.
 
-The variant this project started from is parked in `.in-reach/{init}/`.
+The variant this project started from is parked in `.in-reach/{init}/`, alongside `.in-reach/{maps_json}`
+-- the same map-variant scan, shared by every project rather than duplicated per one.
 """
 
 
@@ -314,7 +315,7 @@ def create_gametype_project(
     entries = maps_io.scan_maps(
         personal_dir=personal_maps_dir, standard_dir=standard_maps_dir, hopper_dir=hopper_maps_dir
     )
-    maps_io.write_maps_json(entries, folder)
+    maps_io.write_maps_json(entries, folder, project_dir)
 
     env_file.update_env_value(project_dir / _ENV_NAME, PROJECT_DIR_KEY, str(folder))
     return folder, warning

@@ -149,3 +149,32 @@ def test_ask_confirm_replace_passes_the_match_count_into_the_message(
 
     assert len(seen) == 1
     assert "2 occurrences" in seen[0]
+
+
+# -- text scale -------------------------------------------------------------------------------
+
+
+def test_panel_font_is_10_percent_smaller_than_the_app_font(panel: SearchPanel) -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    app_size = QApplication.instance().font().pointSizeF()
+
+    assert panel.font().pointSizeF() == pytest.approx(app_size * SearchPanel.TEXT_SCALE)
+
+
+def test_refresh_font_scale_tracks_a_later_app_font_change(panel: SearchPanel) -> None:
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 2)
+        app.setFont(bigger)
+
+        panel.refresh_font_scale()
+
+        assert panel.font().pointSizeF() == pytest.approx(bigger.pointSizeF() * SearchPanel.TEXT_SCALE)
+    finally:
+        app.setFont(original)

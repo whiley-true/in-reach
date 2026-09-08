@@ -1,6 +1,9 @@
+from pathlib import Path
+
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
 
 
 def _has_opaque_pixel(image) -> bool:
@@ -68,7 +71,10 @@ def test_resize_event_repositions_the_gutter_to_fill_the_left_edge(qtbot) -> Non
     geometry = editor._line_number_area.geometry()
     assert geometry.left() == editor.contentsRect().left()
     assert geometry.width() == editor.line_number_area_width()
-    assert geometry.height() == editor.contentsRect().height()
+    # The gutter sits below the breadcrumb bar (see test_breadcrumb.py), not the full contents
+    # height -- the breadcrumb bar itself owns that top strip.
+    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
+    assert geometry.height() == editor.contentsRect().height() - editor._breadcrumb.height()
 
 
 def test_scrolling_updates_the_gutter_without_raising(qtbot) -> None:
@@ -86,3 +92,190 @@ def test_scrolling_updates_the_gutter_without_raising(qtbot) -> None:
     # No crash, and the gutter still reflects the (3-digit) line count -- unchanged by scrolling.
     assert editor.line_number_area_width() == width_before_scroll
     assert editor._line_number_area.isVisible()
+
+
+# -- breadcrumb -----------------------------------------------------------------------------------
+
+
+def test_breadcrumb_is_empty_with_no_path(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    assert editor._breadcrumb.text() == ""
+
+
+def test_breadcrumb_shows_the_folder_and_file_name(qtbot) -> None:
+    path = Path("/project/edit/rvt/script.txt")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    assert editor._breadcrumb.text() == "rvt > script.txt"
+
+
+def test_breadcrumb_appends_the_live_json_path_for_a_json_file(qtbot) -> None:
+    path = Path("/project/edit/settings/settings.json")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "meta": {\n    "title": "Slayer"\n  }\n}')
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.toPlainText().index('"Slayer"'))
+    editor.setTextCursor(cursor)
+
+    assert editor._breadcrumb.text() == "settings > settings.json > meta"
+
+
+def test_breadcrumb_does_not_append_a_json_path_for_a_non_json_file(qtbot) -> None:
+    path = Path("/project/edit/rvt/script.txt")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "meta": 1\n}')  # incidentally JSON-shaped, but not a .json file
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.toPlainText().index("1"))
+    editor.setTextCursor(cursor)
+
+    assert editor._breadcrumb.text() == "rvt > script.txt"
+
+
+def test_set_path_refreshes_the_breadcrumb(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    assert editor._breadcrumb.text() == ""
+
+    editor.set_path(Path("/project/edit/settings/strings.json"))
+
+    assert editor._breadcrumb.text() == "settings > strings.json"
+
+
+# -- JSON syntax highlighting ------------------------------------------------------------------
+
+
+def test_a_json_path_attaches_a_highlighter(qtbot) -> None:
+    editor = TextEditorWidget(path=Path("/project/edit/settings/settings.json"))
+    qtbot.addWidget(editor)
+
+    assert isinstance(editor._highlighter, JsonSyntaxHighlighter)
+
+
+def test_a_non_json_path_does_not_attach_a_highlighter(qtbot) -> None:
+    editor = TextEditorWidget(path=Path("/project/edit/rvt/script.txt"))
+    qtbot.addWidget(editor)
+
+    assert editor._highlighter is None
+
+
+def test_no_path_does_not_attach_a_highlighter(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    assert editor._highlighter is None
+
+
+def test_set_path_attaches_and_detaches_the_highlighter(qtbot) -> None:
+    editor = TextEditorWidget(path=Path("/project/edit/settings/settings.json"))
+    qtbot.addWidget(editor)
+    assert editor._highlighter is not None
+
+    editor.set_path(Path("/project/edit/rvt/script.txt"))
+
+    assert editor._highlighter is None
+
+
+# -- code folding -----------------------------------------------------------------------------
+
+
+def test_setting_json_text_computes_fold_ranges(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    editor.setPlainText('{\n  "a": 1\n}')
+
+    assert editor._fold_ranges == {0: 2}
+
+
+def test_toggle_fold_hides_the_interior_blocks(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "a": 1\n}')
+
+    editor.toggle_fold(0)
+
+    doc = editor.document()
+    # Collapsing hides everything from the line after the opener through the closing bracket's
+    # own line inclusive -- same convention as VS Code's own folding (only the opening line stays
+    # visible, showing where the fold is).
+    assert doc.findBlockByNumber(0).isVisible() is True
+    assert doc.findBlockByNumber(1).isVisible() is False
+    assert doc.findBlockByNumber(2).isVisible() is False
+    assert 0 in editor._collapsed_folds
+
+
+def test_toggle_fold_again_re_expands_it(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "a": 1\n}')
+    editor.toggle_fold(0)
+
+    editor.toggle_fold(0)
+
+    doc = editor.document()
+    assert doc.findBlockByNumber(1).isVisible() is True
+    assert 0 not in editor._collapsed_folds
+
+
+def test_toggle_fold_on_a_non_foldable_line_is_a_no_op(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "a": 1\n}')
+
+    editor.toggle_fold(1)  # not a fold-start line
+
+    assert editor._collapsed_folds == set()
+
+
+def test_editing_away_a_collapsed_folds_brackets_drops_its_collapsed_state(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "a": 1\n}')
+    editor.toggle_fold(0)
+    assert 0 in editor._collapsed_folds
+
+    editor.setPlainText("no brackets here at all")
+
+    assert editor._collapsed_folds == set()
+    assert editor._fold_ranges == {}
+
+
+def test_clicking_the_gutter_on_a_foldable_line_toggles_it(qtbot) -> None:
+    from PyQt6.QtCore import QPoint
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText('{\n  "a": 1\n}')
+    editor.show()
+    QApplication.processEvents()
+
+    block = editor.document().findBlockByNumber(0)
+    top = round(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
+    editor.toggle_fold_at(QPoint(2, top + 2))
+
+    assert 0 in editor._collapsed_folds
+
+
+def test_clicking_the_gutter_on_a_non_foldable_line_does_nothing(qtbot) -> None:
+    from PyQt6.QtCore import QPoint
+
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.resize(300, 200)
+    editor.setPlainText('{\n  "a": 1\n}')
+    editor.show()
+    QApplication.processEvents()
+
+    block = editor.document().findBlockByNumber(1)
+    top = round(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
+    editor.toggle_fold_at(QPoint(2, top + 2))
+
+    assert editor._collapsed_folds == set()

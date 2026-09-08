@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import env_file, new_project, project, recent, rvt_launcher
+from in_reach.app import env_file, new_project, open_projects, project, recent, rvt_launcher
 from in_reach.ide import icons, style
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
@@ -42,7 +42,13 @@ _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
 _TOPBAR_MARK_SIZE = 18  # PROMPT.md: 10% bigger than the plain 16px icon size elsewhere
 _WINDOW_BUTTON_WIDTH = 46
-_SIDEBAR_MIN_WIDTH = 180
+#: PROMPT.md: "make sure file explorer panel expands by default so text is visible without
+#: contracting (at the moment we see Personal G..e Variants)" -- 180 let the sidebar (and with it,
+#: the "Personal Game/Map Variants" section headers) get squeezed narrow enough to middle-elide;
+#: wide enough headroom over those headers' own sizeHint() that a narrow window has to shrink
+#: something else before this text does (see test_ide_smoke.py's own width-vs-sizeHint regression
+#: guard for the margin this was picked against).
+_SIDEBAR_MIN_WIDTH = 220
 
 
 class _DropdownButton(QToolButton):
@@ -311,7 +317,7 @@ class MainWindow(QWidget):
         self._side_splitter.addWidget(self._main_splitter)
         self._side_splitter.setStretchFactor(0, 0)
         self._side_splitter.setStretchFactor(1, 1)
-        self._side_splitter.setSizes([220, 1000])
+        self._side_splitter.setSizes([_SIDEBAR_MIN_WIDTH, 1000])
 
         self.main_panel = MainPanelArea(
             root_dir=self.root_dir,
@@ -323,10 +329,19 @@ class MainWindow(QWidget):
 
         env_project_dir = project.get_project_dir(self.root_dir)
         self.explorer_panel.set_env_project_dir(env_project_dir)
-        already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
-        if already_open:
-            self.explorer_panel.set_project_folder(Path(already_open))
-            self.search_panel.set_project_folder(Path(already_open))
+        # PROMPT.md: multi-project tabs -- re-open every tab still on disk from last launch;
+        # PROJECT_DIR_KEY (the single most-recently-created project) is only a fallback for a
+        # .env from before OPEN_PROJECTS existed, so upgrading doesn't silently lose the one
+        # project that .env already knew about.
+        self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
+        self.explorer_panel.open_projects_changed.connect(self._on_open_projects_changed)
+        restored = open_projects.list_open(env_project_dir)
+        if not restored:
+            already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
+            if already_open and Path(already_open).is_dir():
+                restored = [Path(already_open)]
+        for folder in restored:
+            self.explorer_panel.open_project(folder)
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
@@ -416,9 +431,16 @@ class MainWindow(QWidget):
         self.activity_bar.set_active_view("explorer")
 
     def _on_project_opened(self, folder: Path) -> None:
-        """Points the Explorer and Search panels at a newly created/loaded gametype project."""
-        self.explorer_panel.set_project_folder(folder)
-        self.search_panel.set_project_folder(folder)
+        """Opens a newly created/loaded gametype project as an Explorer tab (PROMPT.md:
+        multi-project tabs), switching to it -- alongside whatever other projects are already
+        open, not replacing them. The Search panel follows along via
+        ``explorer_panel.active_project_changed`` (see ``__init__``), not called directly here."""
+        self.explorer_panel.open_project(folder)
+
+    def _on_open_projects_changed(self, folders: list[Path]) -> None:
+        """Persists the Explorer's current tab set so it comes back on the next launch (PROMPT.md:
+        multi-project tabs)."""
+        open_projects.set_open(project.get_project_dir(self.root_dir), folders)
 
     def _on_settings_changed(self) -> None:
         """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
@@ -483,10 +505,10 @@ class MainWindow(QWidget):
         self.main_panel.save_all()
 
     def close_project(self) -> None:
-        """"Close Project" -- clears the Explorer and Search panels; doesn't touch any files, and
-        doesn't close this window (that's the title bar's own close button)."""
-        self.explorer_panel.set_project_folder(None)
-        self.search_panel.set_project_folder(None)
+        """"Close Project" -- closes whichever project tab is currently active (PROMPT.md:
+        multi-project tabs; any other open tabs stay open). Doesn't touch any files, and doesn't
+        close this window (that's the title bar's own close button)."""
+        self.explorer_panel.close_active_project()
 
     def close_editor(self) -> None:
         self.main_panel.active_pane.close_current()
@@ -565,9 +587,10 @@ class MainWindow(QWidget):
         # and toggle/window-control buttons) needs telling separately, since a font change alone
         # doesn't touch them.
         self.refresh_icon_colors()
-        # Same reasoning as refresh_icon_colors() above -- the Explorer panel's own +10% text
+        # Same reasoning as refresh_icon_colors() above -- the Explorer/Search panels' own text
         # scale is a one-time snapshot of app.font(), not a live binding to it.
         self.explorer_panel.refresh_font_scale()
+        self.search_panel.refresh_font_scale()
 
     def launch_rvt(self) -> None:
         """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves

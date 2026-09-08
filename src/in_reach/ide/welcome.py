@@ -348,7 +348,7 @@ class WelcomeTab(QWidget):
     # -- start actions ---------------------------------------------------------------------------
 
     def new_blank_project(self) -> None:
-        self._create_project_from(NewProjectDialog(self))
+        self._create_project_from(NewProjectDialog(self, ask_game_type=True))
 
     def new_built_in_project(self) -> None:
         values = system_verify.verified_keys(self.project_dir)

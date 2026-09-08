@@ -2,10 +2,14 @@
 
 The same dialog serves all three: pass ``variants`` (a game-variants folder's contents, as returned
 by :func:`in_reach.app.new_project.list_variants`) to add the "start from this variant" chooser, or
-leave it out for a blank project. Create stays disabled until the title is one
-:func:`~in_reach.app.new_project.is_valid_title` will accept -- non-empty, within length, nothing
-more (PROMPT.md: the title no longer has to be a legal Windows folder name, since the project
-folder is a generated id now, not the title -- see that function's own docstring).
+pass ``ask_game_type=True`` instead for a blank project -- a Multiplayer/Firefight picker replaces
+the variant chooser, since a blank project still needs *something* to decompile/open in RVT with
+(:func:`selected_variant` resolves one of in-reach's own bundled blank templates in that case, never
+``None``). Firefight has no Category/Icon of its own, so picking it hides the Category row entirely
+rather than offering a choice that wouldn't mean anything. Create stays disabled until the title is
+one :func:`~in_reach.app.new_project.is_valid_title` will accept -- non-empty, within length,
+nothing more (PROMPT.md: the title no longer has to be a legal Windows folder name, since the
+project folder is a generated id now, not the title -- see that function's own docstring).
 """
 
 from __future__ import annotations
@@ -19,13 +23,15 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
-from in_reach.app import new_project
+from in_reach.app import blank_variant, new_project
 from in_reach.app.categories import EngineCategory, display_name
 
 _TITLE_HELP = f"1-{new_project.MAX_TITLE_LENGTH} characters."
@@ -43,6 +49,7 @@ class NewProjectDialog(QDialog):
         *,
         variants: list[tuple[str, Path]] | None = None,
         source_label: str = "Start from",
+        ask_game_type: bool = False,
     ) -> None:
         """
         Args:
@@ -50,9 +57,16 @@ class NewProjectDialog(QDialog):
             variants: ``(name, path)`` pairs to offer as the project's starting variant. ``None``
                 (or empty) drops the chooser entirely -- a blank project.
             source_label: Field label for that chooser, e.g. ``"Built-in variant"``.
+            ask_game_type: Whether to show the Multiplayer/Firefight picker -- only the "New Blank
+                Project" flow needs this (PROMPT.md: "blank gametypes should also ask if
+                multiplayer or firefight"); the other two flows already know their game type from
+                the ``.bin`` they're starting from. Firefight has no Category/Icon of its own
+                (PROMPT.md: "firefight doesnt get categorys and icons"), so picking it hides the
+                Category row rather than offering a choice that wouldn't mean anything.
         """
         super().__init__(parent)
         self._variants = variants or []
+        self._ask_game_type = ask_game_type
 
         self.setWindowTitle("New Project")
         self.setModal(True)
@@ -78,6 +92,17 @@ class NewProjectDialog(QDialog):
         self.description_edit.installEventFilter(self)
         form.addRow("Description", self.description_edit)
 
+        if self._ask_game_type:
+            self.multiplayer_radio = QRadioButton("Multiplayer")
+            self.firefight_radio = QRadioButton("Firefight")
+            self.multiplayer_radio.setChecked(True)
+            game_type_row = QHBoxLayout()
+            game_type_row.addWidget(self.multiplayer_radio)
+            game_type_row.addWidget(self.firefight_radio)
+            game_type_row.addStretch()
+            self.firefight_radio.toggled.connect(self._on_game_type_changed)
+            form.addRow("Game Type", game_type_row)
+
         self.category_combo = QComboBox()
         for category in EngineCategory:
             self.category_combo.addItem(display_name(category), category)
@@ -101,6 +126,7 @@ class NewProjectDialog(QDialog):
         else:
             self.variant_combo.hide()
 
+        self._form = form
         layout.addLayout(form)
 
         self.title_help_label = QLabel(_TITLE_HELP)
@@ -123,6 +149,13 @@ class NewProjectDialog(QDialog):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self._on_title_changed(self.title_edit.text())
         self._on_description_changed(self.description_edit.text())
+        if self._ask_game_type:
+            self._on_game_type_changed(self.firefight_radio.isChecked())
+
+    def _on_game_type_changed(self, firefight_checked: bool) -> None:
+        """Firefight has no Category/Icon of its own (see this class's own docstring), so picking
+        it hides the Category row rather than leaving a choice that wouldn't mean anything."""
+        self._form.setRowVisible(self.category_combo, not firefight_checked)
 
     def _on_title_changed(self, text: str) -> None:
         valid = new_project.is_valid_title(text.strip())
@@ -156,11 +189,31 @@ class NewProjectDialog(QDialog):
     def description(self) -> str:
         return self.description_edit.text().strip()
 
+    def is_firefight(self) -> bool:
+        """Whether the Firefight radio is picked -- always ``False`` when this dialog wasn't built
+        with ``ask_game_type=True`` (the built-in/personal-variant flows already know their game
+        type from the ``.bin`` they're starting from)."""
+        return self._ask_game_type and self.firefight_radio.isChecked()
+
     def category(self) -> EngineCategory:
+        # Firefight has no Category of its own -- see this class's own docstring -- so its
+        # (hidden) combobox value is never meaningful; report "none" rather than whatever it was
+        # last left showing.
+        if self.is_firefight():
+            return EngineCategory.none
         return self.category_combo.currentData()
 
     def selected_variant(self) -> Path | None:
-        """The chosen starting variant, or ``None`` for a blank project."""
+        """The chosen starting variant.
+
+        A blank project (``ask_game_type=True``) still needs *something* to decompile/open in RVT
+        with, so this resolves to in-reach's own bundled blank multiplayer/Firefight template
+        (PROMPT.md: RVT wasn't running for blank gametypes, and clicking it didn't load them, both
+        because a blank project previously had no ``.bin`` at all) -- never ``None`` in that case.
+        For the built-in/personal-variant flows, ``None`` means a blank project (no chooser shown).
+        """
+        if self._ask_game_type:
+            return blank_variant.resolve_blank_variant(firefight=self.is_firefight())
         if not self._variants:
             return None
         data = self.variant_combo.currentData()
