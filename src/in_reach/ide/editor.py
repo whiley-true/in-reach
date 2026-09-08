@@ -72,9 +72,10 @@ def _indent_level(text: str) -> int:
 
 def _find_project_title(path: Path) -> str | None:
     """Walks ``path``'s own ancestors looking for a gametype project folder (one holding a
-    ``README.md`` -- every project has exactly one, see
-    :func:`~in_reach.app.new_project.create_gametype_project`) and returns its title (see
-    :func:`~in_reach.app.new_project.read_project_title`).
+    ``Notes.txt`` -- every project has exactly one, see
+    :func:`~in_reach.app.new_project.create_gametype_project`, and unlike ``settings/settings.json``
+    it's there even for a genuinely blank project with nothing decompiled yet) and returns its
+    title (see :func:`~in_reach.app.new_project.read_project_title`).
 
     Returns ``None`` if no ancestor has one -- ``path`` isn't inside a real project (an Untitled
     tab later saved somewhere else entirely, say).
@@ -82,7 +83,7 @@ def _find_project_title(path: Path) -> str | None:
     from in_reach.app import new_project
 
     for ancestor in path.parents:
-        if (ancestor / new_project.README_FILENAME).is_file():
+        if (ancestor / new_project.NOTES_FILENAME).is_file():
             return new_project.read_project_title(ancestor)
     return None
 

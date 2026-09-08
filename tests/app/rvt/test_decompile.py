@@ -71,11 +71,11 @@ def test_decompile_into_project_writes_settings_strings_and_script(
     decompile.decompile_into_project(bin_path, folder)
 
     settings_dir = folder / "settings"
-    rvt_dir = folder / "edit" / "rvt"
+    script_dir = folder / "script"
     assert (settings_dir / decompile.SETTINGS_FILENAME).is_file()
     assert (settings_dir / decompile.SCRIPT_SETTINGS_FILENAME).is_file()
     assert (settings_dir / decompile.STRINGS_FILENAME).is_file()
-    assert (rvt_dir / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8") == "-- script --"
+    assert (script_dir / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8") == "-- script --"
 
     script_settings_json = json.loads((settings_dir / decompile.SCRIPT_SETTINGS_FILENAME).read_text(encoding="utf-8"))
     assert script_settings_json["scripted_options"][0]["name"] == "Round Length"
@@ -198,7 +198,7 @@ def test_decompile_into_project_writes_valid_maps_json_filtered_by_script_settin
 
 
 def test_resync_from_bin_updates_settings_and_build_without_touching_edit(tmp_path: Path, monkeypatch) -> None:
-    # PROMPT.md: "[generated files] should update when rvt saves" -- but edit/rvt/script.txt is the
+    # PROMPT.md: "[generated files] should update when rvt saves" -- but script/game.txt is the
     # one hand-editable thing left, so a resync must never overwrite it.
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())
@@ -208,15 +208,15 @@ def test_resync_from_bin_updates_settings_and_build_without_touching_edit(tmp_pa
     bin_path.write_bytes(b"\x00")
     folder = tmp_path / "project"
     folder.mkdir()
-    rvt_dir = folder / "edit" / "rvt"
-    rvt_dir.mkdir(parents=True)
-    (rvt_dir / decompile.SCRIPT_FILENAME).write_text("hand-edited script", encoding="utf-8")
+    script_dir = folder / "script"
+    script_dir.mkdir(parents=True)
+    (script_dir / decompile.SCRIPT_FILENAME).write_text("hand-edited script", encoding="utf-8")
 
     decompile.resync_from_bin(bin_path, folder)
 
     assert (folder / "build" / decompile.GENERATED_SETTINGS_FILENAME).is_file()
     assert (folder / "settings" / decompile.SETTINGS_FILENAME).is_file()
-    assert (rvt_dir / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8") == "hand-edited script"
+    assert (script_dir / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8") == "hand-edited script"
 
 
 def test_resync_from_bin_carries_category_through(tmp_path: Path, monkeypatch) -> None:
@@ -400,7 +400,7 @@ def test_decompile_into_project_against_a_real_bin(tmp_path: Path) -> None:
     strings = json.loads((settings_dir / decompile.STRINGS_FILENAME).read_text(encoding="utf-8"))
     assert set(strings.keys()) == {"$schema", "meta", "teams", "script_strings"}
 
-    script = (folder / "edit" / "rvt" / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8")
+    script = (folder / "script" / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8")
     assert "declare" in script
 
     stats = json.loads((folder / "build" / decompile.GENERATED_STATS_FILENAME).read_text(encoding="utf-8"))

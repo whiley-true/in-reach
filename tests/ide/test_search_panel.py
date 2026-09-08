@@ -49,14 +49,14 @@ def test_typing_a_query_populates_results_live(panel: SearchPanel, tmp_path: Pat
 
 
 def test_result_text_shows_a_path_relative_to_the_project(panel: SearchPanel, tmp_path: Path) -> None:
-    nested = tmp_path / "edit" / "rvt"
+    nested = tmp_path / "script"
     nested.mkdir(parents=True)
-    (nested / "script.txt").write_text("needle\n", encoding="utf-8")
+    (nested / "game.txt").write_text("needle\n", encoding="utf-8")
     panel.set_project_folder(tmp_path)
 
     panel.search_edit.setText("needle")
 
-    assert panel.results_list.item(0).text().startswith(str(Path("edit") / "rvt" / "script.txt"))
+    assert panel.results_list.item(0).text().startswith(str(Path("script") / "game.txt"))
 
 
 def test_clearing_the_query_clears_results(panel: SearchPanel, tmp_path: Path) -> None:

@@ -1,9 +1,15 @@
-"""The primary sidebar's Explorer view: a tab per currently open gametype project (PROMPT.md:
-"multiple projects can be loaded ... have tabs for the different projects that then changes the
-project explorer below"), each showing that project's own folder tree, plus -- collapsed by
-default, since they're secondary to it -- two more folder trees for the personal game/map variant
-folders :mod:`in_reach.app.system_verify` resolves (shared across every open project, since they
-don't depend on which one is active).
+"""The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): a
+tab per currently open gametype project (PROMPT.md: "multiple projects can be loaded ... have tabs
+for the different projects that then changes the project explorer below"), showing exactly five
+boxes for it (PROMPT.md: "we should only see Script, Settings, Stats, Personal Game Variants,
+Personal Map Variants") -- "Script"/"Settings" pointed at that project's own ``script/``/
+``settings/`` subfolders, "Stats" summarizing its build's own space usage and string count (see
+:func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.strings_io.
+count_script_strings`), and -- collapsed by default, since they're secondary to all of that -- two
+more folder trees for the personal game/map variant folders :mod:`in_reach.app.system_verify`
+resolves (shared across every open project, since they don't depend on which one is active). There
+used to be a sixth, generic "browse the whole project folder" tree too; PROMPT.md asked for it to
+go now that Script/Settings cover the two subfolders actually worth browsing by hand.
 
 Each tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk changes for
 free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the platform's
@@ -20,6 +26,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
+    QProgressBar,
     QSizePolicy,
     QTabBar,
     QToolButton,
@@ -29,10 +36,12 @@ from PyQt6.QtWidgets import (
 )
 
 from in_reach.app import env_file, new_project, system_verify
+from in_reach.app.rvt import settings_io, strings_io
 from in_reach.ide.file_icons import ExplorerIconProvider
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
 _NOT_RESOLVED_TEXT = "Not verified yet -- see Verify System Settings on the Welcome tab."
+_NO_STATS_TEXT = "No build stats yet -- Apply (or launch RVT) once this gametype compiles."
 
 
 def _new_tree() -> tuple[QTreeView, QFileSystemModel]:
@@ -48,6 +57,16 @@ def _new_tree() -> tuple[QTreeView, QFileSystemModel]:
 
 
 def _point_tree_at(tree: QTreeView, model: QFileSystemModel, folder: Path | None) -> None:
+    """Roots ``tree`` at ``folder``, or back to the empty placeholder for ``None``.
+
+    ``folder`` must actually exist as a directory -- an empty string root path (what
+    ``QFileSystemModel`` falls back to for ``None``/a missing folder) shows "This PC"'s own top
+    level (every drive letter) rather than nothing, which read as "the script drop down is showing
+    local disk, new volume[,] etc" (PROMPT.md) for a project predating some later folder rename that
+    left an expected subfolder missing. Callers pointing at a project's own subfolder should create
+    it first (a plain ``mkdir(parents=True, exist_ok=True)``) rather than pass one that might not
+    exist, so this is only ever really hit for the genuine "no project open" case.
+    """
     if folder is None or not folder.is_dir():
         model.setRootPath("")
         tree.setRootIndex(model.index(""))
@@ -101,7 +120,7 @@ class _CollapsibleSection(QWidget):
 
 
 class ExplorerPanel(QWidget):
-    #: Emitted with a file's path when it's clicked in the main project tree -- never for a
+    #: Emitted with a file's path when it's clicked in the Script or Settings box -- never for a
     #: directory (clicking one just expands/collapses it, QTreeView's own default behavior), and
     #: not from either personal-folder tree (see their own click wiring, below, for why).
     file_activated = pyqtSignal(Path)
@@ -137,9 +156,9 @@ class ExplorerPanel(QWidget):
         layout.setSpacing(8)
 
         #: One tab per currently open project (PROMPT.md), labeled with its own title -- read back
-        #: from its README (see :func:`~in_reach.app.new_project.read_project_title`), same as the
-        #: Welcome tab's Recent list -- via :meth:`open_project`/:meth:`close_project`, not touched
-        #: directly. Hidden whenever no project is open, same as the tree itself.
+        #: from its own settings.json (see :func:`~in_reach.app.new_project.read_project_title`),
+        #: same as the Welcome tab's Recent list -- via :meth:`open_project`/:meth:`close_project`,
+        #: not touched directly. Hidden whenever no project is open.
         self.project_tabs = QTabBar()
         self.project_tabs.setTabsClosable(True)
         self.project_tabs.setExpanding(False)
@@ -163,17 +182,49 @@ class ExplorerPanel(QWidget):
         self._no_project_label.setEnabled(False)
         layout.addWidget(self._no_project_label)
 
-        self.project_tree, self._project_model = _new_tree()
-        self.project_tree.hide()
-        layout.addWidget(self.project_tree, 1)
-
         # PROMPT.md: "when no project is open, the Personal Game Variants and Personal Map
-        # Variants should appear at the bottom of the file explorer panel" -- project_tree's own
-        # stretch=1 above only pushes them down while it's actually visible (a hidden widget in a
-        # QVBoxLayout doesn't claim its stretch share), so this stands in for it whenever there's no
-        # project open, and collapses back to nothing the moment one is (see _activate()).
+        # Variants should appear at the bottom of the file explorer panel" -- the Script/Settings
+        # boxes below claim stretch=1 each (so they expand to fill available space once a project's
+        # open), but a hidden widget in a QVBoxLayout doesn't claim its stretch share, so this
+        # stands in for that whenever there's no project open, and collapses back to nothing the
+        # moment one is (see _activate()).
         self._no_project_spacer = QWidget()
         layout.addWidget(self._no_project_spacer, 1)
+
+        # PROMPT.md: "we then want boxes like Personal Game Variants for Script and Settings" --
+        # dedicated quick-access boxes for the active project's own script/settings subfolders,
+        # open by default (unlike the personal-folder sections below) since they're central to the
+        # active project rather than secondary to it. Hidden entirely with no project open (see
+        # _activate()).
+        self.script_tree, self._script_model = _new_tree()
+        self.script_section = _CollapsibleSection("Script", self.script_tree, collapsed=False)
+        self.script_section.hide()
+        layout.addWidget(self.script_section, 1)
+
+        self.settings_tree, self._settings_model = _new_tree()
+        self.settings_section = _CollapsibleSection("Settings", self.settings_tree, collapsed=False)
+        self.settings_section.hide()
+        layout.addWidget(self.settings_section, 1)
+
+        # PROMPT.md: "please also add a stats view into the dashboard" -- the active project's own
+        # build/stats.autogenerated.json (space usage + script content counts), regenerated by
+        # every decompile/resync/Apply for a multiplayer gametype (see
+        # in_reach.app.rvt.decompile's own module docstring) -- there's nothing to show for a
+        # blank/Firefight project that's never compiled, hence the placeholder.
+        self.stats_progress = QProgressBar()
+        self.stats_progress.setRange(0, 100)
+        self.stats_progress.setTextVisible(True)
+        self.stats_label = QLabel(_NO_STATS_TEXT)
+        self.stats_label.setWordWrap(True)
+        stats_body = QFrame()
+        stats_layout = QVBoxLayout(stats_body)
+        stats_layout.setContentsMargins(0, 4, 0, 0)
+        stats_layout.setSpacing(4)
+        stats_layout.addWidget(self.stats_progress)
+        stats_layout.addWidget(self.stats_label)
+        self.stats_section = _CollapsibleSection("Stats", stats_body, collapsed=False)
+        self.stats_section.hide()
+        layout.addWidget(self.stats_section)
 
         self.personal_variants_tree, self._personal_variants_model = _new_tree()
         self.personal_variants_placeholder = self._placeholder_label()
@@ -189,11 +240,16 @@ class ExplorerPanel(QWidget):
         )
         layout.addWidget(self.personal_maps_section)
 
-        # Only the main project tree opens files on click -- the two personal-folder trees hold
-        # raw .bin/.mvar game/map variants, which the plain text editor can't do anything useful
-        # with yet (PROMPT.md: opening one currently "raises an error as trying to open them as if
-        # they were text"). Once those file types are actually processed, this can open up too.
-        self.project_tree.clicked.connect(lambda index: self._on_tree_clicked(self._project_model, index))
+        # The Script/Settings quick-access boxes open files on click -- the two personal-folder
+        # trees below don't: they hold raw .bin/.mvar game/map variants, which the plain text
+        # editor can't do anything useful with yet (PROMPT.md: opening one currently "raises an
+        # error as trying to open them as if they were text"). Once those file types are actually
+        # processed, this can open up too.
+        for tree, model in (
+            (self.script_tree, self._script_model),
+            (self.settings_tree, self._settings_model),
+        ):
+            tree.clicked.connect(lambda index, m=model: self._on_tree_clicked(m, index))
 
         self.refresh_font_scale()
 
@@ -218,6 +274,9 @@ class ExplorerPanel(QWidget):
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
         self.personal_variants_section.set_header_font(header_font)
         self.personal_maps_section.set_header_font(header_font)
+        self.script_section.set_header_font(header_font)
+        self.settings_section.set_header_font(header_font)
+        self.stats_section.set_header_font(header_font)
 
     def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
         if not index.isValid() or model.isDir(index):
@@ -275,7 +334,7 @@ class ExplorerPanel(QWidget):
         self.open_projects_changed.emit(self.open_projects)
 
     def refresh_project_title(self, folder: Path) -> None:
-        """Re-reads ``folder``'s own title (its README's heading -- see
+        """Re-reads ``folder``'s own title (its ``settings.json`` -- see
         :func:`~in_reach.app.new_project.read_project_title`) and relabels its tab to match --
         called after a rename (PROMPT.md: "when a project name is changed [via rvt or via apply
         settings.json change] - the project title should change in the tabs and in the
@@ -313,18 +372,74 @@ class ExplorerPanel(QWidget):
         self._activate(Path(self.project_tabs.tabData(index)) if index >= 0 else None)
 
     def _activate(self, folder: Path | None) -> None:
-        """Points the main tree at ``folder`` (the newly active gametype project's own folder), or
-        back to the "no project" placeholder for ``None``."""
+        """Points the main tree (and the Script/Settings/Stats boxes) at ``folder`` (the newly
+        active gametype project's own folder), or back to the "no project" placeholder for
+        ``None``."""
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
         self.project_tabs.setVisible(self.project_tabs.count() > 0)
         self.folder_subheading.setText(folder.name if has_project else "")
         self.folder_subheading.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
-        self.project_tree.setVisible(has_project)
         self._no_project_spacer.setVisible(not has_project)
-        _point_tree_at(self.project_tree, self._project_model, folder)
+        self.script_section.setVisible(has_project)
+        self.settings_section.setVisible(has_project)
+        _point_tree_at(self.script_tree, self._script_model, self._ensure_subdir(folder, new_project.SCRIPT_DIRNAME))
+        _point_tree_at(
+            self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
+        )
+        self.stats_section.setVisible(has_project)
+        self.refresh_stats()
         self.active_project_changed.emit(folder)
+
+    @staticmethod
+    def _ensure_subdir(folder: Path | None, name: str) -> Path | None:
+        """``folder / name``, first creating it if it doesn't exist yet -- a project predating some
+        later folder rename (or one hand-deleted) can otherwise be missing an expected subfolder,
+        which used to make :func:`_point_tree_at` fall back to showing every drive letter on the
+        machine instead (PROMPT.md: "the script drop down is showing local disk, new volum[e] etc").
+        ``None`` (no project open) passes straight through."""
+        if folder is None:
+            return None
+        subdir = folder / name
+        subdir.mkdir(parents=True, exist_ok=True)
+        return subdir
+
+    # -- the Stats box --------------------------------------------------------------------------
+
+    def refresh_stats(self) -> None:
+        """Re-reads :attr:`current_folder`'s own ``build/stats.autogenerated.json`` (space usage +
+        script content counts) and ``settings/strings.json`` (PROMPT.md: "please also make stats
+        include[] strings.json") and updates the Stats box to match (PROMPT.md: "please also add a
+        stats view into the dashboard") -- called on every project switch, and again by
+        ``MainWindow`` after a resync/Apply might have regenerated either.
+
+        ``strings.json`` is shown independently of the build stats -- it's written for every
+        project, multiplayer or not (see :mod:`in_reach.app.rvt.decompile`'s own module docstring),
+        where the build stats file only ever exists for a multiplayer gametype that's actually
+        compiled at least once. The placeholder text only shows if *neither* is available.
+        """
+        stats = None
+        strings_count = None
+        if self.current_folder is not None:
+            from in_reach.app.rvt.decompile import GENERATED_STATS_FILENAME, STRINGS_FILENAME
+
+            stats_path = self.current_folder / new_project.BUILD_DIRNAME / GENERATED_STATS_FILENAME
+            stats = settings_io.load_build_stats(stats_path)
+            strings_path = self.current_folder / new_project.SETTINGS_DIRNAME / STRINGS_FILENAME
+            strings_count = strings_io.count_script_strings(strings_path)
+
+        self.stats_progress.setVisible(stats is not None)
+        lines: list[str] = []
+        if stats is not None:
+            self.stats_progress.setValue(round(stats.space.percent))
+            counts = stats.counts
+            lines.append(f"{stats.space.bytes_used:,} / {stats.space.bytes_max:,} bytes used ({stats.space.percent:.1f}%)")
+            lines.append(f"Triggers: {counts.triggers}   Conditions: {counts.conditions}   Actions: {counts.actions}")
+            lines.append(f"Forge Labels: {counts.forge_labels}")
+        if strings_count is not None:
+            lines.append(f"Strings: {strings_count}")
+        self.stats_label.setText("\n".join(lines) if lines else _NO_STATS_TEXT)
 
     # -- the two personal-folder sections ----------------------------------------------------------
 

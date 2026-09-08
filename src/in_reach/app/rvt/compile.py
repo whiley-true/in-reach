@@ -1,5 +1,5 @@
 """Compiles a project's ``settings/`` (settings.json/script_settings.json/strings.json) and
-``edit/rvt/script.txt`` into a real game variant (PROMPT.md: "applying changes should try and
+``script/game.txt`` into a real game variant (PROMPT.md: "applying changes should try and
 compile the jsons into a gametype and i[f] it fails then dont allow application (raise errors in
 text window - although hopefully our schema validation should catch this)").
 
@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from in_reach.app import new_project
 from in_reach.app.blank_variant import resolve_blank_variant
 
-from . import settings_io, settings_writer, strings_io, strings_writer
+from . import decompile, settings_io, settings_writer, strings_io, strings_writer
 from .decompile import write_build_snapshot
 from .rvt_bridge import get_rvt
 from .settings_io import load_game_settings
@@ -86,7 +86,7 @@ def format_build_result(result: BuildResult) -> str:
 
 
 def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
-    """Builds ``folder``'s project from ``settings/``/``edit/rvt/script.txt`` onto its fixed base
+    """Builds ``folder``'s project from ``settings/``/``script/game.txt`` onto its fixed base
     (see module docstring for what that base is and why).
 
     Args:
@@ -106,7 +106,7 @@ def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
         ``save`` is set -- a save error).
     """
     settings_dir = folder / new_project.SETTINGS_DIRNAME
-    rvt_dir = folder / new_project.EDIT_DIRNAME / new_project.EDIT_RVT_SUBDIR
+    script_dir = folder / new_project.SCRIPT_DIRNAME
     settings_path = settings_dir / "settings.json"
     try:
         settings = load_game_settings(settings_path)
@@ -128,7 +128,7 @@ def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
     result = BuildResult(success=True)
 
     if mp is not None:
-        script_path = rvt_dir / "script.txt"
+        script_path = script_dir / decompile.SCRIPT_FILENAME
         source = script_path.read_text(encoding="utf-8") if script_path.is_file() else ""
         compile_result = mp.compile_script(source)
         result.fatal_errors = _messages(compile_result.fatal_errors)

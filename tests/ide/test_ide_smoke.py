@@ -229,7 +229,7 @@ def test_opening_a_project_from_the_welcome_tab_updates_the_explorer_panel(
     welcome = project_window.main_panel.panes[0].widget(0)
     welcome.project_opened.emit(folder)
 
-    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+    assert Path(project_window.explorer_panel._settings_model.rootPath()) == folder / "settings"
 
 
 def test_opening_a_project_also_points_the_search_panel_at_it(
@@ -459,6 +459,35 @@ def test_refresh_icon_scale_resizes_the_bar_and_every_button(qtbot) -> None:
         assert button.iconSize().width() == round(28 * 2)
 
 
+def test_explorer_button_is_labeled_and_iconed_as_dashboard(qtbot) -> None:
+    # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed to be a svg of
+    # a dashboard)".
+    from in_reach.ide import icons
+
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar.explorer_button.toolTip() == "Dashboard (toggle primary sidebar)"
+    expected = icons.icon("dashboard", color="#cccccc", size=28).pixmap(28, 28).toImage()
+    assert bar.explorer_button.icon().pixmap(28, 28).toImage() == expected
+
+
+def test_refresh_icon_scale_keeps_the_dashboard_icon_not_the_old_explorer_one(qtbot) -> None:
+    # Regression guard: refresh_icon_scale() used to re-render every _buttons-dict button's icon
+    # from its own dict *key* ("explorer") rather than the icon name actually passed to
+    # _bar_button() ("dashboard") -- a zoom change would silently revert the icon.
+    from in_reach.ide import icons
+
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    bar.refresh_icon_scale(1.5)
+
+    icon_size = round(28 * 1.5)
+    expected = icons.icon("dashboard", color="#cccccc", size=icon_size).pixmap(icon_size, icon_size).toImage()
+    assert bar.explorer_button.icon().pixmap(icon_size, icon_size).toImage() == expected
+
+
 def test_refresh_icon_scale_preserves_the_rvt_disabled_badge(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
@@ -630,7 +659,7 @@ def test_clicking_apply_runs_the_real_compile_and_disables_the_button_on_success
     assert project_window.activity_bar.apply_button.isEnabled() is False
 
 
-def test_clicking_apply_syncs_a_hand_edited_title_to_the_readme_and_explorer_tab(
+def test_clicking_apply_syncs_a_hand_edited_title_to_the_explorer_tab(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # PROMPT.md: "when a project name is changed [via rvt or] via apply settings.json change - the
@@ -639,7 +668,6 @@ def test_clicking_apply_syncs_a_hand_edited_title_to_the_readme_and_explorer_tab
     from in_reach.app.rvt.compile import BuildResult
 
     folder = _make_project_with_settings(tmp_path)
-    (folder / "README.md").write_text("# Old Title\n\nDescription.\n", encoding="utf-8")
     (folder / "settings" / "settings.json").write_text(
         '{"meta": {"title": "Hand-Edited Title"}}', encoding="utf-8"
     )
@@ -696,8 +724,7 @@ def test_a_rename_refreshes_the_open_welcome_tabs_recent_list(
     from in_reach.ide.welcome import WelcomeTab
 
     folder = _make_project_with_settings(tmp_path)
-    (folder / "README.md").write_text("# Old Title\n", encoding="utf-8")
-    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Old Title"}}', encoding="utf-8")
     env_project_dir = project_window.explorer_panel._env_project_dir
     recent.add_recent(env_project_dir, folder)
 
@@ -706,6 +733,7 @@ def test_a_rename_refreshes_the_open_welcome_tabs_recent_list(
     welcome.refresh()  # populate the Recent list with the stale title first
     assert any("Old Title" in label for label in _recent_button_labels(welcome))
 
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
     project_window._sync_project_title(folder)
 
     labels = _recent_button_labels(welcome)
@@ -719,7 +747,6 @@ def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
     from in_reach.app import recent
 
     folder = _make_project_with_settings(tmp_path)
-    (folder / "README.md").write_text("# Old Title\n", encoding="utf-8")
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
     env_project_dir = project_window.explorer_panel._env_project_dir
     recent.add_recent(env_project_dir, folder)
@@ -1052,7 +1079,7 @@ def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     assert "description" not in calls[0][2]
 
 
-def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_readme_and_explorer_tab(
+def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_explorer_tab(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import new_project, project
@@ -1062,7 +1089,6 @@ def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_readme_and_explor
     project_dir.mkdir()
     folder = tmp_path / "abcd1234"
     folder.mkdir()
-    (folder / "README.md").write_text("# Old Title\n\nDescription.\n", encoding="utf-8")
     settings_dir = folder / new_project.SETTINGS_DIRNAME
     settings_dir.mkdir(parents=True)
     bin_path = new_project.compiled_variant_path(folder)
@@ -1605,7 +1631,7 @@ def test_open_folder_adopts_it_as_the_current_project(
 
     project_window.open_folder()
 
-    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+    assert Path(project_window.explorer_panel._settings_model.rootPath()) == folder / "settings"
     env_project_dir = project_window.explorer_panel._env_project_dir
     assert recent_module.list_recent(env_project_dir) == [folder]
 
@@ -1624,9 +1650,13 @@ def test_open_recent_project_menu_lists_recent_projects_by_title(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     from in_reach.app import new_project as new_project_module
+    from in_reach.app.blank_variant import resolve_blank_variant
 
     env_project_dir = project_window.explorer_panel._env_project_dir
-    folder, _warning = new_project_module.create_gametype_project(env_project_dir, "Slayer Plus")
+    folder, warning = new_project_module.create_gametype_project(
+        env_project_dir, "Slayer Plus", source_variant=resolve_blank_variant(firefight=False)
+    )
+    assert warning is None
     from in_reach.app import recent as recent_module
 
     recent_module.add_recent(env_project_dir, folder)
@@ -1638,7 +1668,7 @@ def test_open_recent_project_menu_lists_recent_projects_by_title(
     assert [a.text() for a in actions] == ["Slayer Plus"]
 
     actions[0].trigger()
-    assert Path(project_window.explorer_panel._project_model.rootPath()) == folder
+    assert Path(project_window.explorer_panel._settings_model.rootPath()) == folder / "settings"
 
 
 def test_save_current_delegates_to_the_active_panes_current_tab(
@@ -1661,7 +1691,7 @@ def test_close_project_clears_the_explorer_panel(project_window: MainWindow, tmp
     folder = tmp_path / "Project"
     folder.mkdir()
     project_window._on_project_opened(folder)
-    assert project_window.explorer_panel.project_tree.isVisibleTo(project_window.explorer_panel) is True
+    assert project_window.explorer_panel.script_section.isVisibleTo(project_window.explorer_panel) is True
 
     project_window.close_project()
 

@@ -476,7 +476,7 @@ def test_context_menu_lists_the_expected_actions_in_order(window: MainWindow, mo
         "Copy Path",
         "Copy Relative Path",
         "Reveal in File Explorer",
-        "Reveal in Explorer View",
+        "Reveal in Dashboard View",
         "Pin",
         "Split Right",
         "Split Down",
@@ -501,7 +501,7 @@ def test_context_menu_enables_path_actions_once_a_tab_has_a_file(
     assert by_text["Copy Path"].isEnabled() is True
     assert by_text["Copy Relative Path"].isEnabled() is True
     assert by_text["Reveal in File Explorer"].isEnabled() is True
-    assert by_text["Reveal in Explorer View"].isEnabled() is True
+    assert by_text["Reveal in Dashboard View"].isEnabled() is True
 
 
 def test_context_menu_shows_unpin_once_pinned(window: MainWindow, monkeypatch) -> None:
@@ -725,6 +725,71 @@ def test_open_file_shows_no_icon_for_a_regular_file(window: MainWindow, tmp_path
     pane.open_file(source)
 
     assert pane.tabIcon(pane.currentIndex()).isNull() is True
+
+
+# -- Markdown preview (PROMPT.md: "please make .md be preview when opened") --------------------
+
+
+def test_open_file_opens_a_markdown_file_as_a_rendered_preview(window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.markdown_preview import MarkdownPreviewWidget
+
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "README.md"
+    source.write_text("# Heading\n\nSome *text*.\n", encoding="utf-8")
+
+    pane.open_file(source)
+
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, MarkdownPreviewWidget)
+    assert widget.isReadOnly() is True
+    assert pane.tabText(pane.currentIndex()) == "README.md"
+    assert "Heading" in widget.toPlainText()
+
+
+def test_a_markdown_preview_never_shows_the_dirty_italic_or_dot(window: MainWindow, tmp_path: Path) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane = window.main_panel.panes[0]
+
+    pane.open_file(source)
+
+    index = pane.currentIndex()
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    # A Markdown preview has no close-dot/padlock button at all -- it's never dirty and never a
+    # generated/read-only *editor* file, just a different widget type entirely.
+    assert button is None or _close_icon_image(button) == _expected_icon_image("win_close")
+
+
+def test_saving_a_markdown_preview_tab_does_not_touch_the_file(window: MainWindow, tmp_path: Path) -> None:
+    # Regression guard: QTextBrowser.toPlainText() returns the *rendered* document's text, not the
+    # original Markdown source -- Save/Save As must never reach it, or a plain Ctrl+S would
+    # silently corrupt the file.
+    source = tmp_path / "README.md"
+    original = "# Heading\n\nSome *text*.\n"
+    source.write_text(original, encoding="utf-8")
+    pane = window.main_panel.panes[0]
+    pane.open_file(source)
+
+    assert pane.save_current() is False
+
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_splitting_a_pane_with_a_markdown_preview_duplicates_it(window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.markdown_preview import MarkdownPreviewWidget
+
+    source = tmp_path / "README.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane = window.main_panel.panes[0]
+    pane.open_file(source)
+
+    pane.split_button.click()
+
+    new_pane = window.main_panel.panes[-1]
+    duplicate = new_pane.widget(new_pane.currentIndex())
+    assert isinstance(duplicate, MarkdownPreviewWidget)
+    assert "Heading" in duplicate.toPlainText()
+    assert new_pane._tab_state_for(duplicate).path == source
 
 
 def test_splitting_a_pane_carries_the_read_only_state_and_padlock_icon_over(

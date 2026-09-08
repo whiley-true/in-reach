@@ -3,7 +3,7 @@ their views is ever active, switching the primary sidebar's content, VSCode-styl
 already-active one collapses the sidebar instead of switching -- a ReachVariantTool launcher icon
 below them (a plain action button, not a view -- it never affects which sidebar view is active),
 an "Apply" icon below that (PROMPT.md: compiles a project's hand-edited ``settings/*.json`` +
-``edit/rvt/script.txt`` into a real gametype ``.bin`` -- see
+``script/game.txt`` into a real gametype ``.bin`` -- see
 ``MainWindow.apply_settings_changes()``), and a settings cog pinned at the bottom (a no-op for
 now).
 """
@@ -45,6 +45,12 @@ def _bar_button(
     button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
     button.setAutoRaise(True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
+    # Recorded on the button itself (same trick MainWindow's own _TopBar._toolbutton() uses) --
+    # refresh_icon_scale() re-renders this icon at a new size on every zoom change, and needs the
+    # real icon name to do that, which isn't always the same as this button's own _buttons dict key
+    # (the Explorer/Dashboard button's icon is "dashboard", but its view key stays "explorer" --
+    # see MainWindow's own internal-vs-user-facing naming note).
+    button.setProperty("_icon_name", icon_name)
     return button
 
 
@@ -86,8 +92,12 @@ class ActivityBar(QWidget):
 
         # Checked by default -- the primary sidebar starts open on the Explorer view, matching
         # vscode's own default.
+        # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed to be a svg
+        # of a dashboard)" -- the icon/tooltip only; the "explorer" view key and this button's own
+        # Python identifier stay as they are, purely internal implementation detail invisible to
+        # the user.
         self.explorer_button = _bar_button(
-            "explorer", "Explorer (toggle primary sidebar)", checkable=True, checked=True
+            "dashboard", "Dashboard (toggle primary sidebar)", checkable=True, checked=True
         )
         self.explorer_button.clicked.connect(lambda: self._handle_click("explorer"))
         layout.addWidget(self.explorer_button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -196,8 +206,8 @@ class ActivityBar(QWidget):
 
         self.setFixedWidth(round(WIDTH * scale))
 
-        for name, button in self._buttons.items():
-            button.setIcon(icons.icon(name, color=_ICON_COLOR, size=icon_size))
+        for button in self._buttons.values():
+            button.setIcon(icons.icon(button.property("_icon_name"), color=_ICON_COLOR, size=icon_size))
             button.setIconSize(QSize(icon_size, icon_size))
             button.setFixedSize(button_size, button_size)
 
