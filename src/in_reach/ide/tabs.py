@@ -526,7 +526,7 @@ class MainPanelArea(QWidget):
         self.groups: list[_PaneGroup] = []
         first_group = self._new_group()
         first_pane = self._new_pane()
-        welcome = WelcomeTab()
+        welcome = WelcomeTab(root_dir=self.root_dir)
         welcome_index = first_pane.addTab(welcome, "Welcome")
         first_pane._track_tab(welcome_index, welcome)
         first_group.add_pane(first_pane)
@@ -586,7 +586,7 @@ class MainPanelArea(QWidget):
             duplicate.setDocument(widget.document())
             _connect_modification_tracking(duplicate)
         else:
-            duplicate = WelcomeTab()
+            duplicate = WelcomeTab(root_dir=self.root_dir)
 
         new_index = target.addTab(duplicate, label)
         target._track_tab(new_index, duplicate, state=_TabState(path=source_state.path))

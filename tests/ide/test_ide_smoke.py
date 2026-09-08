@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QApplication, QTabWidget
 
 from in_reach.ide import app as ide_app
 from in_reach.ide import icons, style, theme
+from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.first_run_dialog import FirstRunDialog
@@ -76,13 +77,22 @@ def test_on_theme_applied_colors_status_bar_and_icons_immediately(window: MainWi
     assert window.status_bar.styleSheet() == f"background-color: {whiley.status_bar_color};"
 
 
+def _current_icon_size() -> int:
+    # refresh_icon_colors() bakes every top-bar icon at _ICON_SIZE scaled by the live zoom level --
+    # these helpers have to match that exactly, or a size mismatch alone (independent of color/name)
+    # would make an otherwise-correct icon compare unequal.
+    return round(_ICON_SIZE * zoom_module.current_scale(QApplication.instance()))
+
+
 def _maximize_icon_image(window: MainWindow):
-    return window.top_bar.maximize_button.icon().pixmap(_ICON_SIZE, _ICON_SIZE).toImage()
+    size = _current_icon_size()
+    return window.top_bar.maximize_button.icon().pixmap(size, size).toImage()
 
 
 def _expected_icon_image(name: str, window: MainWindow):
     color = window.palette().color(QPalette.ColorRole.WindowText).name()
-    return icons.icon(name, color=color, size=_ICON_SIZE).pixmap(_ICON_SIZE, _ICON_SIZE).toImage()
+    size = _current_icon_size()
+    return icons.icon(name, color=color, size=size).pixmap(size, size).toImage()
 
 
 def test_refresh_icon_colors_shows_restore_icon_when_maximized(window: MainWindow) -> None:

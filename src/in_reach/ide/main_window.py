@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QMouseEvent, QPalette
+from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -24,7 +24,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from in_reach.app import project
 from in_reach.ide import icons, style
+from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
 from in_reach.ide.status_bar import StatusBar
@@ -74,9 +76,9 @@ class _TopBar(QWidget):
         layout.setContentsMargins(8, 0, 0, 0)
         layout.setSpacing(4)
 
-        mark = QLabel()
-        mark.setPixmap(icons.topbar_icon().pixmap(_TOPBAR_MARK_SIZE, _TOPBAR_MARK_SIZE))
-        layout.addWidget(mark)
+        self.mark_label = QLabel()
+        self.set_mark_size(_TOPBAR_MARK_SIZE)
+        layout.addWidget(self.mark_label)
         layout.addSpacing(4)
 
         layout.addWidget(_DropdownButton("text1"))
@@ -120,6 +122,13 @@ class _TopBar(QWidget):
             self.maximize_button,
             self.close_button,
         )
+
+    def set_mark_size(self, size: int) -> None:
+        """Re-renders the top-left mark's pixmap at ``size`` -- unlike the toolbutton icons below
+        (baked fresh on every :meth:`MainWindow.refresh_icon_colors` call anyway, for their color),
+        this one is otherwise only ever set once at construction, so a zoom change would otherwise
+        leave it stuck at its original pixel size while every other icon in the row rescaled."""
+        self.mark_label.setPixmap(icons.topbar_icon().pixmap(size, size))
 
     def _edges_at(self, pos: QPoint) -> Qt.Edge:
         if self._window.isMaximized():
@@ -276,6 +285,22 @@ class MainWindow(QWidget):
         self.top_bar.maximize_button.clicked.connect(self.toggle_maximize)
         self.top_bar.close_button.clicked.connect(self.close)
 
+        self._zoom_in_shortcut = QShortcut(self)
+        # Both '+' (Ctrl+Shift+= on a US keyboard) and bare '=' (Ctrl+=, no shift needed) are bound,
+        # matching PROMPT.md's "Ctrl++" while still working without the shift key.
+        # QKeySequence.StandardKey.ZoomIn/ZoomOut are deliberately not used here -- on this Qt build
+        # they resolve to these exact same "Ctrl++"/"Ctrl+-" sequences, and a QShortcut carrying a
+        # *duplicate* key sequence in its own key list counts that key press as matching twice, which
+        # makes Qt treat it as ambiguous (the activatedAmbiguously signal, not activated) and the
+        # shortcut silently never fires -- that's what made Ctrl+- (only ever bound once, so every
+        # press was its own duplicate) never work at all.
+        self._zoom_in_shortcut.setKeys([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
+        self._zoom_in_shortcut.activated.connect(self._zoom_in)
+
+        self._zoom_out_shortcut = QShortcut(self)
+        self._zoom_out_shortcut.setKeys([QKeySequence("Ctrl+-")])
+        self._zoom_out_shortcut.activated.connect(self._zoom_out)
+
         self.refresh_icon_colors()
 
     def _build_primary_sidebar(self) -> QWidget:
@@ -352,28 +377,57 @@ class MainWindow(QWidget):
         self.refresh_icon_colors()
 
     def refresh_icon_colors(self, color: str | None = None) -> None:
-        """Re-renders the top bar's icon buttons in ``color`` (or, if omitted, the current theme's
-        window-text color read back from the live QPalette).
+        """Re-renders the top bar's icons -- both the toggle/window-control buttons' color and, for
+        every icon in the row including the top-left mark, their pixel size against the current
+        zoom level.
 
-        Must be called again after a live theme switch (the first-run dialog's own theme buttons),
-        since :func:`in_reach.ide.icons.icon` bakes a fixed color into the pixmap rather than
-        tracking a live QPalette. Prefer :meth:`on_theme_applied` (which passes ``color``
-        explicitly) over relying on the palette read-back for that case -- ``QApplication.
-        setPalette()`` only actually updates this widget's own ``self.palette()`` once the
-        resulting ``PaletteChange`` event is processed on the event loop, which hasn't happened yet
-        by the time a theme-switch callback runs synchronously; reading it back here right after
-        switching would silently reuse the *previous* theme's color for one click.
+        ``color`` defaults to the current theme's window-text color, read back from the live
+        QPalette. Must be called again after a live theme switch (the first-run dialog's own theme
+        buttons) or a zoom change, since :func:`in_reach.ide.icons.icon` bakes a fixed color and
+        size into the pixmap rather than tracking either live. Prefer :meth:`on_theme_applied`
+        (which passes ``color`` explicitly) over relying on the palette read-back for that case --
+        ``QApplication.setPalette()`` only actually updates this widget's own ``self.palette()``
+        once the resulting ``PaletteChange`` event is processed on the event loop, which hasn't
+        happened yet by the time a theme-switch callback runs synchronously; reading it back here
+        right after switching would silently reuse the *previous* theme's color for one click.
         """
         if color is None:
             color = self.palette().color(QPalette.ColorRole.WindowText).name()
+        app = QApplication.instance()
+        scale = zoom_module.current_scale(app) if app is not None else 1.0
+        icon_size = round(_ICON_SIZE * scale)
         for button in self.top_bar.icon_buttons():
             icon_name = button.property("_icon_name")
             if button is self.top_bar.maximize_button:
                 icon_name = "win_restore" if self.isMaximized() else "win_maximize"
-            button.setIcon(icons.icon(icon_name, color=color, size=_ICON_SIZE))
+            button.setIcon(icons.icon(icon_name, color=color, size=icon_size))
+        self.top_bar.set_mark_size(round(_TOPBAR_MARK_SIZE * scale))
 
     def on_theme_applied(self, theme: Theme) -> None:
         """Refreshes every bit of chrome that a live theme switch doesn't drive automatically via
         QPalette alone: the top bar's icon colors and the status bar's accent color."""
         self.status_bar.set_color(theme.status_bar_color)
         self.refresh_icon_colors(theme.palette_colors.get("window_text"))
+
+    def _zoom_in(self) -> None:
+        self._adjust_zoom(zoom_module.ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._adjust_zoom(-zoom_module.ZOOM_STEP)
+
+    def _adjust_zoom(self, delta: float) -> None:
+        """Nudges the saved zoom level by ``delta``, applies it app-wide, and persists the result.
+
+        Re-reads the current level from the ``.env`` on every call rather than caching it on
+        ``self`` -- it's the same file :meth:`in_reach.ide.welcome.WelcomeTab.refresh` and every
+        other zoom-aware piece of the IDE would read, so there's only ever the one source of truth.
+        """
+        env_path = project.get_project_dir(self.root_dir) / ".env"
+        new_zoom = zoom_module.set_zoom(env_path, zoom_module.get_zoom(env_path) + delta)
+        app = QApplication.instance()
+        if app is not None:
+            zoom_module.apply_zoom(app, new_zoom)
+        # apply_zoom() only scales the live QFont -- every baked-pixmap icon (the top bar's mark
+        # and toggle/window-control buttons) needs telling separately, since a font change alone
+        # doesn't touch them.
+        self.refresh_icon_colors()

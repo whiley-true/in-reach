@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar
 
+import in_reach
 from in_reach.ide import icons
 from in_reach.ide import tabs as tabs_module
 from in_reach.ide.main_window import MainWindow
@@ -460,12 +461,29 @@ def test_drop_between_panes_preserves_path_and_pinned_state(
 # -- Welcome tab ----------------------------------------------------------------------------------
 
 
-def test_welcome_tab_shows_title_subtitle_and_a_stubbed_new_gametype_button(qtbot) -> None:
-    welcome = WelcomeTab()
+def test_welcome_tab_shows_title_subtitle_version_path_and_four_quadrants(qtbot, tmp_path) -> None:
+    welcome = WelcomeTab(root_dir=tmp_path)
     qtbot.addWidget(welcome)
 
     labels = [label.text() for label in welcome.findChildren(QLabel)]
     assert "In-Reach" in labels
     assert "Halo Reach Script Manager" in labels
-    assert "Start" in labels
-    assert welcome.new_gametype_button.receivers(welcome.new_gametype_button.clicked) == 0
+    assert f"v{in_reach.__version__}" in labels
+    assert str(tmp_path) in labels
+    for heading in ("Start", "Recent", "Verify System Settings", "Help & Walkthroughs"):
+        assert heading in labels
+
+
+def test_welcome_tabs_carry_the_panels_root_dir_into_their_duplicates(window, tmp_path) -> None:
+    # A split duplicates the source tab into the new pane -- a duplicated Welcome tab must still
+    # know which folder it's showing/creating projects against, not silently fall back to cwd.
+    main_panel = window.main_panel
+    main_panel.root_dir = tmp_path
+    pane = main_panel.panes[0]
+    pane.setCurrentIndex(0)
+
+    pane.split_button.click()
+
+    duplicate = main_panel.panes[-1].widget(0)
+    assert isinstance(duplicate, WelcomeTab)
+    assert duplicate.root_dir == tmp_path

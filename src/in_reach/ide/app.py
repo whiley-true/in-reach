@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import QApplication
 from in_reach.app import env_file
 from in_reach.ide import icons
 from in_reach.ide import theme as theme_module
+from in_reach.ide import zoom as zoom_module
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import MainWindow
 
@@ -57,6 +58,9 @@ def run(project_dir: Path) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(icons.app_icon())
     theme = theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)
+    # Applied before MainWindow is built, same as the theme above, so every widget it constructs
+    # is polished against the saved zoom level from the start rather than jumping once on first use.
+    zoom_module.apply_zoom(app, zoom_module.get_zoom(env_path))
 
     window = MainWindow(root_dir=project_dir.parent)
     window.on_theme_applied(theme)
