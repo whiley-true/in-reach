@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv==1.2.3",
     "tomlkit==0.15.1",
     "PyQt6==6.11.0",
+    "pydantic==2.13.4",
 ]
 
 [project.optional-dependencies]
@@ -31,4 +32,8 @@ in_reach = [
     ".in-reach/example.env",
     "ide/themes/*.json",
     "ide/assets/*.svg",
+    "ide/assets/*.png",
+    "app/rvt_tool/bin/**/*",
+    "app/rvt/native/**/*",
+    "app/blank_variants/*.bin",
 ]

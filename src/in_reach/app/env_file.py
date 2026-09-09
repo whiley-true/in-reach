@@ -53,4 +53,5 @@ def update_env_value(env_path: Path, key: str, value: str) -> None:
     else:
         lines.append(new_line)
 
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

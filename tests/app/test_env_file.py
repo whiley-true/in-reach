@@ -56,6 +56,14 @@ def test_update_env_value_appends_when_key_is_absent(tmp_path: Path) -> None:
     assert lines == ["FOO=bar", "NEW=value"]
 
 
+def test_update_env_value_creates_a_missing_parent_directory(tmp_path: Path) -> None:
+    env_path = tmp_path / ".in-reach" / ".env"
+
+    env_file.update_env_value(env_path, "FOO", "bar")
+
+    assert env_path.read_text() == "FOO=bar\n"
+
+
 def test_update_env_value_only_matches_the_exact_key_prefix(tmp_path: Path) -> None:
     # A naive substring match on "FOO" would also hit "FOOBAR=..." -- make sure it doesn't.
     env_path = tmp_path / ".env"

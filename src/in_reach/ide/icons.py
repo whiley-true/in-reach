@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, Qt
-from PyQt6.QtGui import QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QByteArray, QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 DEFAULT_COLOR = "#cccccc"
@@ -24,6 +24,14 @@ DEFAULT_COLOR = "#cccccc"
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _APP_ICON_FILE = "icon-bluegrey-small-windows.svg"
 _TOPBAR_ICON_FILE = "icon-bluegrey-micro.svg"
+# ReachVariantTool's own real icon (github.com/DavidJCobb/ReachVariantEditor, GPLv3) -- a raster
+# PNG, not traced into an SVG glyph like the codicon-derived entries below: there's no vector
+# source for it anywhere in that project (only this PNG and a matching .ico). A from-scratch line-
+# drawing SVG was tried in its place for a while, but per the user's own call, the sidebar's RVT
+# button is back to using this real icon -- QIcon handles a PNG exactly the same way it does the
+# SVGs above (app_icon()/topbar_icon()), so it stays consistent with them despite the different
+# source format.
+_RVT_ICON_FILE = "rvt-icon-128.png"
 
 _SVG_TEMPLATE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" fill="{{color}}">{path}</svg>'
 
@@ -56,6 +64,28 @@ _ICON_SOURCES = {
     "chevron_down": (  # codicon "chevron-down", used for the topbar text1/text2 dropdowns
         "0 0 16 16",
         '<path d="M7.976 10.072l4.357-4.357.62.618L8.284 11h-.618L3 6.333l.619-.618 4.357 4.357z"/>',
+    ),
+    "explorer": (  # codicon "files" (generic "browse a folder" glyph -- New/Load Project, Recent)
+        "0 0 24 24",
+        '<path d="M7.5 22.5H17.595C17.07 23.4 16.11 24 15 24H7.5C4.185 24 1.5 21.315 1.5 18V6C1.5 4.89 2.1 3.93 3 3.405V18C3 20.475 5.025 22.5 7.5 22.5ZM21 8.121V18C21 19.6545 19.6545 21 18 21H7.5C5.8455 21 4.5 19.6545 4.5 18V3C4.5 1.3455 5.8455 0 7.5 0H12.879C13.4715 0 14.0505 0.24 14.4705 0.6585L20.3415 6.5295C20.766 6.954 21 7.5195 21 8.121ZM13.5 6.75C13.5 7.164 13.8375 7.5 14.25 7.5H19.1895L13.5 1.8105V6.75ZM19.5 18V9H14.25C13.0095 9 12 7.9905 12 6.75V1.5H7.5C6.672 1.5 6 2.1735 6 3V18C6 18.8265 6.672 19.5 7.5 19.5H18C18.828 19.5 19.5 18.8265 19.5 18Z"/>',
+    ),
+    "dashboard": (  # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed
+        # to be a svg of a dashboard)" -- a plain 2x2 grid of panels, deliberately simple rather
+        # than traced from any icon set (same reasoning as "split"/"split_vertical" above).
+        "0 0 16 16",
+        '<path d="M1 2.5C1 1.67157 1.67157 1 2.5 1H6.5C7.32843 1 8 1.67157 8 2.5V6.5C8 7.32843 7.32843 8 6.5 8H2.5C1.67157 8 1 7.32843 1 6.5V2.5ZM2.5 2C2.22386 2 2 2.22386 2 2.5V6.5C2 6.77614 2.22386 7 2.5 7H6.5C6.77614 7 7 6.77614 7 6.5V2.5C7 2.22386 6.77614 2 6.5 2H2.5ZM9.5 1H13.5C14.3284 1 15 1.67157 15 2.5V4.5C15 5.32843 14.3284 6 13.5 6H9.5C8.67157 6 8 5.32843 8 4.5V2.5C8 1.67157 8.67157 1 9.5 1ZM9 2.5V4.5C9 4.77614 9.22386 5 9.5 5H13.5C13.7761 5 14 4.77614 14 4.5V2.5C14 2.22386 13.7761 2 13.5 2H9.5C9.22386 2 9 2.22386 9 2.5ZM9.5 8H13.5C14.3284 8 15 8.67157 15 9.5V13.5C15 14.3284 14.3284 15 13.5 15H9.5C8.67157 15 8 14.3284 8 13.5V9.5C8 8.67157 8.67157 8 9.5 8ZM9 9.5V13.5C9 13.7761 9.22386 14 9.5 14H13.5C13.7761 14 14 13.7761 14 13.5V9.5C14 9.22386 13.7761 9 13.5 9H9.5C9.22386 9 9 9.22386 9 9.5ZM1 9.5C1 8.67157 1.67157 8 2.5 8H6.5C7.32843 8 8 8.67157 8 9.5V13.5C8 14.3284 7.32843 15 6.5 15H2.5C1.67157 15 1 14.3284 1 13.5V9.5ZM2.5 9C2.22386 9 2 9.22386 2 9.5V13.5C2 13.7761 2.22386 14 2.5 14H6.5C6.77614 14 7 13.7761 7 13.5V9.5C7 9.22386 6.77614 9 6.5 9H2.5Z"/>',
+    ),
+    "stats": (  # a plain ascending bar-chart, same "deliberately simple, not traced" reasoning.
+        "0 0 16 16",
+        '<path d="M2 9H5V14H2V9ZM6.5 5H9.5V14H6.5V5ZM11 2H14V14H11V2Z"/>',
+    ),
+    "new_file": (  # codicon "new-file" (Welcome tab's "New Gametype" row)
+        "0 0 16 16",
+        '<path d="M5 14C4.448 14 4 13.552 4 13V3C4 2.448 4.448 2 5 2H8V4.5C8 5.328 8.672 6 9.5 6H12V6.025C12.344 6.056 12.677 6.121 13 6.213V5.414C13 5.016 12.842 4.635 12.561 4.353L9.647 1.439C9.366 1.158 8.984 1 8.586 1H5C3.895 1 3 1.895 3 3V13C3 14.105 3.895 15 5 15H7.261C7.008 14.693 6.791 14.357 6.607 14H5ZM9 2.207L11.793 5H9.5C9.224 5 9 4.776 9 4.5V2.207ZM11.5 7C9.015 7 7 9.015 7 11.5C7 13.985 9.015 16 11.5 16C13.985 16 16 13.985 16 11.5C16 9.015 13.985 7 11.5 7ZM14 12H12V14C12 14.276 11.776 14.5 11.5 14.5C11.224 14.5 11 14.276 11 14V12H9C8.724 12 8.5 11.776 8.5 11.5C8.5 11.224 8.724 11 9 11H11V9C11 8.724 11.224 8.5 11.5 8.5C11.776 8.5 12 8.724 12 9V11H14C14.276 11 14.5 11.224 14.5 11.5C14.5 11.776 14.276 12 14 12Z"/>',
+    ),
+    "tab_dirty": (  # plain filled dot -- shown instead of the close 'x' on an unsaved tab
+        "0 0 16 16",
+        '<circle cx="8" cy="8" r="3.5"/>',
     ),
     # Window controls: plain geometric shapes only (no glyph tracing needed at all).
     "win_minimize": (
@@ -104,3 +134,103 @@ def app_icon() -> QIcon:
 def topbar_icon() -> QIcon:
     """The small mark shown in the top bar's left corner, ahead of the dropdown menus."""
     return QIcon(str(_ASSETS_DIR / _TOPBAR_ICON_FILE))
+
+
+def rvt_icon(*, enabled: bool = True) -> QIcon:
+    """ReachVariantTool's own real icon -- the activity bar's "launch RVT" button.
+
+    Args:
+        enabled: When ``False`` (PROMPT.md: "rvt should not be launchable if no project is open
+            (the icon should have a dash in front of it)"), overlays a small "no entry"
+            circle-and-dash badge in the corner.
+    """
+    pixmap = QPixmap(str(_ASSETS_DIR / _RVT_ICON_FILE))
+    if enabled:
+        return QIcon(pixmap)
+    badged = _with_disabled_badge(pixmap)
+    icon = QIcon()
+    # A disabled QToolButton renders its icon's Disabled-mode pixmap, not Normal -- and by
+    # default Qt *auto-generates* that Disabled pixmap from Normal by desaturating/fading it,
+    # which was quietly washing the red badge out to near-invisibility. Registering the already-
+    # badged pixmap for both modes explicitly means the button shows this exact artwork either
+    # way, rather than Qt's own generated (and here, illegible) variant.
+    icon.addPixmap(badged, QIcon.Mode.Normal)
+    icon.addPixmap(badged, QIcon.Mode.Disabled)
+    return icon
+
+
+def _with_disabled_badge(pixmap: QPixmap) -> QPixmap:
+    """Overlays a small red circle-and-dash "blocked" badge in the bottom-right corner of
+    ``pixmap`` -- a copy, ``pixmap`` itself is left untouched."""
+    badged = QPixmap(pixmap)
+    size = min(badged.width(), badged.height())
+    badge_size = max(6, round(size * 0.55))
+    x = badged.width() - badge_size
+    y = badged.height() - badge_size
+
+    painter = QPainter(badged)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#e51400"))
+    painter.drawEllipse(x, y, badge_size, badge_size)
+    painter.setPen(QColor("#ffffff"))
+    pen = painter.pen()
+    pen.setWidthF(max(1.0, badge_size * 0.16))
+    painter.setPen(pen)
+    dash_margin = badge_size * 0.28
+    dash_y = y + badge_size / 2
+    painter.drawLine(round(x + dash_margin), round(dash_y), round(x + badge_size - dash_margin), round(dash_y))
+    painter.end()
+    return badged
+
+
+def apply_icon(color: str = DEFAULT_COLOR, size: int = 24, *, enabled: bool = True) -> QIcon:
+    """A checkmark glyph -- the activity bar's "Apply" button (PROMPT.md: "below the rvt icon we
+    want another icon for 'Apply'"). Rendered as a real Unicode checkmark character rather than
+    hand-traced SVG path data, same reasoning as :mod:`in_reach.ide.file_icons`'s own glyph icons
+    -- a mis-plotted checkmark polygon is an easy, easy-to-miss mistake; a font glyph can't be
+    wrong the same way.
+
+    Args:
+        enabled: When ``False`` (PROMPT.md: "please also use the red no entry icon (like you do
+            for rvt) when the apply button can not be pressed"), overlays the same "no entry"
+            circle-and-dash badge :func:`rvt_icon` uses, registered for both Normal and Disabled
+            icon modes for the same reason documented there.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    font = painter.font()
+    font.setPixelSize(round(size * 0.8))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor(color))
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "✓")
+    painter.end()
+    if enabled:
+        return QIcon(pixmap)
+    badged = _with_disabled_badge(pixmap)
+    icon = QIcon()
+    icon.addPixmap(badged, QIcon.Mode.Normal)
+    icon.addPixmap(badged, QIcon.Mode.Disabled)
+    return icon
+
+
+def lock_icon(size: int = 16) -> QIcon:
+    """A padlock glyph -- shown in the tab of a read-only, autogenerated file (PROMPT.md: "they
+    have a padlock symbol in the tab and cann[o]t be edited"). A real Unicode lock character, not
+    hand-traced SVG path data -- same reasoning as :func:`apply_icon`. Renders in its own full
+    color regardless of any painter pen color, same as an emoji anywhere else in this codebase (see
+    :mod:`in_reach.ide.file_icons`'s own glyph icons), so this takes no ``color`` argument.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    font = painter.font()
+    font.setPixelSize(round(size * 0.85))
+    painter.setFont(font)
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "🔒")
+    painter.end()
+    return QIcon(pixmap)

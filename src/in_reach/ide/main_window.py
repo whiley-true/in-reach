@@ -8,22 +8,31 @@ hand-implemented here rather than provided by the OS chrome -- see ``in_reach.id
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QMouseEvent, QPalette
+from pathlib import Path
+
+from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt
+from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from in_reach.app import env_file, new_project, open_projects, project, recent, rvt_launcher
 from in_reach.ide import icons, style
-from in_reach.ide.activity_bar import ActivityBar
+from in_reach.ide import zoom as zoom_module
+from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
+from in_reach.ide.explorer import ExplorerPanel
+from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
@@ -31,9 +40,17 @@ from in_reach.ide.window_resize import cursor_for_edges, resize_edges
 
 _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
-_TOPBAR_MARK_SIZE = 16
+_TOPBAR_MARK_SIZE = 22  # PROMPT.md: "increase the taskbar icon size by 10%" -- 16 -> 18 -> 20 -> 22
 _WINDOW_BUTTON_WIDTH = 46
-_SIDEBAR_MIN_WIDTH = 180
+#: PROMPT.md: "make sure file explorer panel expands by default so text is visible without
+#: contracting (at the moment we see Personal G..e Variants)" -- 180 let the sidebar (and with it,
+#: the "Personal Game/Map Variants" section headers) get squeezed narrow enough to middle-elide.
+#: Bumped once to 220 (still not quite enough headroom at DEFAULT_ZOOM's un-reduced 150%, per a
+#: later PROMPT.md: "the default file explorer panel [width] still needs to be slightly wider by
+#: default") and again here to 240 -- wide enough headroom over the headers' own sizeHint() that a
+#: narrow window has to shrink something else before this text does (see test_ide_smoke.py's own
+#: width-vs-sizeHint regression guard for the margin this was picked against).
+_SIDEBAR_MIN_WIDTH = 240
 
 
 class _DropdownButton(QToolButton):
@@ -48,6 +65,49 @@ class _DropdownButton(QToolButton):
         menu.addAction(f"{label} item 1")
         menu.addAction(f"{label} item 2")
         self.setMenu(menu)
+
+
+class _FileMenuButton(QToolButton):
+    """The top bar's "File" dropdown (PROMPT.md) -- every action delegates straight to a same-named
+    method on ``window``, so this class is purely the menu's own construction/wiring."""
+
+    def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._window = window
+        self.setText("File")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        menu.addAction("New File", window.new_file)
+        menu.addAction("New Window", window.open_new_window)
+        menu.addAction("Load Welcome Tab", window.open_welcome_tab)
+        menu.addAction("Open File...", window.open_file)
+        menu.addAction("Open Folder...", window.open_folder)
+        self.open_recent_menu = menu.addMenu("Open Recent")
+        self.open_recent_menu.aboutToShow.connect(self._populate_open_recent)
+        menu.addSeparator()
+        menu.addAction("Save", window.save_current)
+        menu.addAction("Save As...", window.save_current_as)
+        menu.addAction("Save All", window.save_all)
+        menu.addSeparator()
+        menu.addAction("Close Project", window.close_project)
+        menu.addAction("Close Editor", window.close_editor)
+        self.setMenu(menu)
+
+    def _populate_open_recent(self) -> None:
+        self.open_recent_menu.clear()
+        env_project_dir = project.get_project_dir(self._window.root_dir)
+        entries = recent.list_recent(env_project_dir)
+        if not entries:
+            placeholder = self.open_recent_menu.addAction("No Recent Projects")
+            placeholder.setEnabled(False)
+            return
+        for folder in entries:
+            label = new_project.read_project_title(folder)
+            self.open_recent_menu.addAction(
+                label, lambda _checked=False, f=folder: self._window.open_recent_project(f)
+            )
 
 
 class _TopBar(QWidget):
@@ -71,12 +131,13 @@ class _TopBar(QWidget):
         layout.setContentsMargins(8, 0, 0, 0)
         layout.setSpacing(4)
 
-        mark = QLabel()
-        mark.setPixmap(icons.topbar_icon().pixmap(_TOPBAR_MARK_SIZE, _TOPBAR_MARK_SIZE))
-        layout.addWidget(mark)
+        self.mark_label = QLabel()
+        self.set_mark_size(_TOPBAR_MARK_SIZE)
+        layout.addWidget(self.mark_label)
         layout.addSpacing(4)
 
-        layout.addWidget(_DropdownButton("text1"))
+        self.file_menu_button = _FileMenuButton(window)
+        layout.addWidget(self.file_menu_button)
         layout.addWidget(_DropdownButton("text2"))
         layout.addStretch(1)
 
@@ -117,6 +178,13 @@ class _TopBar(QWidget):
             self.maximize_button,
             self.close_button,
         )
+
+    def set_mark_size(self, size: int) -> None:
+        """Re-renders the top-left mark's pixmap at ``size`` -- unlike the toolbutton icons below
+        (baked fresh on every :meth:`MainWindow.refresh_icon_colors` call anyway, for their color),
+        this one is otherwise only ever set once at construction, so a zoom change would otherwise
+        leave it stuck at its original pixel size while every other icon in the row rescaled."""
+        self.mark_label.setPixmap(icons.topbar_icon().pixmap(size, size))
 
     def _edges_at(self, pos: QPoint) -> Qt.Edge:
         if self._window.isMaximized():
@@ -196,8 +264,14 @@ class _ResizableBody(QWidget):
 
 
 class MainWindow(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, root_dir: Path | None = None) -> None:
         super().__init__()
+        self.root_dir = root_dir or Path.cwd()
+        self._active_sidebar_view = DEFAULT_VIEW
+        # Qt never parents a top-level window to another -- without holding a reference somewhere,
+        # a window opened via File > New Window would be garbage-collected (and vanish) as soon as
+        # open_new_window() returns.
+        self._child_windows: list[MainWindow] = []
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
@@ -246,10 +320,43 @@ class MainWindow(QWidget):
         self._side_splitter.addWidget(self._main_splitter)
         self._side_splitter.setStretchFactor(0, 0)
         self._side_splitter.setStretchFactor(1, 1)
-        self._side_splitter.setSizes([220, 1000])
+        self._side_splitter.setSizes([_SIDEBAR_MIN_WIDTH, 1000])
 
-        self.main_panel = MainPanelArea()
+        self.main_panel = MainPanelArea(
+            root_dir=self.root_dir,
+            reveal_in_explorer=self._reveal_in_explorer_view,
+            on_project_opened=self._on_project_opened,
+            on_settings_changed=self._on_settings_changed,
+            on_file_saved=self._on_file_saved,
+        )
         self._main_splitter.addWidget(self.main_panel)
+
+        # PROMPT.md: "[generated files] should update when rvt saves" -- watches the active
+        # project's own freshly-compiled .bin, the same file launch_rvt() opens RVT against (see
+        # _rewatch_project_bin()) and re-syncs settings/ and build/'s *.autogenerated.json snapshot
+        # whenever RVT writes over it from outside this process.
+        self._bin_watcher = QFileSystemWatcher(self)
+        self._bin_watcher.fileChanged.connect(self._on_watched_bin_changed)
+
+        env_project_dir = project.get_project_dir(self.root_dir)
+        self.explorer_panel.set_env_project_dir(env_project_dir)
+        # PROMPT.md: multi-project tabs -- re-open every tab still on disk from last launch;
+        # PROJECT_DIR_KEY (the single most-recently-created project) is only a fallback for a
+        # .env from before OPEN_PROJECTS existed, so upgrading doesn't silently lose the one
+        # project that .env already knew about.
+        self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
+        self.explorer_panel.active_project_changed.connect(self._rewatch_project_bin)
+        self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
+        self.explorer_panel.open_projects_changed.connect(self._on_open_projects_changed)
+        restored = open_projects.list_open(env_project_dir)
+        if not restored:
+            already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
+            if already_open and Path(already_open).is_dir():
+                restored = [Path(already_open)]
+        for folder in restored:
+            self.explorer_panel.open_project(folder)
+        self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
+        self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
@@ -261,14 +368,42 @@ class MainWindow(QWidget):
         self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
 
-        self.activity_bar.search_toggled.connect(self._set_primary_sidebar_visible)
-        self.top_bar.sidebar_toggle.toggled.connect(self._set_primary_sidebar_visible)
+        self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
+        self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
+        self.activity_bar.launch_rvt_requested.connect(self.launch_rvt)
+        self.activity_bar.apply_requested.connect(self.apply_settings_changes)
+        self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
         self.top_bar.panel_toggle.toggled.connect(self._bottom_panel_card.setVisible)
         self.top_bar.minimize_button.clicked.connect(self.showMinimized)
         self.top_bar.maximize_button.clicked.connect(self.toggle_maximize)
         self.top_bar.close_button.clicked.connect(self.close)
 
+        self._zoom_in_shortcut = QShortcut(self)
+        # Both '+' (Ctrl+Shift+= on a US keyboard) and bare '=' (Ctrl+=, no shift needed) are bound,
+        # matching PROMPT.md's "Ctrl++" while still working without the shift key.
+        # QKeySequence.StandardKey.ZoomIn/ZoomOut are deliberately not used here -- on this Qt build
+        # they resolve to these exact same "Ctrl++"/"Ctrl+-" sequences, and a QShortcut carrying a
+        # *duplicate* key sequence in its own key list counts that key press as matching twice, which
+        # makes Qt treat it as ambiguous (the activatedAmbiguously signal, not activated) and the
+        # shortcut silently never fires -- that's what made Ctrl+- (only ever bound once, so every
+        # press was its own duplicate) never work at all.
+        self._zoom_in_shortcut.setKeys([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
+        self._zoom_in_shortcut.activated.connect(self._zoom_in)
+
+        self._zoom_out_shortcut = QShortcut(self)
+        self._zoom_out_shortcut.setKeys([QKeySequence("Ctrl+-")])
+        self._zoom_out_shortcut.activated.connect(self._zoom_out)
+
         self.refresh_icon_colors()
+        # The activity bar's own buttons are fixed pixel sizes, not derived from app.font() the
+        # way most of the rest of the UI is -- sync them to whatever zoom is already live on the
+        # QApplication at construction time (app.py applies it before building this window; a
+        # fresh QApplication with no zoom ever applied reads back as scale 1.0, matching this bar's
+        # own construction-time sizes exactly). PROMPT.md: "when zooming in and out the quicklaunch
+        # panel and its icons are not resizing".
+        app = QApplication.instance()
+        if app is not None:
+            self.activity_bar.refresh_icon_scale(zoom_module.current_scale(app))
 
     def _build_primary_sidebar(self) -> QWidget:
         sidebar = QWidget()
@@ -276,17 +411,135 @@ class MainWindow(QWidget):
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.addWidget(QLabel("Search"))
-        layout.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.explorer_panel = ExplorerPanel()
+        self.search_panel = SearchPanel()
+        self._sidebar_pages = {
+            "explorer": self.explorer_panel,
+            "search": self.search_panel,
+        }
+        self._sidebar_stack = QStackedWidget()
+        for page in self._sidebar_pages.values():
+            self._sidebar_stack.addWidget(page)
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages[DEFAULT_VIEW])
+        layout.addWidget(self._sidebar_stack)
         return sidebar
 
-    def _set_primary_sidebar_visible(self, visible: bool) -> None:
+    def _show_sidebar(self, visible: bool) -> None:
         self.primary_sidebar.setVisible(visible)
-        self.activity_bar.set_primary_sidebar_open(visible)
         self.top_bar.sidebar_toggle.blockSignals(True)
         self.top_bar.sidebar_toggle.setChecked(visible)
         self.top_bar.sidebar_toggle.blockSignals(False)
+
+    def _on_sidebar_view_selected(self, view: str) -> None:
+        self._active_sidebar_view = view
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages[view])
+        self._show_sidebar(True)
+
+    def _on_sidebar_view_collapsed(self) -> None:
+        self._show_sidebar(False)
+
+    def _on_sidebar_toggle_changed(self, visible: bool) -> None:
+        self._show_sidebar(visible)
+        self.activity_bar.set_active_view(self._active_sidebar_view if visible else None)
+
+    def _reveal_in_explorer_view(self) -> None:
+        """Switches the primary sidebar to the Explorer view and ensures it's open -- "Reveal in
+        Explorer View" (a tab's context menu) doesn't yet select the specific file within the tree,
+        just gets the tree itself on screen."""
+        self._active_sidebar_view = "explorer"
+        self._sidebar_stack.setCurrentWidget(self._sidebar_pages["explorer"])
+        self._show_sidebar(True)
+        self.activity_bar.set_active_view("explorer")
+
+    def _on_project_opened(self, folder: Path) -> None:
+        """Opens a newly created/loaded gametype project as an Explorer tab (PROMPT.md:
+        multi-project tabs), switching to it -- alongside whatever other projects are already
+        open, not replacing them. The Search panel follows along via
+        ``explorer_panel.active_project_changed`` (see ``__init__``), not called directly here."""
+        self.explorer_panel.open_project(folder)
+
+    def _on_open_projects_changed(self, folders: list[Path]) -> None:
+        """Persists the Explorer's current tab set so it comes back on the next launch (PROMPT.md:
+        multi-project tabs)."""
+        open_projects.set_open(project.get_project_dir(self.root_dir), folders)
+
+    def _on_settings_changed(self) -> None:
+        """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
+        Entries" on the Welcome tab might have changed either one."""
+        self.explorer_panel.refresh_personal_folders()
+
+    def _on_explorer_file_activated(self, path: Path) -> None:
+        """Opens a file clicked in any of the Explorer panel's three trees -- into the active
+        pane, same as "Open File" from the File menu (and, like that action, switching to the tab
+        instead of duplicating it if the file's already open there)."""
+        self.main_panel.active_pane.open_file(path)
+
+    def _on_search_file_activated(self, path: Path, line_number: int) -> None:
+        """Opens a search result -- into the active pane, jumping straight to the matched line."""
+        self.main_panel.active_pane.open_file_at_line(path, line_number)
+
+    # -- File menu ------------------------------------------------------------------------------
+
+    def new_file(self) -> None:
+        self.main_panel.new_tab_in(self.main_panel.active_pane)
+
+    def open_welcome_tab(self) -> None:
+        """"Load Welcome Tab" (PROMPT.md) -- brings the Welcome tab back into the active pane,
+        e.g. after it's been closed."""
+        self.main_panel.open_welcome_tab_in(self.main_panel.active_pane)
+
+    def open_new_window(self) -> None:
+        """"New Window" -- another MainWindow on the same project, independent of this one."""
+        window = MainWindow(root_dir=self.root_dir)
+        window.showMaximized()
+        self._child_windows.append(window)
+
+    def open_file(self) -> None:
+        chosen = self.ask_open_file()
+        if chosen:
+            self.main_panel.active_pane.open_file(Path(chosen))
+
+    def ask_open_file(self) -> str:
+        """Kept as its own method purely as a test seam (see ``tabs.py``'s ``_ask_save_path``)."""
+        chosen, _selected_filter = QFileDialog.getOpenFileName(self, "Open File", str(self.root_dir))
+        return chosen
+
+    def open_folder(self) -> None:
+        """"Open Folder" -- the same "adopt this folder as the current gametype project" action as
+        the Welcome tab's own "Load Project"."""
+        chosen = self.ask_open_folder()
+        if chosen:
+            self._adopt_project(Path(chosen))
+
+    def ask_open_folder(self) -> str:
+        return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
+
+    def open_recent_project(self, folder: Path) -> None:
+        self._adopt_project(folder)
+
+    def _adopt_project(self, folder: Path) -> None:
+        recent.add_recent(project.get_project_dir(self.root_dir), folder)
+        self._on_project_opened(folder)
+
+    def save_current(self) -> None:
+        self.main_panel.active_pane.save_current()
+
+    def save_current_as(self) -> None:
+        self.main_panel.active_pane.save_current_as()
+
+    def save_all(self) -> None:
+        self.main_panel.save_all()
+
+    def close_project(self) -> None:
+        """"Close Project" -- closes whichever project tab is currently active (PROMPT.md:
+        multi-project tabs; any other open tabs stay open). Doesn't touch any files, and doesn't
+        close this window (that's the title bar's own close button)."""
+        self.explorer_panel.close_active_project()
+
+    def close_editor(self) -> None:
+        self.main_panel.active_pane.close_current()
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -308,28 +561,265 @@ class MainWindow(QWidget):
         self.refresh_icon_colors()
 
     def refresh_icon_colors(self, color: str | None = None) -> None:
-        """Re-renders the top bar's icon buttons in ``color`` (or, if omitted, the current theme's
-        window-text color read back from the live QPalette).
+        """Re-renders the top bar's icons -- both the toggle/window-control buttons' color and, for
+        every icon in the row including the top-left mark, their pixel size against the current
+        zoom level.
 
-        Must be called again after a live theme switch (the first-run dialog's own theme buttons),
-        since :func:`in_reach.ide.icons.icon` bakes a fixed color into the pixmap rather than
-        tracking a live QPalette. Prefer :meth:`on_theme_applied` (which passes ``color``
-        explicitly) over relying on the palette read-back for that case -- ``QApplication.
-        setPalette()`` only actually updates this widget's own ``self.palette()`` once the
-        resulting ``PaletteChange`` event is processed on the event loop, which hasn't happened yet
-        by the time a theme-switch callback runs synchronously; reading it back here right after
-        switching would silently reuse the *previous* theme's color for one click.
+        ``color`` defaults to the current theme's window-text color, read back from the live
+        QPalette. Must be called again after a live theme switch (the first-run dialog's own theme
+        buttons) or a zoom change, since :func:`in_reach.ide.icons.icon` bakes a fixed color and
+        size into the pixmap rather than tracking either live. Prefer :meth:`on_theme_applied`
+        (which passes ``color`` explicitly) over relying on the palette read-back for that case --
+        ``QApplication.setPalette()`` only actually updates this widget's own ``self.palette()``
+        once the resulting ``PaletteChange`` event is processed on the event loop, which hasn't
+        happened yet by the time a theme-switch callback runs synchronously; reading it back here
+        right after switching would silently reuse the *previous* theme's color for one click.
         """
         if color is None:
             color = self.palette().color(QPalette.ColorRole.WindowText).name()
+        app = QApplication.instance()
+        scale = zoom_module.current_scale(app) if app is not None else 1.0
+        icon_size = round(_ICON_SIZE * scale)
         for button in self.top_bar.icon_buttons():
             icon_name = button.property("_icon_name")
             if button is self.top_bar.maximize_button:
                 icon_name = "win_restore" if self.isMaximized() else "win_maximize"
-            button.setIcon(icons.icon(icon_name, color=color, size=_ICON_SIZE))
+            button.setIcon(icons.icon(icon_name, color=color, size=icon_size))
+        self.top_bar.set_mark_size(round(_TOPBAR_MARK_SIZE * scale))
 
     def on_theme_applied(self, theme: Theme) -> None:
         """Refreshes every bit of chrome that a live theme switch doesn't drive automatically via
         QPalette alone: the top bar's icon colors and the status bar's accent color."""
         self.status_bar.set_color(theme.status_bar_color)
         self.refresh_icon_colors(theme.palette_colors.get("window_text"))
+
+    def _zoom_in(self) -> None:
+        self._adjust_zoom(zoom_module.ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._adjust_zoom(-zoom_module.ZOOM_STEP)
+
+    def _adjust_zoom(self, delta: float) -> None:
+        """Nudges the saved zoom level by ``delta``, applies it app-wide, and persists the result.
+
+        Re-reads the current level from the ``.env`` on every call rather than caching it on
+        ``self`` -- it's the same file :meth:`in_reach.ide.welcome.WelcomeTab.refresh` and every
+        other zoom-aware piece of the IDE would read, so there's only ever the one source of truth.
+        """
+        env_path = project.get_project_dir(self.root_dir) / ".env"
+        new_zoom = zoom_module.set_zoom(env_path, zoom_module.get_zoom(env_path) + delta)
+        app = QApplication.instance()
+        if app is not None:
+            zoom_module.apply_zoom(app, new_zoom)
+        # apply_zoom() only scales the live QFont -- every baked-pixmap icon (the top bar's mark
+        # and toggle/window-control buttons) needs telling separately, since a font change alone
+        # doesn't touch them.
+        self.refresh_icon_colors()
+        # Same reasoning as refresh_icon_colors() above -- the Explorer/Search panels' own text
+        # scale is a one-time snapshot of app.font(), not a live binding to it.
+        self.explorer_panel.refresh_font_scale()
+        self.search_panel.refresh_font_scale()
+        # PROMPT.md: "when zooming in and out the quicklaunch panel and its icons are not
+        # resizing" -- the activity bar's own buttons are fixed-pixel QToolButtons, same category
+        # of "doesn't just fall out of a font change" as the top bar icons refresh_icon_colors()
+        # already handles above.
+        if app is not None:
+            self.activity_bar.refresh_icon_scale(zoom_module.current_scale(app))
+
+    def launch_rvt(self) -> None:
+        """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
+        to a real executable shipped inside the package itself (see
+        :func:`in_reach.app.rvt_launcher.resolve_rvt_exe`) -- against the currently selected
+        project's own freshly-*compiled* ``.bin`` (see :func:`~in_reach.app.new_project.
+        compiled_variant_path`), if one is open and a compile has produced one (PROMPT.md: "when
+        rvt is opened, it opens the project in rvt").
+
+        PROMPT.md: "launching rvt should apply the present settings into the rvt window" -- runs
+        the same "Apply"/compile step the activity bar's own Apply button does first, so any
+        hand-edited ``settings/`` is baked into ``build/dist/*.bin`` before RVT ever opens (a
+        no-op if nothing's changed, see :func:`~in_reach.app.apply_settings.apply_settings_changes`).
+        Best-effort, unlike the Apply button's own click handler: a compile failure here is
+        swallowed rather than popping a blocking dialog on every RVT launch -- the Apply button
+        (and its own explicit failure dialog, PROMPT.md item 8) is the place a user goes to find
+        out *why* a compile failed; this is just "don't launch against visibly stale settings when
+        it happens to already compile cleanly."
+
+        PROMPT.md: "when clicking into rvt, it seems to be showing blank gametype and description
+        not the contents from the saved settings" -- this used to hand RVT
+        :func:`~in_reach.app.new_project.source_variant_path` instead, the project's frozen
+        original starting point (never touched again after creation), so RVT always opened onto
+        whatever that looked like, never anything the user had actually saved since.
+        """
+        folder = self.explorer_panel.current_folder
+        if folder is not None:
+            from in_reach.app import apply_settings
+
+            try:
+                apply_settings.apply_settings_changes(project.get_project_dir(self.root_dir), folder)
+            except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+                pass
+            self._refresh_apply_enabled(folder)
+            # A compile above may have just created build/dist/*.bin for the very first time (or
+            # overwritten it via a delete-then-recreate save, which silently drops an already-
+            # watched path -- see _on_watched_bin_changed()'s own tail) -- re-point the watcher at
+            # it either way, so a subsequent RVT save over *this exact file* (the one RVT is about
+            # to be opened against, below) is actually noticed.
+            self._rewatch_project_bin(folder)
+        try:
+            rvt_launcher.launch_rvt(self._current_project_bin())
+        except OSError as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")
+
+    def _current_project_bin(self) -> Path | None:
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return None
+        bin_path = new_project.compiled_variant_path(folder)
+        return bin_path if bin_path.is_file() else None
+
+    def _on_active_project_changed(self, folder: Path | None) -> None:
+        """PROMPT.md: "rvt should not be launchable if no project is open" -- and the Apply
+        button's own enabled state depends on the *active* project's own ``settings/`` too, so both
+        need re-checking on every tab switch, not just when a project first opens/closes."""
+        self.activity_bar.set_rvt_enabled(folder is not None)
+        self._refresh_apply_enabled(folder)
+
+    def _refresh_apply_enabled(self, folder: Path | None) -> None:
+        from in_reach.app import apply_settings
+
+        enabled = folder is not None and apply_settings.settings_have_unapplied_changes(folder)
+        self.activity_bar.set_apply_enabled(enabled)
+
+    def _on_file_saved(self, path: Path) -> None:
+        """Re-checks the Apply button's enabled state whenever a file is saved -- PROMPT.md: Apply
+        "should only be available if a user has made changes to files in settings". Cheap enough to
+        just always re-check on any save rather than filtering to paths under ``settings/`` first;
+        the check itself is a handful of small-file reads."""
+        self._refresh_apply_enabled(self.explorer_panel.current_folder)
+
+    def apply_settings_changes(self) -> None:
+        """"Apply" (the activity bar's own button) -- compiles the active project's ``settings/``
+        + ``script/output.txt`` into a real gametype ``.bin`` (PROMPT.md: "applying changes
+        should try and compile the jsons into a gametype"). A no-op with no project open (the
+        button is disabled then anyway, see :meth:`_on_active_project_changed`).
+
+        PROMPT.md: "i[f] it fails then dont allow application (raise errors in text window --
+        although hopefully our schema validaation should catch this)" -- a failed compile leaves
+        ``build/`` completely untouched (see
+        :func:`~in_reach.app.rvt.compile.run_compile`'s own docstring) and is surfaced here as a
+        critical message box listing every compiler error/warning/notice, same presentation as
+        this window's other blocking failures (e.g. a schema-invalid save, see
+        :meth:`~in_reach.ide.tabs.TabPane._save_tab`).
+        """
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import apply_settings
+
+        project_dir = project.get_project_dir(self.root_dir)
+        result = apply_settings.apply_settings_changes(project_dir, folder)
+        if not result.success:
+            from in_reach.app.rvt.compile import format_build_result
+
+            QMessageBox.critical(self, "in-reach", f"Couldn't apply settings:\n{format_build_result(result)}")
+            return
+        self._refresh_apply_enabled(folder)
+        self._sync_project_title(folder)
+        # A successful Apply may have just created build/dist/*.bin for the very first time --
+        # see launch_rvt()'s own matching call for why this needs (re-)arming here too, not just
+        # there (a project might never actually launch RVT, but its own edits should still resync
+        # if the user opens that compiled .bin directly some other way).
+        self._rewatch_project_bin(folder)
+        # PROMPT.md: "please also add a stats view into the dashboard" -- a successful Apply just
+        # regenerated build/stats.autogenerated.json too; the Dashboard's own Stats box only reads
+        # it on project-switch otherwise, so it'd stay stale until the user clicked away and back.
+        self.explorer_panel.refresh_stats()
+
+    def _sync_project_title(self, folder: Path) -> None:
+        """Brings every cached display of ``folder``'s own title -- the Explorer's own project
+        tab, any already-open editor's breadcrumb, the Welcome tab's Recent list -- back in sync
+        with ``settings/settings.json``'s own ``meta.title`` (PROMPT.md: "when a project name is
+        changed [via rvt or via apply settings.json change] - the project title should change in
+        the tabs and in the breadcrumb"; later: "it needs to be renamed in recents in dropdown and
+        in the welcome window").
+
+        There used to be a separate README.md carrying its own copy of the title that this had to
+        rewrite to match; now that :func:`~in_reach.app.new_project.read_project_title` reads
+        ``settings.json`` directly (PROMPT.md: "please remove the README.md file completely"),
+        ``settings.json`` is already the up-to-date, sole source of truth by the time this runs --
+        the resync/Apply that just finished is exactly what wrote it -- so this just needs to tell
+        every *cached* display to re-read it. Called unconditionally after a successful Apply (a
+        hand-edited ``settings.json``) and after a resync from a changed ``.bin`` (an RVT-driven
+        rename, now left free to flow through -- see
+        :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring); harmless to call when
+        nothing actually changed.
+        """
+        self.explorer_panel.refresh_project_title(folder)
+        self.main_panel.refresh_project_titles()
+
+    def _rewatch_project_bin(self, _folder: Path | None) -> None:
+        """Re-points :attr:`_bin_watcher` at the newly-active project's own freshly-*compiled*
+        ``.bin`` (see :func:`~in_reach.app.new_project.compiled_variant_path` -- the same file
+        :meth:`launch_rvt` opens RVT against, PROMPT.md: generated files "should update when rvt
+        saves") -- called on every ``explorer_panel.active_project_changed`` (switching tabs, or
+        closing the last one, always watches the right file rather than a stale one left over from
+        whichever project used to be active), and again after :meth:`launch_rvt`/
+        :meth:`apply_settings_changes` each successfully compile, since that may be the first time
+        this path actually exists to watch at all (or a fresh delete-then-recreate save that
+        dropped the previous watch -- see :meth:`_on_watched_bin_changed`'s own tail)."""
+        watched = self._bin_watcher.files()
+        if watched:
+            self._bin_watcher.removePaths(watched)
+        bin_path = self._current_project_bin()
+        if bin_path is not None:
+            self._bin_watcher.addPath(str(bin_path))
+
+    def _on_watched_bin_changed(self, path: str) -> None:
+        """Re-decompiles the watched ``.bin`` into ``settings/`` and ``build/``'s
+        ``*.autogenerated.json`` snapshot -- ``script/output.txt`` (the one genuinely
+        hand-editable thing left) is deliberately untouched, see
+        :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring. Best-effort: a
+        ``.bin`` RVT happened to be mid-write on, or any other decompile failure, is silently
+        swallowed rather than popping an error over a background sync the user didn't explicitly
+        ask for.
+
+        Title/description are deliberately *not* carried forward from the old ``settings.json``
+        here (unlike category, which isn't a ``.bin`` concept at all) -- PROMPT.md: "when a project
+        name is changed via rvt ... the project title should change in the tabs and in the
+        breadcrumb". Leaving them out of the call lets resync_from_bin's own freshly-extracted
+        values win, and :meth:`_sync_project_title` (below) is what actually refreshes the
+        Explorer's own project tab/an open editor's breadcrumb to match.
+
+        Args:
+            path: The changed file's path, as ``QFileSystemWatcher.fileChanged`` reports it.
+        """
+        bin_path = Path(path)
+        folder = self.explorer_panel.current_folder
+        if folder is not None and bin_path.is_file():
+            from in_reach.app import maps_io
+            from in_reach.app.rvt import settings_io
+            from in_reach.app.rvt.decompile import resync_from_bin
+
+            settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
+            category, category_icon = settings_io.load_meta_category(settings_path)
+            map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
+            try:
+                resync_from_bin(
+                    bin_path,
+                    folder,
+                    category=category,
+                    category_icon=category_icon,
+                    map_entries=map_entries,
+                )
+            except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+                pass
+            else:
+                self._sync_project_title(folder)
+                # PROMPT.md: "please also add a stats view into the dashboard" -- this resync just
+                # regenerated build/stats.autogenerated.json too.
+                self.explorer_panel.refresh_stats()
+        # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
+        # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so
+        # the *next* save still gets caught.
+        if bin_path.is_file() and str(bin_path) not in self._bin_watcher.files():
+            self._bin_watcher.addPath(str(bin_path))
