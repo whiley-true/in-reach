@@ -184,7 +184,7 @@ def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
     # there's always something for RVT to open and something that got decompiled into settings/.
     bin_path = new_project.source_variant_path(welcome.project_dir, folder)
     assert bin_path.is_file()
-    assert (folder / "script" / "game.txt").is_file()
+    assert (folder / "script" / "output.txt").is_file()
 
 
 def test_new_blank_firefight_project_starts_from_the_firefight_template_with_no_category(

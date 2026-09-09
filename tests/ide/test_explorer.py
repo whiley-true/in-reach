@@ -98,17 +98,17 @@ def test_clicking_a_file_in_the_script_section_emits_file_activated(
 ) -> None:
     folder = tmp_path / "project"
     (folder / "script").mkdir(parents=True)
-    game_txt = folder / "script" / "game.txt"
-    game_txt.write_text("-- script --", encoding="utf-8")
+    output_txt = folder / "script" / "output.txt"
+    output_txt.write_text("-- script --", encoding="utf-8")
     panel.open_project(folder)
     model = panel._script_model
     qtbot.waitUntil(lambda: model.rowCount(panel.script_tree.rootIndex()) > 0, timeout=2000)
 
     activated: list[Path] = []
     panel.file_activated.connect(activated.append)
-    panel.script_tree.clicked.emit(model.index(str(game_txt)))
+    panel.script_tree.clicked.emit(model.index(str(output_txt)))
 
-    assert activated == [game_txt]
+    assert activated == [output_txt]
 
 
 # -- the Stats box (PROMPT.md: "please also add a stats view into the dashboard") ----------------

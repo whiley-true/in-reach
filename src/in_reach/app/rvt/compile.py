@@ -1,5 +1,5 @@
 """Compiles a project's ``settings/`` (settings.json/script_settings.json/strings.json) and
-``script/game.txt`` into a real game variant (PROMPT.md: "applying changes should try and
+``script/output.txt`` into a real game variant (PROMPT.md: "applying changes should try and
 compile the jsons into a gametype and i[f] it fails then dont allow application (raise errors in
 text window - although hopefully our schema validation should catch this)").
 
@@ -86,7 +86,7 @@ def format_build_result(result: BuildResult) -> str:
 
 
 def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
-    """Builds ``folder``'s project from ``settings/``/``script/game.txt`` onto its fixed base
+    """Builds ``folder``'s project from ``settings/``/``script/output.txt`` onto its fixed base
     (see module docstring for what that base is and why).
 
     Args:

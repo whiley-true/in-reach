@@ -61,12 +61,12 @@ def test_search_project_skips_files_that_are_not_valid_utf8(tmp_path: Path) -> N
 def test_search_project_recurses_into_subfolders(tmp_path: Path) -> None:
     nested = tmp_path / "script"
     nested.mkdir(parents=True)
-    (nested / "game.txt").write_text("needle in a haystack\n", encoding="utf-8")
+    (nested / "output.txt").write_text("needle in a haystack\n", encoding="utf-8")
 
     matches = project_search.search_project(tmp_path, "needle")
 
     assert len(matches) == 1
-    assert matches[0].path == nested / "game.txt"
+    assert matches[0].path == nested / "output.txt"
 
 
 def test_search_project_empty_query_returns_nothing(tmp_path: Path) -> None:

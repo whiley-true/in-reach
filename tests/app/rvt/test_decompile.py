@@ -81,6 +81,29 @@ def test_decompile_into_project_writes_settings_strings_and_script(
     assert script_settings_json["scripted_options"][0]["name"] == "Round Length"
 
 
+def test_decompile_into_project_normalizes_crlf_script_text(tmp_path: Path, monkeypatch) -> None:
+    # decompile_script() itself returns "\r\n"-terminated lines (confirmed against the real native
+    # extension) -- Path.write_text()'s own default text-mode translation (every "\n" -> os.linesep)
+    # would otherwise double each one to "\r\r\n" on Windows, which reads back as two lines: a blank
+    # line after every real one (PROMPT.md: "when it is generated it is has alternating blanks
+    # lines"). Regression guard: the file on disk must read back with no such doubling regardless
+    # of what line ending the native decompiler used.
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    variant.decompile_script = lambda: "declare x\r\n\r\nfor each player do\r\n   x = 1\r\nend\r\n"
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.decompile_into_project(bin_path, folder)
+
+    script_text = (folder / "script" / decompile.SCRIPT_FILENAME).read_text(encoding="utf-8")
+    assert script_text == "declare x\n\nfor each player do\n   x = 1\nend\n"
+
+
 def test_decompile_into_project_also_writes_the_build_generated_snapshot(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -198,7 +221,7 @@ def test_decompile_into_project_writes_valid_maps_json_filtered_by_script_settin
 
 
 def test_resync_from_bin_updates_settings_and_build_without_touching_edit(tmp_path: Path, monkeypatch) -> None:
-    # PROMPT.md: "[generated files] should update when rvt saves" -- but script/game.txt is the
+    # PROMPT.md: "[generated files] should update when rvt saves" -- but script/output.txt is the
     # one hand-editable thing left, so a resync must never overwrite it.
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())

@@ -111,7 +111,7 @@ def test_run_compile_falls_back_to_the_packaged_blank_when_init_gametype_bin_is_
 @pytest.mark.skipif(not _JUGGERNAUT_BIN.is_file(), reason="fixture .bin not present")
 def test_run_compile_reports_a_real_megalo_syntax_error(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
-    (folder / "script" / "game.txt").write_text("this is not valid megalo script @#$%", encoding="utf-8")
+    (folder / "script" / "output.txt").write_text("this is not valid megalo script @#$%", encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 

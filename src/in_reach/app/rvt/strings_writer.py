@@ -40,8 +40,21 @@ from __future__ import annotations
 from .rvt_bridge import get_rvt
 
 
-def _apply_language_text(rvt, string_obj, text: dict) -> None:
-    for lang_name, value in text.items():
+def _coerce_localized_text(text: dict | str) -> dict:
+    """A bare string is shorthand for ``{"english": text}`` (see ``models/strings.py``'s own
+    ``LocalizedText``/``_coerce_localized_text`` docstring for why -- "most edits only care about
+    English and shouldn't need to learn the full per-language shape just to set one string").
+    :func:`~in_reach.app.rvt.strings_io.load_strings` validates that shorthand through the
+    ``StringsDocument`` model but deliberately hands back the *original* (uncoerced) dict, not the
+    model's own reshaping of it (see that function's own docstring) -- so a bare string can still
+    reach here unchanged, and needs the same coercion applied at the point of use instead."""
+    if isinstance(text, str):
+        return {"english": text}
+    return text
+
+
+def _apply_language_text(rvt, string_obj, text: dict | str) -> None:
+    for lang_name, value in _coerce_localized_text(text).items():
         if value is None:
             continue
         language = getattr(rvt.Language, lang_name)
@@ -75,6 +88,7 @@ def _apply_team_names(rvt, team_options, teams: list[dict]) -> None:
         name = entry.get("name")
         if name is None:
             continue
+        name = _coerce_localized_text(name)
         index = entry["index"]
         if index >= team_options.team_count:
             raise ValueError(f"teams[{index}] is out of range (there are {team_options.team_count} teams)")

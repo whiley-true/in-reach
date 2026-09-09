@@ -8,7 +8,7 @@ used to be a per-project ``README.md`` carrying a copy of it for display, remove
 copy anyway, see :func:`read_project_title`). Everything else about the shape is carried over from
 the v2 prototype's ``inreach init``, restructured per several PROMPT.md passes into:
 
-- ``script/game.txt`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
+- ``script/output.txt`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
   as a starting point, then never auto-touched again.
 - ``settings/`` -- a live, always-in-sync mirror of the source ``.bin``'s own settings (edited
   through RVT's own GUI, not by hand here) -- ``settings.json``/``script_settings.json``/
@@ -30,7 +30,7 @@ also where this project's own category/category_icon end up, stamped into the de
 ``settings.json`` itself (PROMPT.md: "we can get rid of user_settings.json ad move category and
 category_icon into settings.json" -- there's no separate ``user_settings.json`` file at all).
 ``settings/`` and ``build/`` are kept in sync with the ``.bin`` afterward too, whenever RVT saves
-over it (see ``MainWindow``'s own ``.bin``-file-watcher) -- only ``script/game.txt`` is ever left
+over it (see ``MainWindow``'s own ``.bin``-file-watcher) -- only ``script/output.txt`` is ever left
 alone once written.
 """
 
@@ -46,9 +46,10 @@ from in_reach.app.categories import EngineCategory, EngineIcon, default_icon_for
 
 PROJECT_DIR_KEY = "PROJECT_DIR"
 
-#: PROMPT.md: "rename edit to script: and then move script.txt to be script/game.txt" -- the one
-#: genuinely hand-editable thing in a project, a flat folder now rather than nested under a
-#: no-longer-meaningful "rvt" subdirectory.
+#: PROMPT.md: "rename edit to script: and then move script.txt to be script/game.txt" (later
+#: renamed again, PROMPT.md: "please rename game.txt to output.txt" -- see
+#: :data:`~in_reach.app.rvt.decompile.SCRIPT_FILENAME`) -- the one genuinely hand-editable thing in
+#: a project, a flat folder now rather than nested under a no-longer-meaningful "rvt" subdirectory.
 SCRIPT_DIRNAME = "script"
 SETTINGS_DIRNAME = "settings"
 #: PROMPT.md: "move settings/schemas into schemas" -- a project-root folder of its own, not nested

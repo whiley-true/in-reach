@@ -3,7 +3,7 @@ their views is ever active, switching the primary sidebar's content, VSCode-styl
 already-active one collapses the sidebar instead of switching -- a ReachVariantTool launcher icon
 below them (a plain action button, not a view -- it never affects which sidebar view is active),
 an "Apply" icon below that (PROMPT.md: compiles a project's hand-edited ``settings/*.json`` +
-``script/game.txt`` into a real gametype ``.bin`` -- see
+``script/output.txt`` into a real gametype ``.bin`` -- see
 ``MainWindow.apply_settings_changes()``), and a settings cog pinned at the bottom (a no-op for
 now).
 """
