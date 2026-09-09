@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "in-reach"
-version = "0.1.1"
+version = "0.2.0"
 description = "Python tooling and mini-IDE to help improve the Halo Reach scripting experience."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -14,10 +14,26 @@ dependencies = [
     "click==8.5.0",
     "python-dotenv==1.2.3",
     "tomlkit==0.15.1",
+    "PyQt6==6.11.0",
+    "pydantic==2.13.4",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2"]
+dev = ["pytest==8.4.2", "pytest-qt==4.5.0"]
 
 [project.scripts]
 in-reach = "in_reach.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+in_reach = [
+    ".in-reach/example.env",
+    "ide/themes/*.json",
+    "ide/assets/*.svg",
+    "ide/assets/*.png",
+    "app/rvt_tool/bin/**/*",
+    "app/rvt/native/**/*",
+    "app/blank_variants/*.bin",
+]
