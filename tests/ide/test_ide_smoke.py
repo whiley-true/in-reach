@@ -5,6 +5,7 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QTabWidget
 
+from in_reach.app.rvt import rvt_bridge
 from in_reach.ide import app as ide_app
 from in_reach.ide import icons, style, theme
 from in_reach.ide import zoom as zoom_module
@@ -14,6 +15,10 @@ from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_MIN_WIDTH, MainWindow
 from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 from in_reach.ide.welcome import WelcomeTab
+
+_NEEDS_NATIVE_RVT = pytest.mark.skipif(
+    not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform"
+)
 
 
 @pytest.fixture
@@ -1646,6 +1651,7 @@ def test_open_recent_project_menu_shows_a_placeholder_when_empty(project_window:
     assert actions[0].isEnabled() is False
 
 
+@_NEEDS_NATIVE_RVT
 def test_open_recent_project_menu_lists_recent_projects_by_title(
     project_window: MainWindow, tmp_path: Path
 ) -> None:

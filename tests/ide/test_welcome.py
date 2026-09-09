@@ -5,11 +5,16 @@ from PyQt6.QtWidgets import QDialog
 
 from in_reach.app import env_file, new_project, recent, system_verify
 from in_reach.app.categories import EngineCategory
+from in_reach.app.rvt import rvt_bridge
 from in_reach.app.system_verify import Outcome, VerifyRun
 from in_reach.ide.new_project_dialog import NewProjectDialog
 from in_reach.ide.settings_info_dialog import SettingsInfoDialog
 from in_reach.ide.verify_dialog import VerifyDialog
 from in_reach.ide.welcome import WelcomeTab
+
+_NEEDS_NATIVE_RVT = pytest.mark.skipif(
+    not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform"
+)
 
 _LOCALCONFIG = """
 "UserLocalConfigStore" { "friends" { "PersonaName" "{persona}" } }
@@ -156,6 +161,7 @@ def test_blank_and_load_are_always_available_and_pickle_import_is_stubbed(welcom
     assert welcome.import_pickle_button.isEnabled() is False
 
 
+@_NEEDS_NATIVE_RVT
 def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
     welcome: WelcomeTab, root_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +193,7 @@ def test_new_blank_project_scaffolds_a_folder_and_lands_in_recent(
     assert (folder / "script" / "output.txt").is_file()
 
 
+@_NEEDS_NATIVE_RVT
 def test_new_blank_firefight_project_starts_from_the_firefight_template_with_no_category(
     welcome: WelcomeTab, root_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

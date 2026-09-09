@@ -5,6 +5,16 @@ import pytest
 
 from in_reach.app import env_file, new_project
 from in_reach.app.categories import EngineCategory, EngineIcon
+from in_reach.app.rvt import rvt_bridge
+
+_JUGGERNAUT_BIN = Path(__file__).parent / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
+_NEEDS_NATIVE_RVT = pytest.mark.skipif(
+    not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform"
+)
+_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN = pytest.mark.skipif(
+    not (_JUGGERNAUT_BIN.is_file() and rvt_bridge.is_available()),
+    reason="fixture .bin not present, or native _reachvarianttool extension not available on this platform",
+)
 
 
 @pytest.fixture
@@ -73,6 +83,7 @@ def test_description_max_length_is_137_and_unrelated_to_windows_naming_rules() -
     assert new_project.MAX_DESCRIPTION_LENGTH == 137
 
 
+@_NEEDS_NATIVE_RVT
 def test_description_accepts_characters_a_windows_folder_name_would_reject(project_dir: Path) -> None:
     # PROMPT.md (historical): titles/descriptions no longer name the project folder, so they can
     # contain characters a Windows folder name would reject -- stamped into settings/settings.json
@@ -105,14 +116,13 @@ def test_create_gametype_project_copies_the_source_variant_in_named_after_the_id
     assert copied.read_bytes() == b"\x00variant"
 
 
+@_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN
 def test_create_gametype_project_decompiles_a_real_source_variant(
     project_dir: Path,
 ) -> None:
     """PROMPT.md: "when a project is selected the gametype is decompiled as in the previous
     repos" -- exercises the real bundled native extension against a real .bin fixture, not fakes."""
-    source = Path(__file__).parent / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
-
-    folder, warning = new_project.create_gametype_project(project_dir, "Slayer Plus", source_variant=source)
+    folder, warning = new_project.create_gametype_project(project_dir, "Slayer Plus", source_variant=_JUGGERNAUT_BIN)
 
     assert warning is None
     settings = json.loads((folder / "settings" / "settings.json").read_text(encoding="utf-8"))
@@ -157,9 +167,8 @@ def test_two_projects_created_in_a_row_get_different_ids(project_dir: Path) -> N
 
 # -- category / category_icon ------------------------------------------------------------------
 
-_JUGGERNAUT_BIN = Path(__file__).parent / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
 
-
+@_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN
 def test_create_gametype_project_defaults_to_no_category_and_no_warning(project_dir: Path) -> None:
     folder, warning = new_project.create_gametype_project(
         project_dir, "Blank", source_variant=_JUGGERNAUT_BIN
@@ -170,6 +179,7 @@ def test_create_gametype_project_defaults_to_no_category_and_no_warning(project_
     assert '"category": "none"' in document
 
 
+@_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN
 def test_create_gametype_project_writes_a_matching_category_and_icon_by_default(
     project_dir: Path,
 ) -> None:
@@ -183,6 +193,7 @@ def test_create_gametype_project_writes_a_matching_category_and_icon_by_default(
     assert '"category_icon": "slayer"' in document
 
 
+@_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN
 def test_create_gametype_project_reports_a_deliberate_mismatch(project_dir: Path) -> None:
     folder, warning = new_project.create_gametype_project(
         project_dir,
@@ -215,6 +226,7 @@ def test_create_gametype_project_with_no_source_variant_writes_no_settings_json(
 # -- title / description --------------------------------------------------------------------------
 
 
+@_NEEDS_NATIVE_RVT_AND_JUGGERNAUT_BIN
 def test_create_gametype_project_stamps_title_and_description_into_settings_json(
     project_dir: Path,
 ) -> None:
@@ -288,6 +300,7 @@ def test_two_projects_created_in_a_row_share_the_same_maps_json(
 # -- read_project_title -----------------------------------------------------------------------
 
 
+@_NEEDS_NATIVE_RVT
 def test_read_project_title_reads_back_settings_jsons_own_meta_title(project_dir: Path) -> None:
     # PROMPT.md: "please remove the README.md file completely" -- settings.json was always the
     # authoritative copy of the title (via a real decompile of the bundled blank template here).

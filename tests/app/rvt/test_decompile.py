@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from in_reach.app.rvt import decompile
+from in_reach.app.rvt import decompile, rvt_bridge
 from in_reach.app.rvt.models.game_settings import GameSettings, Meta, Multiplayer
 from in_reach.app.rvt.models.script_settings import ScriptedOption, ScriptSettings
 
 _FIXTURES_DIR = Path(__file__).parent / "resources"
+_JUGGERNAUT_BIN = _FIXTURES_DIR / "juggernaut" / "juggernaut.bin"
 
 
 class _FakeMultiplayer:
@@ -402,16 +403,17 @@ def test_decompile_into_project_handles_non_multiplayer_variants(tmp_path: Path,
     assert not (folder / "build" / decompile.GENERATED_STATS_FILENAME).exists()
 
 
-@pytest.mark.skipif(not (_FIXTURES_DIR / "juggernaut" / "juggernaut.bin").is_file(), reason="fixture .bin not present")
+@pytest.mark.skipif(
+    not (_JUGGERNAUT_BIN.is_file() and rvt_bridge.is_available()),
+    reason="fixture .bin not present, or native _reachvarianttool extension not available on this platform",
+)
 def test_decompile_into_project_against_a_real_bin(tmp_path: Path) -> None:
     """End-to-end against a real Reach .bin fixture (a saved Juggernaut variant) -- exercises the
     actual bundled native extension, not fakes."""
     folder = tmp_path / "project"
     folder.mkdir()
 
-    decompile.decompile_into_project(
-        _FIXTURES_DIR / "juggernaut" / "juggernaut.bin", folder, title="My Project Title"
-    )
+    decompile.decompile_into_project(_JUGGERNAUT_BIN, folder, title="My Project Title")
 
     settings_dir = folder / "settings"
     settings = json.loads((settings_dir / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))

@@ -6,9 +6,14 @@ import pytest
 from in_reach.app import new_project, project
 from in_reach.app.blank_variant import resolve_blank_variant
 from in_reach.app.rvt import compile as compile_module
+from in_reach.app.rvt import rvt_bridge
 
 _FIXTURES_DIR = Path(__file__).parent / "resources"
 _JUGGERNAUT_BIN = _FIXTURES_DIR / "juggernaut" / "juggernaut.bin"
+_NEEDS_NATIVE_RVT = pytest.mark.skipif(
+    not (_JUGGERNAUT_BIN.is_file() and rvt_bridge.is_available()),
+    reason="fixture .bin not present, or native _reachvarianttool extension not available on this platform",
+)
 
 
 def _project(tmp_path: Path, *, source_variant: Path) -> tuple[Path, Path]:
@@ -67,7 +72,7 @@ def test_format_build_result_includes_failure_and_every_message_category() -> No
 # -- real compiles against the bundled native extension ------------------------------------------
 
 
-@pytest.mark.skipif(not _JUGGERNAUT_BIN.is_file(), reason="fixture .bin not present")
+@_NEEDS_NATIVE_RVT
 def test_run_compile_against_a_real_bin(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
 
@@ -78,7 +83,7 @@ def test_run_compile_against_a_real_bin(tmp_path: Path) -> None:
     assert result.output_path.is_file()
 
 
-@pytest.mark.skipif(not _JUGGERNAUT_BIN.is_file(), reason="fixture .bin not present")
+@_NEEDS_NATIVE_RVT
 def test_run_compile_with_save_false_writes_nothing(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
     dist_dir = folder / "build" / "dist"
@@ -90,6 +95,7 @@ def test_run_compile_with_save_false_writes_nothing(tmp_path: Path) -> None:
     assert not dist_dir.exists() or not any(dist_dir.iterdir())
 
 
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
 def test_run_compile_falls_back_to_the_packaged_blank_when_init_gametype_bin_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -108,7 +114,7 @@ def test_run_compile_falls_back_to_the_packaged_blank_when_init_gametype_bin_is_
     assert result.output_path.is_file()
 
 
-@pytest.mark.skipif(not _JUGGERNAUT_BIN.is_file(), reason="fixture .bin not present")
+@_NEEDS_NATIVE_RVT
 def test_run_compile_reports_a_real_megalo_syntax_error(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
     (folder / "script" / "output.txt").write_text("this is not valid megalo script @#$%", encoding="utf-8")
@@ -120,6 +126,7 @@ def test_run_compile_reports_a_real_megalo_syntax_error(tmp_path: Path) -> None:
     assert not (folder / "build" / "dist" / f"{folder.name}.bin").exists()
 
 
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
 def test_run_compile_against_a_blank_firefight_project(tmp_path: Path) -> None:
     blank_ff = resolve_blank_variant(firefight=True)
     project_dir, folder = _project(tmp_path, source_variant=blank_ff)
@@ -132,7 +139,7 @@ def test_run_compile_against_a_blank_firefight_project(tmp_path: Path) -> None:
     assert result.output_path.is_file()
 
 
-@pytest.mark.skipif(not _JUGGERNAUT_BIN.is_file(), reason="fixture .bin not present")
+@_NEEDS_NATIVE_RVT
 def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(tmp_path: Path) -> None:
     """The strongest available correctness signal for settings_writer.py/strings_writer.py's own
     dozens of individual field-by-field writes: decompile a real fixture, compile that exact
