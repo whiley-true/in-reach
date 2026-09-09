@@ -172,16 +172,51 @@ def test_adjust_zoom_refreshes_explorer_and_search_panel_fonts(
     assert calls == ["explorer", "search"]
 
 
-def test_sidebar_default_width_fits_the_personal_variant_headers_without_eliding(
+def test_sidebar_default_width_fits_the_dashboard_headers_without_eliding(
     window: MainWindow,
 ) -> None:
     # Regression guard (PROMPT.md): the sidebar's default/minimum width used to be narrow enough
-    # that "Personal Game Variants"/"Personal Map Variants" middle-elided to "Personal G..e
-    # Variants". sizeHint() is exactly the width QToolButton itself says it needs to show the
-    # whole label unelided, so the sidebar must never be narrower than that.
+    # that a section header's own text middle-elided. sizeHint() is exactly the width QToolButton
+    # itself says it needs to show the whole label unelided, so the sidebar must never be narrower
+    # than that.
     assert window.primary_sidebar.width() == _SIDEBAR_MIN_WIDTH
-    for section in (window.explorer_panel.personal_variants_section, window.explorer_panel.personal_maps_section):
+    for section in (
+        window.explorer_panel.stats_section,
+        window.explorer_panel.settings_section,
+        window.explorer_panel.script_section,
+    ):
         assert section._toggle.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+
+
+def test_sidebar_default_width_fits_triple_digit_stats_counts_without_wrapping(
+    window: MainWindow,
+) -> None:
+    # Regression guard (PROMPT.md): "fix the panel icon width so that trigger conditions and
+    # actions should always display on the same line" -- sized against the widest this line is
+    # ever realistically going to get (see explorer.py's own ExplorerPanel.__init__ comment).
+    window.explorer_panel.stats_counts_label.setText("Triggers: 999   Conditions: 999   Actions: 999")
+
+    assert window.explorer_panel.stats_counts_label.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+
+
+def test_sidebar_max_width_is_a_quarter_of_the_screen(window: MainWindow) -> None:
+    # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width",
+    # later revised to 1/4 -- checked against the same constant main_window.py's own
+    # _build_primary_sidebar() divides by, not a hardcoded fraction, so a later revision to that
+    # constant doesn't leave this test silently checking the wrong ratio.
+    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION
+
+    screen = QApplication.primaryScreen()
+    assert window.primary_sidebar.maximumWidth() == screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION
+
+
+def test_dragging_the_sidebar_wider_than_the_max_width_is_clamped(window: MainWindow) -> None:
+    max_width = window.primary_sidebar.maximumWidth()
+
+    window._side_splitter.setSizes([max_width + 500, 1000])
+    QApplication.processEvents()
+
+    assert window.primary_sidebar.width() <= max_width
 
 
 def test_toggle_maximize_restores_to_half_screen_centered(window: MainWindow) -> None:
@@ -277,30 +312,6 @@ def test_activating_a_search_result_opens_the_file_at_that_line(
     assert pane.count() == before + 1
     editor = pane.widget(pane.currentIndex())
     assert editor.textCursor().blockNumber() == 1  # 0-based -- line 2
-
-
-def test_a_welcome_refresh_updates_the_explorer_panels_personal_folders(qtbot, tmp_path: Path) -> None:
-    from in_reach.app import env_file, system_verify
-
-    # A real (tmp_path-rooted) MainWindow rather than the shared `window` fixture -- its explorer
-    # panel's env project dir is resolved once, at construction, off root_dir, so a test that needs
-    # to write to that exact .env has to control root_dir from the start rather than reassigning it
-    # afterward.
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    (project_dir / ".env").write_text("", encoding="utf-8")
-    win = MainWindow(root_dir=tmp_path)
-    qtbot.addWidget(win)
-
-    variants = tmp_path / "variants"
-    variants.mkdir()
-    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
-
-    welcome = win.main_panel.panes[0].widget(0)
-    welcome.refresh()
-
-    body = win.explorer_panel.personal_variants_section.body
-    assert win.explorer_panel.personal_variants_tree.isVisibleTo(body) is True
 
 
 def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
@@ -725,12 +736,12 @@ def test_a_rename_refreshes_the_open_welcome_tabs_recent_list(
 ) -> None:
     # PROMPT.md: "when a project is renamed, it needs to be renamed in recents in dropdown and in
     # the welcome window".
-    from in_reach.app import recent
+    from in_reach.app import project, recent
     from in_reach.ide.welcome import WelcomeTab
 
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Old Title"}}', encoding="utf-8")
-    env_project_dir = project_window.explorer_panel._env_project_dir
+    env_project_dir = project.get_project_dir(project_window.root_dir)
     recent.add_recent(env_project_dir, folder)
 
     welcome = project_window.main_panel.active_pane.widget(0)
@@ -749,11 +760,11 @@ def test_a_rename_refreshes_the_open_welcome_tabs_recent_list(
 def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
-    from in_reach.app import recent
+    from in_reach.app import project, recent
 
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
-    env_project_dir = project_window.explorer_panel._env_project_dir
+    env_project_dir = project.get_project_dir(project_window.root_dir)
     recent.add_recent(env_project_dir, folder)
 
     project_window._sync_project_title(folder)
@@ -762,6 +773,41 @@ def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
     button._populate_open_recent()
     actions = button.open_recent_menu.actions()
     assert [a.text() for a in actions] == ["New Title"]
+
+
+def test_status_bar_shows_the_active_projects_title_and_folder_id(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please remove the dir location string (under the tabs section) and move that
+    # information into the bottom bar (in the centre): it should read test (uuid)"
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Slayer Plus"}}', encoding="utf-8")
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.status_bar._project_label.text() == f"Slayer Plus ({folder.name})"
+
+
+def test_status_bar_clears_the_project_label_once_the_project_closes(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    project_window._on_project_opened(folder)
+
+    project_window.close_project()
+
+    assert project_window.status_bar._project_label.text() == ""
+
+
+def test_status_bar_project_label_updates_after_a_rename(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Old Title"}}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+
+    (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
+    project_window._sync_project_title(folder)
+
+    assert project_window.status_bar._project_label.text() == f"New Title ({folder.name})"
 
 
 def test_clicking_apply_shows_an_error_dialog_and_leaves_the_button_alone_on_failure(
@@ -1400,6 +1446,19 @@ def test_status_bar_reports_no_edges_when_maximized(window: MainWindow) -> None:
     assert status_bar._edges_at(QPoint(0, status_bar.height() - 1)) == Qt.Edge(0)
 
 
+def test_status_bar_set_project_label_updates_and_clears_the_centered_text(window: MainWindow) -> None:
+    status_bar = window.status_bar
+    assert status_bar._project_label.text() == ""
+
+    status_bar.set_project_label("Slayer Plus (abcd1234)")
+
+    assert status_bar._project_label.text() == "Slayer Plus (abcd1234)"
+
+    status_bar.set_project_label("")
+
+    assert status_bar._project_label.text() == ""
+
+
 def test_wrap_tab_widget_builds_a_named_bordered_card(qtbot) -> None:
     tab_widget = QTabWidget()
     qtbot.addWidget(tab_widget)
@@ -1628,7 +1687,7 @@ def test_open_file_cancelled_adds_nothing(
 def test_open_folder_adopts_it_as_the_current_project(
     project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from in_reach.app import recent as recent_module
+    from in_reach.app import project, recent as recent_module
 
     folder = tmp_path / "SomeProject"
     folder.mkdir()
@@ -1637,7 +1696,7 @@ def test_open_folder_adopts_it_as_the_current_project(
     project_window.open_folder()
 
     assert Path(project_window.explorer_panel._settings_model.rootPath()) == folder / "settings"
-    env_project_dir = project_window.explorer_panel._env_project_dir
+    env_project_dir = project.get_project_dir(project_window.root_dir)
     assert recent_module.list_recent(env_project_dir) == [folder]
 
 
@@ -1656,9 +1715,10 @@ def test_open_recent_project_menu_lists_recent_projects_by_title(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     from in_reach.app import new_project as new_project_module
+    from in_reach.app import project as project_module
     from in_reach.app.blank_variant import resolve_blank_variant
 
-    env_project_dir = project_window.explorer_panel._env_project_dir
+    env_project_dir = project_module.get_project_dir(project_window.root_dir)
     folder, warning = new_project_module.create_gametype_project(
         env_project_dir, "Slayer Plus", source_variant=resolve_blank_variant(firefight=False)
     )

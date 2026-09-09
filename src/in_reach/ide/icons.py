@@ -69,11 +69,17 @@ _ICON_SOURCES = {
         "0 0 24 24",
         '<path d="M7.5 22.5H17.595C17.07 23.4 16.11 24 15 24H7.5C4.185 24 1.5 21.315 1.5 18V6C1.5 4.89 2.1 3.93 3 3.405V18C3 20.475 5.025 22.5 7.5 22.5ZM21 8.121V18C21 19.6545 19.6545 21 18 21H7.5C5.8455 21 4.5 19.6545 4.5 18V3C4.5 1.3455 5.8455 0 7.5 0H12.879C13.4715 0 14.0505 0.24 14.4705 0.6585L20.3415 6.5295C20.766 6.954 21 7.5195 21 8.121ZM13.5 6.75C13.5 7.164 13.8375 7.5 14.25 7.5H19.1895L13.5 1.8105V6.75ZM19.5 18V9H14.25C13.0095 9 12 7.9905 12 6.75V1.5H7.5C6.672 1.5 6 2.1735 6 3V18C6 18.8265 6.672 19.5 7.5 19.5H18C18.828 19.5 19.5 18.8265 19.5 18Z"/>',
     ),
-    "dashboard": (  # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed
-        # to be a svg of a dashboard)" -- a plain 2x2 grid of panels, deliberately simple rather
-        # than traced from any icon set (same reasoning as "split"/"split_vertical" above).
+    "dashboard": (  # PROMPT.md: "please update the icon/svg for dashboards to be something else
+        # instead -- maybe use a speedometer design instead" -- a simple gauge dial, needle, and
+        # pivot dot, deliberately simple rather than traced from any icon set (same reasoning as
+        # "split"/"split_vertical" above). fill="none"/explicit stroke on the dial and needle
+        # override the outer <svg>'s own fill="{color}" (see icon()'s own docstring), so those
+        # draw as strokes rather than solid-filled wedges.
         "0 0 16 16",
-        '<path d="M1 2.5C1 1.67157 1.67157 1 2.5 1H6.5C7.32843 1 8 1.67157 8 2.5V6.5C8 7.32843 7.32843 8 6.5 8H2.5C1.67157 8 1 7.32843 1 6.5V2.5ZM2.5 2C2.22386 2 2 2.22386 2 2.5V6.5C2 6.77614 2.22386 7 2.5 7H6.5C6.77614 7 7 6.77614 7 6.5V2.5C7 2.22386 6.77614 2 6.5 2H2.5ZM9.5 1H13.5C14.3284 1 15 1.67157 15 2.5V4.5C15 5.32843 14.3284 6 13.5 6H9.5C8.67157 6 8 5.32843 8 4.5V2.5C8 1.67157 8.67157 1 9.5 1ZM9 2.5V4.5C9 4.77614 9.22386 5 9.5 5H13.5C13.7761 5 14 4.77614 14 4.5V2.5C14 2.22386 13.7761 2 13.5 2H9.5C9.22386 2 9 2.22386 9 2.5ZM9.5 8H13.5C14.3284 8 15 8.67157 15 9.5V13.5C15 14.3284 14.3284 15 13.5 15H9.5C8.67157 15 8 14.3284 8 13.5V9.5C8 8.67157 8.67157 8 9.5 8ZM9 9.5V13.5C9 13.7761 9.22386 14 9.5 14H13.5C13.7761 14 14 13.7761 14 13.5V9.5C14 9.22386 13.7761 9 13.5 9H9.5C9.22386 9 9 9.22386 9 9.5ZM1 9.5C1 8.67157 1.67157 8 2.5 8H6.5C7.32843 8 8 8.67157 8 9.5V13.5C8 14.3284 7.32843 15 6.5 15H2.5C1.67157 15 1 14.3284 1 13.5V9.5ZM2.5 9C2.22386 9 2 9.22386 2 9.5V13.5C2 13.7761 2.22386 14 2.5 14H6.5C6.77614 14 7 13.7761 7 13.5V9.5C7 9.22386 6.77614 9 6.5 9H2.5Z"/>',
+        '<path d="M2.25 12.5A5.75 5.75 0 0 1 13.75 12.5" fill="none" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>'
+        '<path d="M8 12.5L11 8" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>'
+        '<circle cx="8" cy="12.5" r="1.2" fill="{color}"/>'
+        '<path d="M5.25 14.5H10.75" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>',
     ),
     "stats": (  # a plain ascending bar-chart, same "deliberately simple, not traced" reasoning.
         "0 0 16 16",

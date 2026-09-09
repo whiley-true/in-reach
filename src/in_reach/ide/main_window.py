@@ -48,9 +48,17 @@ _WINDOW_BUTTON_WIDTH = 46
 #: Bumped once to 220 (still not quite enough headroom at DEFAULT_ZOOM's un-reduced 150%, per a
 #: later PROMPT.md: "the default file explorer panel [width] still needs to be slightly wider by
 #: default") and again here to 240 -- wide enough headroom over the headers' own sizeHint() that a
-#: narrow window has to shrink something else before this text does (see test_ide_smoke.py's own
-#: width-vs-sizeHint regression guard for the margin this was picked against).
-_SIDEBAR_MIN_WIDTH = 240
+#: narrow window has to shrink something else before this text does -- and once more to 300
+#: (PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
+#: display on the same line") for the Dashboard's Stats box, whose "Triggers: N   Conditions: N
+#: Actions: N" line is wider than any section header ever was (see test_ide_smoke.py's own
+#: width-vs-sizeHint regression guard for the margin these were picked against).
+_SIDEBAR_MIN_WIDTH = 300
+
+#: PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width" --
+#: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
+#: primaryScreen() read, taken once at construction) as the window's own minimum-size floor below.
+_SIDEBAR_MAX_WIDTH_FRACTION = 4
 
 
 class _DropdownButton(QToolButton):
@@ -326,7 +334,6 @@ class MainWindow(QWidget):
             root_dir=self.root_dir,
             reveal_in_explorer=self._reveal_in_explorer_view,
             on_project_opened=self._on_project_opened,
-            on_settings_changed=self._on_settings_changed,
             on_file_saved=self._on_file_saved,
         )
         self._main_splitter.addWidget(self.main_panel)
@@ -339,7 +346,6 @@ class MainWindow(QWidget):
         self._bin_watcher.fileChanged.connect(self._on_watched_bin_changed)
 
         env_project_dir = project.get_project_dir(self.root_dir)
-        self.explorer_panel.set_env_project_dir(env_project_dir)
         # PROMPT.md: multi-project tabs -- re-open every tab still on disk from last launch;
         # PROJECT_DIR_KEY (the single most-recently-created project) is only a fallback for a
         # .env from before OPEN_PROJECTS existed, so upgrading doesn't silently lose the one
@@ -367,6 +373,14 @@ class MainWindow(QWidget):
 
         self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
+        # PROMPT.md: "please remove the dir location string (under the tabs section) and move
+        # that information into the bottom bar (in the centre)" -- connected here (after
+        # self.status_bar exists) rather than alongside the other explorer_panel.
+        # active_project_changed connections above, and primed once immediately since any restored
+        # tab from the last launch (the `for folder in restored` loop above) already fired that
+        # signal before this connection existed.
+        self.explorer_panel.active_project_changed.connect(self._update_status_project_label)
+        self._update_status_project_label(self.explorer_panel.current_folder)
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
@@ -408,6 +422,12 @@ class MainWindow(QWidget):
     def _build_primary_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen
+            # width" -- QSplitter enforces a pane's own setMaximumWidth() as a hard ceiling on how
+            # far the user can drag its handle, same as setMinimumWidth() already is for the floor.
+            sidebar.setMaximumWidth(screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
         layout = QVBoxLayout(sidebar)
@@ -465,10 +485,16 @@ class MainWindow(QWidget):
         multi-project tabs)."""
         open_projects.set_open(project.get_project_dir(self.root_dir), folders)
 
-    def _on_settings_changed(self) -> None:
-        """Re-resolves the Explorer panel's personal-folder sections after a verify run or "Clear
-        Entries" on the Welcome tab might have changed either one."""
-        self.explorer_panel.refresh_personal_folders()
+    def _update_status_project_label(self, folder: Path | None) -> None:
+        """Shows the active project as "<title> (<folder id>)" centered in the bottom status bar
+        (PROMPT.md), or clears it once no project is open. Also called from
+        :meth:`_sync_project_title`, since a rename changes the title half of that text without
+        the active project (and so without :attr:`~in_reach.ide.explorer.ExplorerPanel.
+        active_project_changed`) actually changing."""
+        if folder is None:
+            self.status_bar.set_project_label("")
+            return
+        self.status_bar.set_project_label(f"{new_project.read_project_title(folder)} ({folder.name})")
 
     def _on_explorer_file_activated(self, path: Path) -> None:
         """Opens a file clicked in any of the Explorer panel's three trees -- into the active
@@ -756,6 +782,7 @@ class MainWindow(QWidget):
         """
         self.explorer_panel.refresh_project_title(folder)
         self.main_panel.refresh_project_titles()
+        self._update_status_project_label(folder)
 
     def _rewatch_project_bin(self, _folder: Path | None) -> None:
         """Re-points :attr:`_bin_watcher` at the newly-active project's own freshly-*compiled*
