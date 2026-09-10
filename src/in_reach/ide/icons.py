@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtSvg import QSvgRenderer
 
 DEFAULT_COLOR = "#cccccc"
@@ -92,6 +92,28 @@ _ICON_SOURCES = {
     "tab_dirty": (  # plain filled dot -- shown instead of the close 'x' on an unsaved tab
         "0 0 16 16",
         '<circle cx="8" cy="8" r="3.5"/>',
+    ),
+    "bookshelf": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)"
+        # -- a thick shelf line plus five book "spines" of varying width/height (one tilted, as a
+        # leaning book), same "deliberately simple, not traced from any icon set" reasoning as
+        # "dashboard"/"stats" above -- varying width (not just height, unlike "stats"'s own plain
+        # ascending bar-chart) and the tilt are what keep this reading as books rather than a bar
+        # chart at a glance.
+        "0 0 16 16",
+        '<path d="M1.5 13.7H14.5" stroke="{color}" stroke-width="1.6" stroke-linecap="round"/>'
+        '<rect x="2.2" y="5" width="1.8" height="8.2" fill="{color}"/>'
+        '<rect x="4.4" y="7.2" width="2.6" height="6" fill="{color}"/>'
+        '<g transform="rotate(-8 9 9)"><rect x="7.6" y="4.2" width="1.9" height="9" fill="{color}"/></g>'
+        '<rect x="10.4" y="6" width="1.8" height="7.2" fill="{color}"/>'
+        '<rect x="12.6" y="8" width="1.6" height="5.2" fill="{color}"/>',
+    ),
+    "help": (  # PROMPT.md: "please then add a help (?) icon above the settings icon" -- a plain
+        # circled question mark, same "deliberately simple" reasoning as "bookshelf" above.
+        "0 0 16 16",
+        '<circle cx="8" cy="8" r="6.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        '<path d="M6.2 6.1c0-1.05.85-1.9 1.9-1.9s1.9.72 1.9 1.7c0 .95-.6 1.35-1.15 1.75'
+        '-.5.36-.75.6-.75 1.15" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
+        '<circle cx="8" cy="11.2" r="0.75" fill="{color}"/>',
     ),
     # Window controls: plain geometric shapes only (no glyph tracing needed at all).
     "win_minimize": (
@@ -191,36 +213,87 @@ def _with_disabled_badge(pixmap: QPixmap) -> QPixmap:
 
 
 def apply_icon(color: str = DEFAULT_COLOR, size: int = 24, *, enabled: bool = True) -> QIcon:
-    """A checkmark glyph -- the activity bar's "Apply" button (PROMPT.md: "below the rvt icon we
-    want another icon for 'Apply'"). Rendered as a real Unicode checkmark character rather than
-    hand-traced SVG path data, same reasoning as :mod:`in_reach.ide.file_icons`'s own glyph icons
-    -- a mis-plotted checkmark polygon is an easy, easy-to-miss mistake; a font glyph can't be
-    wrong the same way.
+    """A horizontal-arrow glyph -- the activity bar's own compile/"Apply" button (PROMPT.md:
+    "make it so the tick in the side panel was instead a horizontal arrow (representing
+    compiling)"; originally a checkmark, see git history for that). Deliberately simple geometric
+    shape, same "not traced from any icon set" reasoning as :data:`_ICON_SOURCES`'s own
+    "dashboard"/"stats"/"bookshelf" entries -- a mis-plotted polygon here is an easy, easy-to-miss
+    mistake, and there's no ready-made codicon for "compile".
 
     Args:
-        enabled: When ``False`` (PROMPT.md: "please also use the red no entry icon (like you do
-            for rvt) when the apply button can not be pressed"), overlays the same "no entry"
-            circle-and-dash badge :func:`rvt_icon` uses, registered for both Normal and Disabled
-            icon modes for the same reason documented there.
+        enabled: When ``True``, there's something pending to compile -- a plain arrow, no badge.
+            When ``False`` (PROMPT.md: "has small green tick (same size as the do not enter sign)
+            when there is nothing to compile"), overlays a small green tick badge instead of the
+            red "no entry" badge :func:`rvt_icon` uses -- "nothing to compile" is a fine/expected
+            state here, not a blocked one, so it reads as a positive confirmation rather than an
+            error. Registered for both Normal and Disabled icon modes, same reason as
+            :func:`rvt_icon`.
     """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    font = painter.font()
-    font.setPixelSize(round(size * 0.8))
-    font.setBold(True)
-    painter.setFont(font)
-    painter.setPen(QColor(color))
-    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "✓")
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.4, size * 0.09))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    mid_y = size * 0.5
+    painter.drawLine(QPointF(size * 0.18, mid_y), QPointF(size * 0.68, mid_y))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(size * 0.56, size * 0.28),
+                QPointF(size * 0.86, mid_y),
+                QPointF(size * 0.56, size * 0.72),
+            ]
+        )
+    )
     painter.end()
     if enabled:
         return QIcon(pixmap)
-    badged = _with_disabled_badge(pixmap)
+    badged = _with_done_badge(pixmap)
     icon = QIcon()
     icon.addPixmap(badged, QIcon.Mode.Normal)
     icon.addPixmap(badged, QIcon.Mode.Disabled)
     return icon
+
+
+def _with_done_badge(pixmap: QPixmap) -> QPixmap:
+    """Overlays a small green circle-and-tick "all done" badge in the bottom-right corner of
+    ``pixmap`` -- a copy, ``pixmap`` itself is left untouched. Same size/position as
+    :func:`_with_disabled_badge`'s own red "blocked" badge, just a different color/glyph for a
+    fine/expected state (PROMPT.md: "has small green tick (same size as the do not enter sign)")."""
+    badged = QPixmap(pixmap)
+    size = min(badged.width(), badged.height())
+    badge_size = max(6, round(size * 0.55))
+    x = badged.width() - badge_size
+    y = badged.height() - badge_size
+
+    painter = QPainter(badged)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#2ea043"))
+    painter.drawEllipse(x, y, badge_size, badge_size)
+    pen = QPen(QColor("#ffffff"))
+    pen.setWidthF(max(1.0, badge_size * 0.18))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    cx, cy = x + badge_size / 2, y + badge_size / 2
+    painter.drawPolyline(
+        QPolygonF(
+            [
+                QPointF(cx - badge_size * 0.22, cy),
+                QPointF(cx - badge_size * 0.04, cy + badge_size * 0.2),
+                QPointF(cx + badge_size * 0.26, cy - badge_size * 0.22),
+            ]
+        )
+    )
+    painter.end()
+    return badged
 
 
 def lock_icon(size: int = 16) -> QIcon:

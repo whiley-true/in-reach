@@ -435,7 +435,16 @@ def test_reveal_in_os_explorer_is_a_noop_without_a_path(
     assert calls == []
 
 
-def test_reveal_in_explorer_view_opens_and_switches_the_sidebar(window: MainWindow) -> None:
+def test_reveal_in_explorer_view_opens_and_switches_the_sidebar(qtbot, tmp_path: Path) -> None:
+    # A real, isolated root_dir (not the shared `window` fixture's) -- the sidebar's own
+    # view-toggle buttons are disabled with no project open (PROMPT.md: "if no project is loaded
+    # the panels cannot be expanded"), so this needs one open first to switch to Search at all.
+    window = MainWindow(root_dir=tmp_path)
+    qtbot.addWidget(window)
+    window.show()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    window._on_project_opened(folder)
     pane = window.main_panel.panes[0]
     window.activity_bar.search_button.click()
     assert window._sidebar_stack.currentWidget() is window._sidebar_pages["search"]
@@ -898,6 +907,117 @@ def test_open_file_switches_to_the_existing_tab_instead_of_duplicating_it(
 
     assert pane.count() == before
     assert pane.currentIndex() == first_index
+
+
+# -- anti-tab-sprawl reuse (PROMPT.md: "clicking on a file that is not open should only open a
+# new tab if the present tab has unsaved changes[;] otherwise the present tab should change to
+# the selected file") -----------------------------------------------------------------------------
+
+
+def test_open_file_replaces_the_current_clean_unpinned_tab_instead_of_adding_one(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    first_index = pane.currentIndex()
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before  # no new tab -- the current one was replaced in place
+    assert pane.currentIndex() == first_index
+    assert pane.tabText(first_index) == "second.txt"
+    assert pane.widget(first_index).toPlainText() == "second"
+    assert pane._tab_state_for(pane.widget(first_index)).path == second
+
+
+def test_open_file_does_not_replace_a_dirty_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    pane.widget(pane.currentIndex()).document().setModified(True)
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_does_not_replace_a_pinned_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    pane._toggle_pin(pane.currentIndex())
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_does_not_replace_the_welcome_tab_even_when_its_not_the_only_tab(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    welcome_index = pane.currentIndex()  # the Welcome tab -- the pane's only tab so far
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    pane.open_file(first)  # [Welcome, first.txt], current -> first.txt
+
+    pane.setCurrentIndex(welcome_index)
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(second)
+
+    assert pane.count() == 3
+    assert pane.tabText(0) == "Welcome"
+    assert pane.tabText(1) == "first.txt"
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_force_reload_rereads_an_already_open_files_content(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "output.txt"
+    source.write_text("v1", encoding="utf-8")
+    pane.open_file(source)
+    index = pane.currentIndex()
+    before = pane.count()
+
+    source.write_text("v2", encoding="utf-8")
+    pane.open_file(source, force_reload=True)
+
+    assert pane.count() == before  # switched to the existing tab, not duplicated
+    assert pane.currentIndex() == index
+    assert pane.widget(index).toPlainText() == "v2"
+
+
+def test_open_file_without_force_reload_leaves_an_already_open_tabs_content_stale(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "output.txt"
+    source.write_text("v1", encoding="utf-8")
+    pane.open_file(source)
+    index = pane.currentIndex()
+
+    source.write_text("v2", encoding="utf-8")
+    pane.open_file(source)
+
+    assert pane.widget(index).toPlainText() == "v1"
 
 
 def test_open_file_reports_an_unreadable_file_rather_than_raising(

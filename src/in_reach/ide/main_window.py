@@ -31,7 +31,9 @@ from in_reach.ide import icons, style
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
+from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
+from in_reach.ide.locations_panel import LocationsPanel
 from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
@@ -132,7 +134,11 @@ class _TopBar(QWidget):
         self._drag_offset: QPoint | None = None
         self.setFixedHeight(_TOP_BAR_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet("background-color: palette(window);")
+        self.setObjectName("topBar")
+        # A scoped selector, not a bare declaration -- see style.TOOLTIP_STYLE's own docstring for
+        # why a bare one here would otherwise quietly break every tooltip this bar's own buttons
+        # show (Minimize/Maximize/Close/Toggle Sidebar/Toggle Panel).
+        self.setStyleSheet("QWidget#topBar { background-color: palette(window); }")
         self.setMouseTracking(True)
 
         layout = QHBoxLayout(self)
@@ -276,6 +282,9 @@ class MainWindow(QWidget):
         super().__init__()
         self.root_dir = root_dir or Path.cwd()
         self._active_sidebar_view = DEFAULT_VIEW
+        # Tracks only the has-project/no-project transition (not which project) -- see
+        # _sync_project_dependent_views()'s own docstring for why.
+        self._had_project = False
         # Qt never parents a top-level window to another -- without holding a reference somewhere,
         # a window opened via File > New Window would be garbage-collected (and vanish) as soon as
         # open_new_window() returns.
@@ -309,7 +318,7 @@ class MainWindow(QWidget):
         body_layout.setSpacing(style.PANEL_GAP)
         outer.addWidget(body, 1)
 
-        self.activity_bar = ActivityBar()
+        self.activity_bar = ActivityBar(env_path=project.get_project_dir(self.root_dir) / ".env")
         body_layout.addWidget(self.activity_bar)
 
         self._side_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -353,6 +362,7 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
         self.explorer_panel.active_project_changed.connect(self._rewatch_project_bin)
         self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
+        self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
         self.explorer_panel.open_projects_changed.connect(self._on_open_projects_changed)
         restored = open_projects.list_open(env_project_dir)
         if not restored:
@@ -362,6 +372,8 @@ class MainWindow(QWidget):
         for folder in restored:
             self.explorer_panel.open_project(folder)
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
+        self.explorer_panel.export_requested.connect(self.export_rvt_file)
+        self.explorer_panel.view_output_requested.connect(self.view_output_txt)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
@@ -381,6 +393,9 @@ class MainWindow(QWidget):
         # signal before this connection existed.
         self.explorer_panel.active_project_changed.connect(self._update_status_project_label)
         self._update_status_project_label(self.explorer_panel.current_folder)
+        # Same priming reasoning as the status label just above -- a restored project (or the lack
+        # of one) already fired active_project_changed before this method's own connection existed.
+        self._sync_project_dependent_views(self.explorer_panel.current_folder)
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
@@ -429,14 +444,17 @@ class MainWindow(QWidget):
             # far the user can drag its handle, same as setMinimumWidth() already is for the floor.
             sidebar.setMaximumWidth(screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        sidebar.setObjectName("primarySidebar")
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.explorer_panel = ExplorerPanel()
         self.search_panel = SearchPanel()
+        self.locations_panel = LocationsPanel()
         self._sidebar_pages = {
             "explorer": self.explorer_panel,
+            "locations": self.locations_panel,
             "search": self.search_panel,
         }
         self._sidebar_stack = QStackedWidget()
@@ -542,6 +560,15 @@ class MainWindow(QWidget):
     def ask_open_folder(self) -> str:
         return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
 
+    def ask_export_path(self, default_path: Path) -> str:
+        """Kept as its own method purely as a test seam (same reasoning as ``ask_open_file``) --
+        "Export RVT File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's
+        own bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
+        chosen, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export RVT File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
+        )
+        return chosen
+
     def open_recent_project(self, folder: Path) -> None:
         self._adopt_project(folder)
 
@@ -645,6 +672,13 @@ class MainWindow(QWidget):
         # scale is a one-time snapshot of app.font(), not a live binding to it.
         self.explorer_panel.refresh_font_scale()
         self.search_panel.refresh_font_scale()
+        # Ditto for any already-open settings.json/script_settings.json/strings.json tab's own
+        # +10% (PROMPT.md) -- TextEditorWidget.refresh_font_scale()'s own docstring.
+        for pane in self.main_panel.panes:
+            for index in range(pane.count()):
+                widget = pane.widget(index)
+                if isinstance(widget, TextEditorWidget):
+                    widget.refresh_font_scale()
         # PROMPT.md: "when zooming in and out the quicklaunch panel and its icons are not
         # resizing" -- the activity bar's own buttons are fixed-pixel QToolButtons, same category
         # of "doesn't just fall out of a font change" as the top bar icons refresh_icon_colors()
@@ -710,6 +744,36 @@ class MainWindow(QWidget):
         self.activity_bar.set_rvt_enabled(folder is not None)
         self._refresh_apply_enabled(folder)
 
+    def _sync_project_dependent_views(self, folder: Path | None) -> None:
+        """PROMPT.md: "if no project is loaded the panels cannot be expanded" -- the Dashboard/
+        Locations/Search sidebar views have nothing but a "no project opened yet" placeholder to
+        show without one, so the primary sidebar is forced collapsed and all three of the activity
+        bar's own view-toggle buttons (plus the top bar's own sidebar toggle, the other way to open
+        it) are disabled whenever no project is open, re-enabled the moment one is.
+
+        Only reacts to the *has-a-project/has-none* transition, not to which project is active --
+        switching between two already-open project tabs re-fires ``active_project_changed`` too
+        (``folder`` going from one real path to another), which should leave the sidebar's current
+        open/collapsed state alone rather than force it back open on every tab switch. The one
+        exception is the moment a project first becomes available with none open before it (at
+        startup, or opening/creating the very first one) -- the panels were just unlocked, so this
+        reveals the Dashboard automatically rather than leaving the user to notice the
+        now-enabled icons themselves (matching this app's own prior default of always starting
+        with the sidebar open).
+        """
+        has_project = folder is not None
+        self.activity_bar.set_views_enabled(has_project)
+        self.top_bar.sidebar_toggle.setEnabled(has_project)
+        if not has_project:
+            self._show_sidebar(False)
+            self.activity_bar.set_active_view(None)
+        elif not self._had_project:
+            self._active_sidebar_view = DEFAULT_VIEW
+            self._sidebar_stack.setCurrentWidget(self._sidebar_pages[DEFAULT_VIEW])
+            self._show_sidebar(True)
+            self.activity_bar.set_active_view(DEFAULT_VIEW)
+        self._had_project = has_project
+
     def _refresh_apply_enabled(self, folder: Path | None) -> None:
         from in_reach.app import apply_settings
 
@@ -760,6 +824,69 @@ class MainWindow(QWidget):
         # regenerated build/stats.autogenerated.json too; the Dashboard's own Stats box only reads
         # it on project-switch otherwise, so it'd stay stale until the user clicked away and back.
         self.explorer_panel.refresh_stats()
+
+    def view_output_txt(self) -> None:
+        """"View Output.txt" (PROMPT.md, under the Dashboard's own project tabs) -- opens a
+        read-only, always-freshly-regenerated view of the active project's ``script/output.txt``
+        (see :func:`~in_reach.app.output_view.write_output_view`'s own docstring for why it's
+        regenerated on every click rather than kept continuously in sync). A no-op with no project
+        open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app.output_view import write_output_view
+
+        path = write_output_view(folder)
+        self.main_panel.active_pane.open_file(path, force_reload=True)
+
+    def export_rvt_file(self) -> None:
+        """"Export RVT File" (PROMPT.md, under the Dashboard's own project tabs) -- compiles the
+        active project the same way :meth:`apply_settings_changes` does, then a standard Save As
+        dialog lets the user save the result as either a full ``.bin`` (a plain copy of the
+        freshly-compiled variant) or RVT's own bare/script-only ``.mglo`` (PROMPT.md: "please check
+        old repos for guidance" -- ported from v2's own ``app/mglo.py``, see
+        :func:`~in_reach.app.rvt.mglo.write_mglo`'s own docstring). A no-op with no project open.
+        """
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import apply_settings
+
+        project_dir = project.get_project_dir(self.root_dir)
+        result = apply_settings.apply_settings_changes(project_dir, folder)
+        if not result.success:
+            from in_reach.app.rvt.compile import format_build_result
+
+            QMessageBox.critical(self, "in-reach", f"Couldn't compile before export:\n{format_build_result(result)}")
+            return
+        compiled = new_project.compiled_variant_path(folder)
+        if not compiled.is_file():
+            QMessageBox.critical(
+                self, "in-reach", "Nothing to export -- this gametype hasn't compiled successfully yet."
+            )
+            return
+
+        default_name = f"{new_project.read_project_title(folder)}.bin"
+        chosen = self.ask_export_path(compiled.parent / default_name)
+        if not chosen:
+            return
+        dest = Path(chosen)
+
+        if dest.suffix.lower() == ".mglo":
+            from in_reach.app.rvt.decompile import SCRIPT_FILENAME
+            from in_reach.app.rvt.mglo import write_mglo
+
+            script_path = folder / new_project.SCRIPT_DIRNAME / SCRIPT_FILENAME
+            if not write_mglo(compiled, script_path, dest):
+                QMessageBox.critical(self, "in-reach", f"Couldn't write {dest.name}.")
+            return
+
+        import shutil
+
+        try:
+            shutil.copyfile(compiled, dest)
+        except OSError as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't export {dest.name}:\n{exc}")
 
     def _sync_project_title(self, folder: Path) -> None:
         """Brings every cached display of ``folder``'s own title -- the Explorer's own project

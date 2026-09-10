@@ -1,19 +1,23 @@
 """The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): a
 tab per currently open gametype project (PROMPT.md: "multiple projects can be loaded ... have tabs
-for the different projects that then changes the project explorer below"), showing three boxes for
-it -- "Script"/"Settings" pointed at that project's own ``script/``/``settings/`` subfolders, and
-"Stats" summarizing its build's own space usage and string count (see
-:func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.strings_io.
-count_script_strings`). There used to be a sixth, generic "browse the whole project folder" tree
-too; PROMPT.md asked for it to go now that Script/Settings cover the two subfolders actually worth
-browsing by hand. The personal game/map variant folder trees that used to live here too (PROMPT.md:
-"remove the Personal Map and Game Variants sections for now, they will later go in their own
-sidepanel") are gone for now -- :mod:`in_reach.app.system_verify` still resolves those folders for
-the Welcome tab's own Verify System Settings flow, this panel just doesn't display them anymore.
+for the different projects that then changes the project explorer below"), a row of Export/View
+Output buttons right underneath those tabs, then two boxes for the active project -- "Settings"
+pointed at its own ``settings/`` subfolder, and "Stats" summarizing its build's own space usage and
+string count (see :func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.
+strings_io.count_script_strings`). There used to be a sixth, generic "browse the whole project
+folder" tree too; PROMPT.md asked for it to go now that Script/Settings cover the two subfolders
+actually worth browsing by hand -- and later, a "Script" quick-access box exactly like Settings'
+own, pointed at ``script/`` (whose only ever entry was ``output.txt``); PROMPT.md ("please also
+remove output from script") asked for that to go too, now that the button row's own "View
+Output.txt" is the supported way to look at it (see :meth:`ExplorerPanel.view_output_requested`).
+The personal game/map variant folder trees that used to live here too (PROMPT.md: "remove the
+Personal Map and Game Variants sections for now, they will later go in their own sidepanel") are
+gone for now -- :mod:`in_reach.app.system_verify` still resolves those folders for the Welcome
+tab's own Verify System Settings flow, this panel just doesn't display them anymore.
 
-Each tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk changes for
-free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the platform's
-own generic file icons.
+The Settings tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk
+changes for free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the
+platform's own generic file icons.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from PyQt6.QtGui import QFileSystemModel, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QProgressBar,
     QSizePolicy,
@@ -37,6 +42,7 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app import new_project
 from in_reach.app.rvt import settings_io, strings_io
+from in_reach.ide import style
 from in_reach.ide.file_icons import ExplorerIconProvider
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
@@ -112,6 +118,19 @@ _FLAT_PROGRESS_BAR_STYLE = (
     "QProgressBar::chunk { background-color: palette(highlight); }"
 )
 
+#: PROMPT.md: "please remove the bubble connecting the project dashboard buttons so they do not
+#: appear connected, and give them a background colour to make it clear they are buttons" -- the
+#: Export RVT File/View Output.txt row (see ExplorerPanel.__init__). Each button gets its own
+#: independent, clearly bounded box (never a shared border with its neighbor) with a real
+#: background fill, rather than the flat/borderless look a plain QToolButton reads as against this
+#: panel's own palette(base) background.
+_DASHBOARD_BUTTON_STYLE = (
+    "QToolButton { background-color: palette(button); border: 1px solid palette(mid);"
+    " border-radius: 4px; padding: 4px 10px; }"
+    "QToolButton:hover { background-color: palette(light); }"
+    "QToolButton:pressed { background-color: palette(mid); }"
+)
+
 
 class _CollapsibleSection(QWidget):
     """A header (an arrow + title, click to toggle) above a divider line and a body widget that
@@ -179,6 +198,12 @@ class ExplorerPanel(QWidget):
     #: changing which one is active.
     open_projects_changed = pyqtSignal(list)
 
+    #: PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File (on
+    #: the left) and on the right: View Output.txt" -- MainWindow owns what each button actually
+    #: does (compiling + a save-as dialog; regenerating and opening the locked output view).
+    export_requested = pyqtSignal()
+    view_output_requested = pyqtSignal()
+
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
     TEXT_SCALE = 1.1
@@ -202,14 +227,55 @@ class ExplorerPanel(QWidget):
         #: from its own settings.json (see :func:`~in_reach.app.new_project.read_project_title`),
         #: same as the Welcome tab's Recent list -- via :meth:`open_project`/:meth:`close_project`,
         #: not touched directly. Hidden whenever no project is open.
+        #:
+        #: PROMPT.md: "please make the project tabs function and look like the primary panel
+        #: tabs" -- the same editor-style QSS (:data:`~in_reach.ide.style.MAIN_TAB_STYLE`) the main
+        #: panel's own tab strips use, plus the same document-mode/no-base-line chrome suppression
+        #: (see :class:`~in_reach.ide.tabs.TabPane`'s own comment on why those two calls are needed
+        #: alongside the QSS, not just the QSS alone) and real drag-to-reorder.
         self.project_tabs = QTabBar()
         self.project_tabs.setTabsClosable(True)
         self.project_tabs.setExpanding(False)
         self.project_tabs.setUsesScrollButtons(True)
+        self.project_tabs.setMovable(True)
+        self.project_tabs.setDocumentMode(True)
+        self.project_tabs.setDrawBase(False)
+        self.project_tabs.setStyleSheet(style.MAIN_TAB_STYLE)
         self.project_tabs.hide()
         self.project_tabs.currentChanged.connect(self._on_tab_changed)
         self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        # A drag-reorder doesn't go through open_project()/close_project(), so it needs its own
+        # explicit ping to keep MainWindow's own persisted tab order (open_projects_changed ->
+        # open_projects.set_open()) in sync with what the user just dragged.
+        self.project_tabs.tabMoved.connect(lambda *_args: self.open_projects_changed.emit(self.open_projects))
         layout.addWidget(self.project_tabs)
+
+        # PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File
+        # (on the left) and on the right: View Output.txt" -- hidden along with the rest of the
+        # active-project chrome whenever no project is open, see _activate().
+        button_row = QWidget()
+        button_row_layout = QHBoxLayout(button_row)
+        button_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.export_button = QToolButton()
+        self.export_button.setText("Export RVT File")
+        self.export_button.setToolTip("Compile and save this gametype as a .bin or .mglo file")
+        self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_button.setAutoRaise(False)
+        self.export_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.export_button.clicked.connect(self.export_requested.emit)
+        button_row_layout.addWidget(self.export_button)
+        button_row_layout.addStretch(1)
+        self.view_output_button = QToolButton()
+        self.view_output_button.setText("View Output.txt")
+        self.view_output_button.setToolTip("Open a read-only view of this project's compiled Megalo script")
+        self.view_output_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_output_button.setAutoRaise(False)
+        self.view_output_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.view_output_button.clicked.connect(self.view_output_requested.emit)
+        button_row_layout.addWidget(self.view_output_button)
+        self.button_row = button_row
+        self.button_row.hide()
+        layout.addWidget(self.button_row)
 
         self._no_project_label = QLabel(_NO_PROJECT_TEXT)
         self._no_project_label.setWordWrap(True)
@@ -276,18 +342,11 @@ class ExplorerPanel(QWidget):
         self.settings_section.hide()
         layout.addWidget(self.settings_section)
 
-        self.script_tree, self._script_model = _new_tree()
-        self.script_section = _CollapsibleSection("Script", self.script_tree, collapsed=False)
-        self.script_section.hide()
-        layout.addWidget(self.script_section)
-
         layout.addStretch(1)
 
-        for tree, model in (
-            (self.script_tree, self._script_model),
-            (self.settings_tree, self._settings_model),
-        ):
-            tree.clicked.connect(lambda index, m=model: self._on_tree_clicked(m, index))
+        self.settings_tree.clicked.connect(
+            lambda index: self._on_tree_clicked(self._settings_model, index)
+        )
 
         self.refresh_font_scale()
 
@@ -310,12 +369,10 @@ class ExplorerPanel(QWidget):
 
         header_font = QFont(font)
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
-        self.script_section.set_header_font(header_font)
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
 
         _cap_tree_rows(self.settings_tree, 3)  # settings/settings.json, script_settings.json, strings.json
-        _cap_tree_rows(self.script_tree, 1)  # script/output.txt
 
     def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
         if not index.isValid() or model.isDir(index):
@@ -403,11 +460,10 @@ class ExplorerPanel(QWidget):
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
         self.project_tabs.setVisible(self.project_tabs.count() > 0)
+        self.button_row.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
-        self.script_section.setVisible(has_project)
         self.settings_section.setVisible(has_project)
-        _point_tree_at(self.script_tree, self._script_model, self._ensure_subdir(folder, new_project.SCRIPT_DIRNAME))
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
         )

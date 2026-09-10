@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QApplication
@@ -628,3 +629,73 @@ def test_dragging_the_minimap_scrolls_the_editor_further(qtbot) -> None:
     )
     editor._minimap.mouseReleaseEvent(release)
     assert editor._minimap._drag_anchor is None
+
+
+# -- +10% font for the 3 settings json files (PROMPT.md: "please increase the font size of the 3
+# setting json files by 10%") ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["settings.json", "script_settings.json", "strings.json"])
+def test_opening_a_settings_json_file_enlarges_its_own_font(qtbot, tmp_path, name: str) -> None:
+    path = tmp_path / name
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size * 1.1)
+
+
+def test_opening_an_unrelated_json_file_does_not_enlarge_its_font(qtbot, tmp_path) -> None:
+    path = tmp_path / "output.txt"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size)
+
+
+def test_an_untitled_tab_with_no_path_is_not_enlarged(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size)
+
+
+def test_save_as_onto_a_settings_json_name_enlarges_the_font(qtbot, tmp_path) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    editor.set_path(tmp_path / "settings.json")
+
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size * 1.1)
+
+
+def test_save_as_off_a_settings_json_name_shrinks_the_font_back(qtbot, tmp_path) -> None:
+    editor = TextEditorWidget(path=tmp_path / "settings.json")
+    qtbot.addWidget(editor)
+
+    editor.set_path(tmp_path / "renamed.txt")
+
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size)
+
+
+def test_refresh_font_scale_tracks_a_later_app_font_change(qtbot, tmp_path) -> None:
+    from PyQt6.QtGui import QFont
+
+    editor = TextEditorWidget(path=tmp_path / "strings.json")
+    qtbot.addWidget(editor)
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 2)
+        app.setFont(bigger)
+
+        editor.refresh_font_scale()
+
+        assert editor.font().pointSizeF() == pytest.approx(bigger.pointSizeF() * 1.1)
+    finally:
+        app.setFont(original)

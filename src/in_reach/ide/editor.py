@@ -28,6 +28,7 @@ from pathlib import Path
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
@@ -39,7 +40,7 @@ from PyQt6.QtGui import (
     QTextCharFormat,
     QTextCursor,
 )
-from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QTextEdit, QToolTip, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QTextEdit, QToolTip, QWidget
 
 from in_reach.ide import schema_check
 from in_reach.ide.code_folding import compute_fold_ranges
@@ -61,6 +62,14 @@ _ERROR_COLOR = "#f14c4c"
 #: Spaces per indent level for the vertical guide lines -- matches this project's own generated
 #: ``.json`` files (``json.dump(..., indent=2)``) and ``vs_sample.png`` itself.
 _INDENT_SIZE = 2
+
+#: PROMPT.md: "please increase the font size of the 3 setting json files by 10%" -- the project's
+#: own hand-relevant settings files (see :mod:`in_reach.app.new_project`'s own module docstring:
+#: ``settings/settings.json``/``script_settings.json``/``strings.json``), read 10% larger than
+#: every other editor tab, same "+N% on top of the live app font" pattern as
+#: :data:`~in_reach.ide.explorer.ExplorerPanel.TEXT_SCALE`.
+ENLARGED_FILENAMES = frozenset({"settings.json", "script_settings.json", "strings.json"})
+FONT_SCALE = 1.1
 
 
 def _indent_level(text: str) -> int:
@@ -329,11 +338,32 @@ class TextEditorWidget(QPlainTextEdit):
         if path is not None and path.suffix.lower() == ".json":
             base_color = self.palette().color(QPalette.ColorRole.Base)
             self._highlighter = JsonSyntaxHighlighter(self.document(), base_color=base_color)
+        self.refresh_font_scale()
         # Also re-derives fold ranges, not just the breadcrumb -- matters for the split-pane
         # duplicate path (TabPane._duplicate_current_tab), which calls this *after* swapping in
         # the shared document setDocument() points at, whose content this editor hasn't seen a
         # textChanged for yet.
         self._on_text_changed()
+
+    def refresh_font_scale(self) -> None:
+        """(Re-)applies :data:`FONT_SCALE` on top of the app's current (zoom-scaled) font for
+        :data:`ENLARGED_FILENAMES` specifically -- every other file just gets the plain app font.
+        Called from :meth:`set_path` (a fresh open, or a Save As landing on/off one of those
+        names) and again after a live zoom change (see
+        ``MainWindow._adjust_zoom()``) -- like :meth:`~in_reach.ide.explorer.ExplorerPanel.
+        refresh_font_scale`, setting a font directly is a one-time snapshot, not a live binding to
+        ``QApplication.font()``, so it goes stale after a zoom change unless this runs again.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        base_font = app.font()
+        if self.path is not None and self.path.name in ENLARGED_FILENAMES:
+            font = QFont(base_font)
+            font.setPointSizeF(font.pointSizeF() * FONT_SCALE)
+            self.setFont(font)
+        else:
+            self.setFont(base_font)
 
     def refresh_project_title(self) -> None:
         """Re-reads this tab's own ancestor project's title (see :func:`_find_project_title`) and

@@ -390,13 +390,33 @@ class TabPane(QTabWidget):
             if _is_modified(widget) and self._tab_state_for(widget).path is not None:
                 self._save_tab(index)
 
-    def open_file(self, path: Path) -> None:
+    def open_file(self, path: Path, *, force_reload: bool = False) -> None:
         """"Open File" (the File menu, and clicking a file in the Explorer panel) -- adds ``path``
         as a new tab, reading its content in. Switches to the existing tab instead of duplicating
-        it if ``path`` is already open in this pane."""
+        it if ``path`` is already open in this pane.
+
+        PROMPT.md: "with the exception of pinned tabs and the welcome page tab: clicking on a file
+        that is not open should only open a new tab if the present tab has unsaved changes[;]
+        otherwise the present tab should change to the selected file (this is to prevent too many
+        tabs from spawning)" -- when ``path`` isn't already open anywhere in this pane, the current
+        tab's own content is silently replaced instead of adding a new tab alongside it, unless
+        that current tab is pinned, is the Welcome tab, or has unsaved changes (see
+        :meth:`_reusable_tab_index`).
+
+        Args:
+            path: The file to open.
+            force_reload: Re-reads ``path`` from disk and refreshes the already-open tab's content
+                even if it's already open (the default, ``False``, just switches to it, leaving
+                whatever was loaded when it was first opened) -- for a file that's meant to reflect
+                its current on-disk content every time it's (re-)opened, e.g. the Dashboard's own
+                "View Output.txt" button, which regenerates the file it opens on every click (see
+                :meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`).
+        """
         for index in range(self.count()):
             if self._tab_state_for(self.widget(index)).path == path:
                 self.setCurrentIndex(index)
+                if force_reload:
+                    self._reload_tab(index)
                 return
         try:
             text = path.read_text(encoding="utf-8")
@@ -409,7 +429,7 @@ class TabPane(QTabWidget):
         if path.suffix.lower() == ".md":
             widget: QWidget = MarkdownPreviewWidget(path=path)
             widget.setMarkdown(text)
-            new_index = self.addTab(widget, path.name)
+            tab_icon = None
         else:
             editor = TextEditorWidget(path=path)
             editor.setPlainText(text)
@@ -423,13 +443,60 @@ class TabPane(QTabWidget):
             # PROMPT.md: "they have a padlock symbol in the tab" -- a generated file's read-only
             # status never changes for the tab's own lifetime, unlike the dirty-state icon on its
             # close button, so this is set once here rather than needing its own refresh hook.
-            if generated:
-                new_index = self.addTab(editor, icons.lock_icon(), path.name)
-            else:
-                new_index = self.addTab(editor, path.name)
+            tab_icon = icons.lock_icon() if generated else None
             widget = editor
+
+        reuse_index = self._reusable_tab_index()
+        if reuse_index is not None:
+            old_widget = self.widget(reuse_index)
+            self.removeTab(reuse_index)
+            self._tab_state.pop(old_widget, None)
+            old_widget.deleteLater()
+            if tab_icon is not None:
+                new_index = self.insertTab(reuse_index, widget, tab_icon, path.name)
+            else:
+                new_index = self.insertTab(reuse_index, widget, path.name)
+        elif tab_icon is not None:
+            new_index = self.addTab(widget, tab_icon, path.name)
+        else:
+            new_index = self.addTab(widget, path.name)
         self._track_tab(new_index, widget, state=_TabState(path=path))
         self.setCurrentIndex(new_index)
+
+    def _reusable_tab_index(self) -> int | None:
+        """The current tab's index, if it's safe for :meth:`open_file` to silently replace with a
+        newly-opened file instead of adding a new tab alongside it -- never the Welcome tab or a
+        pinned tab, and never a tab with unsaved changes (PROMPT.md, see :meth:`open_file`'s own
+        docstring)."""
+        if self.count() == 0:
+            return None
+        index = self.currentIndex()
+        widget = self.widget(index)
+        if isinstance(widget, WelcomeTab):
+            return None
+        if self._tab_state_for(widget).pinned:
+            return None
+        if _is_modified(widget):
+            return None
+        return index
+
+    def _reload_tab(self, index: int) -> None:
+        """Re-reads the tab at ``index`` from disk and refreshes its content in place -- see
+        :meth:`open_file`'s own ``force_reload`` docstring. A no-op for a tab with no path, or one
+        whose file can no longer be read."""
+        widget = self.widget(index)
+        path = self._tab_state_for(widget).path
+        if path is None:
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        if isinstance(widget, TextEditorWidget):
+            widget.setPlainText(text)
+            widget.document().setModified(False)
+        elif isinstance(widget, MarkdownPreviewWidget):
+            widget.setMarkdown(text)
 
     def open_file_at_line(self, path: Path, line_number: int) -> None:
         """"Jump to this result" -- the Search panel's own way into a file: :meth:`open_file`

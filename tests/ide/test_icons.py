@@ -59,16 +59,29 @@ def _has_red_badge_pixel(image) -> bool:
     )
 
 
+def _has_green_badge_pixel(image) -> bool:
+    # icons._with_done_badge() paints its "all done" badge in #2ea043 -- same fuzzy-family match
+    # reasoning as _has_red_badge_pixel above.
+    return any(
+        (pixel := image.pixelColor(x, y)).alpha() > 0 and pixel.green() > 120 and pixel.red() < 80
+        for x in range(image.width())
+        for y in range(image.height())
+    )
+
+
 def test_apply_icon_enabled_has_no_badge(qtbot) -> None:
     pixmap = icons.apply_icon(size=32, enabled=True).pixmap(32, 32)
     assert not _has_red_badge_pixel(pixmap.toImage())
+    assert not _has_green_badge_pixel(pixmap.toImage())
 
 
-def test_apply_icon_disabled_shows_a_red_no_entry_badge(qtbot) -> None:
-    # PROMPT.md: "please also use the red no entry icon (like you do for rvt) when the apply
-    # button can not be pressed".
+def test_apply_icon_disabled_shows_a_green_done_badge(qtbot) -> None:
+    # PROMPT.md: "has small green tick (same size as the do not enter sign) when there is nothing
+    # to compile" -- a fine/expected state, not a blocked one, so it's green rather than the red
+    # "no entry" badge other disabled sidebar icons (e.g. rvt_icon()) use.
     pixmap = icons.apply_icon(size=32, enabled=False).pixmap(32, 32)
-    assert _has_red_badge_pixel(pixmap.toImage())
+    assert _has_green_badge_pixel(pixmap.toImage())
+    assert not _has_red_badge_pixel(pixmap.toImage())
 
 
 def test_apply_icon_disabled_badge_survives_disabled_icon_mode(qtbot) -> None:
@@ -78,4 +91,4 @@ def test_apply_icon_disabled_badge_survives_disabled_icon_mode(qtbot) -> None:
 
     icon = icons.apply_icon(size=32, enabled=False)
     pixmap = icon.pixmap(32, 32, mode=QIcon.Mode.Disabled)
-    assert _has_red_badge_pixel(pixmap.toImage())
+    assert _has_green_badge_pixel(pixmap.toImage())

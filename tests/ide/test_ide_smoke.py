@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QTabWidget
+from PyQt6.QtWidgets import QApplication, QMessageBox, QTabWidget
 
 from in_reach.app.rvt import rvt_bridge
 from in_reach.ide import app as ide_app
@@ -37,6 +37,79 @@ def test_apply_theme_falls_back_to_default_for_an_unknown_name(qtbot) -> None:
     app = QApplication.instance()
     applied = theme.apply_theme(app, "Not A Real Theme")
     assert applied.name == theme.DEFAULT_THEME_NAME
+
+
+def _assert_scoped_not_bare(sheet: str, object_name: str) -> None:
+    """A *bare* (unscoped) ``background-color`` declaration in a widget's own local stylesheet
+    (e.g. ``widget.setStyleSheet("background-color: X;")``) shadows the app-level ``QToolTip``
+    stylesheet for every tooltip shown by that widget *or any descendant* -- confirmed in
+    isolation: a plain widget with only a bare background-color stylesheet set makes a child's
+    tooltip render with that background, regardless of the app-level QToolTip rule (see
+    style.TOOLTIP_STYLE's own docstring). This is what made the activity bar's own tooltips
+    render with its hardcoded #2c2c2c background instead of the current theme's tooltip colors
+    (PROMPT.md: "the text help background needs to have contrast to the text help colour" / "the
+    helper text has lo[st] its coloured background"). Asserting the stylesheet uses a real
+    ``#objectName { ... }`` selector block (not a bare declaration) is a deterministic proxy for
+    that fix -- actually rendering and grabbing a real OS tooltip popup in a test process turned
+    out to depend on window-manager focus/activation this suite can't reliably control.
+    """
+    assert "background-color" in sheet
+    assert f"#{object_name}" in sheet
+    assert sheet.strip().startswith(f"QWidget#{object_name}") or f"#{object_name} {{" in sheet
+
+
+def test_activity_bar_background_stylesheet_is_scoped_not_bare(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    assert bar.objectName() == "activityBar"
+    _assert_scoped_not_bare(bar.styleSheet(), "activityBar")
+
+
+def test_activity_bar_checked_buttons_get_a_grey_border_not_a_pale_fill(qtbot) -> None:
+    # PROMPT.md: "icon backgrounds are becoming pale when selected in light theme[;] this is
+    # undesirable, they should have a grey boarder when selected instead" -- overrides Fusion's
+    # own default :checked fill (which follows the active theme's highlight color) with a fixed
+    # grey border, so a checked view icon looks the same regardless of theme.
+    from in_reach.ide.activity_bar import _CHECKED_BORDER_COLOR
+
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    sheet = bar.styleSheet()
+
+    assert "QToolButton:checked" in sheet
+    assert f"border: 1px solid {_CHECKED_BORDER_COLOR}" in sheet
+    # The checked rule's own background must be transparent -- not a bare declaration elsewhere
+    # that could shadow tooltip resolution (style.TOOLTIP_STYLE's own docstring) and not a
+    # palette-driven fill that would still read as "pale" under Light.
+    checked_rule_start = sheet.index("QToolButton:checked")
+    checked_rule = sheet[checked_rule_start : sheet.index("}", checked_rule_start) + 1]
+    assert "background-color: transparent" in checked_rule
+
+
+def test_top_bar_background_stylesheet_is_scoped_not_bare(window: MainWindow) -> None:
+    assert window.top_bar.objectName() == "topBar"
+    _assert_scoped_not_bare(window.top_bar.styleSheet(), "topBar")
+
+
+def test_primary_sidebar_background_stylesheet_is_scoped_not_bare(window: MainWindow) -> None:
+    assert window.primary_sidebar.objectName() == "primarySidebar"
+    _assert_scoped_not_bare(window.primary_sidebar.styleSheet(), "primarySidebar")
+
+
+def test_status_bar_background_stylesheet_is_scoped_not_bare(window: MainWindow) -> None:
+    window.status_bar.set_color("#007acc")
+
+    assert window.status_bar.objectName() == "statusBar"
+    _assert_scoped_not_bare(window.status_bar.styleSheet(), "statusBar")
+
+
+def test_app_level_stylesheet_carries_the_shared_tooltip_style(qtbot) -> None:
+    from in_reach.ide import style
+
+    app = QApplication.instance()
+    theme.apply_theme(app, "Light")
+
+    assert style.TOOLTIP_STYLE in app.styleSheet()
 
 
 def test_every_theme_has_readable_tooltip_contrast() -> None:
@@ -115,7 +188,7 @@ def test_on_theme_applied_colors_status_bar_and_icons_immediately(window: MainWi
 
     window.on_theme_applied(whiley)
 
-    assert window.status_bar.styleSheet() == f"background-color: {whiley.status_bar_color};"
+    assert window.status_bar.styleSheet() == f"QWidget#statusBar {{ background-color: {whiley.status_bar_color}; }}"
 
 
 def _current_icon_size() -> int:
@@ -183,7 +256,6 @@ def test_sidebar_default_width_fits_the_dashboard_headers_without_eliding(
     for section in (
         window.explorer_panel.stats_section,
         window.explorer_panel.settings_section,
-        window.explorer_panel.script_section,
     ):
         assert section._toggle.sizeHint().width() < _SIDEBAR_MIN_WIDTH
 
@@ -322,33 +394,126 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
     assert bottom.tabText(bottom.currentIndex()) == "text2"
 
 
-def test_sidebar_starts_open_on_the_explorer_view(window: MainWindow) -> None:
-    assert window.primary_sidebar.isVisible() is True
-    assert window.activity_bar.explorer_button.isChecked() is True
-    assert window.activity_bar.search_button.isChecked() is False
-    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["explorer"]
+# -- gating the sidebar views on a project being open (PROMPT.md: "if no project is loaded the
+# panels cannot be expanded") --------------------------------------------------------------------
 
 
-def test_clicking_the_active_view_icon_collapses_the_sidebar(window: MainWindow) -> None:
-    window.activity_bar.explorer_button.click()
-
+def test_sidebar_starts_collapsed_and_its_views_disabled_with_no_project_open(window: MainWindow) -> None:
+    # Dashboard/Locations/Search all have nothing but a "no project opened yet" placeholder to
+    # show without one, so there's nothing to expand into until a project exists.
     assert window.primary_sidebar.isVisible() is False
-    assert window.top_bar.sidebar_toggle.isChecked() is False
-    assert window.activity_bar.explorer_button.isChecked() is False
-
-    window.activity_bar.explorer_button.click()
-    assert window.primary_sidebar.isVisible() is True
-    assert window.activity_bar.explorer_button.isChecked() is True
-    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["explorer"]
+    assert window.activity_bar.explorer_button.isEnabled() is False
+    assert window.activity_bar.locations_button.isEnabled() is False
+    assert window.activity_bar.search_button.isEnabled() is False
+    assert window.top_bar.sidebar_toggle.isEnabled() is False
 
 
-def test_clicking_a_different_view_icon_switches_the_sidebar(window: MainWindow) -> None:
-    window.activity_bar.search_button.click()
+def test_opening_the_first_project_enables_the_views_and_reveals_the_dashboard(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
 
-    assert window.primary_sidebar.isVisible() is True
-    assert window.activity_bar.search_button.isChecked() is True
-    assert window.activity_bar.explorer_button.isChecked() is False
-    assert window._sidebar_stack.currentWidget() is window._sidebar_pages["search"]
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.explorer_button.isEnabled() is True
+    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.search_button.isEnabled() is True
+    assert project_window.top_bar.sidebar_toggle.isEnabled() is True
+    # The panels were just unlocked -- reveals the Dashboard automatically rather than leaving the
+    # user to notice the now-enabled icons themselves.
+    assert project_window.primary_sidebar.isVisible() is True
+    assert project_window.activity_bar.explorer_button.isChecked() is True
+    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["explorer"]
+
+
+def test_closing_the_last_project_disables_the_views_and_collapses_the_sidebar(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.close_project()
+
+    assert project_window.primary_sidebar.isVisible() is False
+    assert project_window.activity_bar.explorer_button.isEnabled() is False
+    assert project_window.activity_bar.locations_button.isEnabled() is False
+    assert project_window.activity_bar.search_button.isEnabled() is False
+    assert project_window.top_bar.sidebar_toggle.isEnabled() is False
+
+
+def test_switching_between_two_open_projects_does_not_force_the_sidebar_back_open(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # The has-project/no-project transition is what unlocks/reveals the sidebar -- switching
+    # between two already-open projects (neither transition is "no project") must not re-open a
+    # sidebar the user deliberately collapsed.
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    project_window._on_project_opened(first)
+    project_window._on_project_opened(second)
+    project_window.activity_bar.explorer_button.click()  # user collapses it
+    assert project_window.primary_sidebar.isVisible() is False
+
+    project_window.explorer_panel.open_project(first)  # switch back to the first tab
+
+    assert project_window.primary_sidebar.isVisible() is False
+
+
+def test_clicking_the_active_view_icon_collapses_the_sidebar(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    assert project_window.primary_sidebar.isVisible() is True  # Dashboard opened automatically
+
+    project_window.activity_bar.explorer_button.click()
+
+    assert project_window.primary_sidebar.isVisible() is False
+    assert project_window.top_bar.sidebar_toggle.isChecked() is False
+    assert project_window.activity_bar.explorer_button.isChecked() is False
+
+    project_window.activity_bar.explorer_button.click()
+    assert project_window.primary_sidebar.isVisible() is True
+    assert project_window.activity_bar.explorer_button.isChecked() is True
+    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["explorer"]
+
+
+def test_clicking_a_different_view_icon_switches_the_sidebar(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.search_button.click()
+
+    assert project_window.primary_sidebar.isVisible() is True
+    assert project_window.activity_bar.search_button.isChecked() is True
+    assert project_window.activity_bar.explorer_button.isChecked() is False
+    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["search"]
+
+
+def test_clicking_the_locations_icon_switches_the_sidebar_to_the_stub_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
+    # expanded view for now" -- a real sidebar-view toggle, same as Explorer/Search.
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.locations_button.click()
+
+    assert project_window.primary_sidebar.isVisible() is True
+    assert project_window.activity_bar.locations_button.isChecked() is True
+    assert project_window.activity_bar.explorer_button.isChecked() is False
+    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["locations"]
+    assert project_window._sidebar_stack.currentWidget() is project_window.locations_panel
 
 
 def test_topbar_toggle_also_drives_the_sidebar_and_stays_synced(window: MainWindow) -> None:
@@ -372,6 +537,12 @@ def test_settings_button_has_no_wired_action(window: MainWindow) -> None:
     # PROMPT.md: "for now settings should do nothing" -- just asserts the button exists and isn't
     # checkable/connected to anything that changes app state.
     assert window.activity_bar.settings_button.isCheckable() is False
+
+
+def test_help_button_has_no_wired_action(window: MainWindow) -> None:
+    # PROMPT.md: "please then add a help (?) icon above the settings icon" -- stubbed, same
+    # "does nothing yet" treatment as settings_button above.
+    assert window.activity_bar.help_button.isCheckable() is False
 
 
 def test_activity_bar_starts_with_explorer_checked_and_settings_not_checkable(qtbot) -> None:
@@ -543,6 +714,154 @@ def test_set_apply_enabled_swaps_the_badge_off_and_on(qtbot) -> None:
     assert enabled_pixmap != disabled_pixmap
 
 
+# -- reorderable icon strip (PROMPT.md: "please also move this arrow to the top of the icons,
+# then rvt icon, then dashboard, then locations, then search (please also make them drag
+# re-oderable by the user (should be saved in .env in .inreach))") -------------------------------
+
+
+def test_activity_bar_default_icon_order(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar._icon_strip.order == ["compile", "rvt", "explorer", "locations", "search"]
+
+
+def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) -> None:
+    from in_reach.app import env_file
+    from in_reach.ide.activity_bar import ORDER_ENV_KEY
+
+    env_path = tmp_path / ".env"
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,explorer,rvt,locations,compile")
+
+    bar = ActivityBar(env_path=env_path)
+    qtbot.addWidget(bar)
+
+    assert bar._icon_strip.order == ["search", "explorer", "rvt", "locations", "compile"]
+
+
+def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
+    # A key that no longer names a real button (renamed/removed icon) is dropped rather than
+    # crashing; any real button missing from the saved list (a newly-added icon, or one added
+    # after the .env entry was written) is appended rather than just vanishing.
+    from in_reach.app import env_file
+    from in_reach.ide.activity_bar import ORDER_ENV_KEY
+
+    env_path = tmp_path / ".env"
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,not-a-real-icon,rvt")
+
+    bar = ActivityBar(env_path=env_path)
+    qtbot.addWidget(bar)
+
+    order = bar._icon_strip.order
+    assert order[:2] == ["search", "rvt"]
+    assert set(order) == {"compile", "rvt", "explorer", "locations", "search"}
+
+
+def test_activity_bar_with_no_env_path_does_not_persist_reordering(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    bar._icon_strip.order_changed.emit(["search", "rvt", "explorer", "locations", "compile"])  # should not raise
+
+
+def test_reordering_the_icon_strip_persists_the_new_order_to_env(qtbot, tmp_path: Path) -> None:
+    from in_reach.app import env_file
+    from in_reach.ide.activity_bar import ORDER_ENV_KEY
+
+    env_path = tmp_path / ".env"
+    bar = ActivityBar(env_path=env_path)
+    qtbot.addWidget(bar)
+
+    new_order = ["search", "locations", "explorer", "rvt", "compile"]
+    bar._icon_strip.order_changed.emit(new_order)
+
+    assert env_file.get_env_values(env_path).get(ORDER_ENV_KEY) == ",".join(new_order)
+
+
+def test_icon_strip_drop_reorders_the_dragged_button_to_the_drop_position(qtbot) -> None:
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QMimeData, QPointF
+    from PyQt6.QtCore import Qt as QtNS
+    from PyQt6.QtGui import QDropEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c"):
+        button = QToolButton()
+        strip.add_button(key, button)
+    strip.resize(50, 200)
+    strip.show()
+
+    seen_orders: list[list[str]] = []
+    strip.order_changed.connect(seen_orders.append)
+
+    mime = QMimeData()
+    mime.setData("application/x-inreach-activitybar-icon", b"c")
+    # Drop "c" above button "a" -- should move to the front.
+    drop_pos = QPointF(strip._buttons["a"].geometry().center())
+    drop_pos.setY(strip._buttons["a"].geometry().top())
+    event = QDropEvent(
+        drop_pos, QtNS.DropAction.MoveAction, mime, QtNS.MouseButton.LeftButton, QtNS.KeyboardModifier.NoModifier
+    )
+    strip.dropEvent(event)
+
+    assert strip.order == ["c", "a", "b"]
+    assert seen_orders == [["c", "a", "b"]]
+
+
+def test_pressing_and_dragging_a_bar_button_past_the_threshold_starts_a_real_drag(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard for PROMPT.md: "icons are not re-orderable" -- a QToolButton consumes its
+    # own mouse press/move events, so _IconStrip's own mousePressEvent/mouseMoveEvent (the first
+    # implementation) never actually fired for a press landing on one of its button children;
+    # nothing ever started a drag for a real click-and-drag from the user. The fix watches each
+    # button's events via an installed event filter instead -- this drives a real press-then-move
+    # sequence through that filter (QDrag.exec() itself is mocked out, since it blocks on a real
+    # OS drag-and-drop loop that has nothing to drop onto in a test).
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QDrag, QMouseEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c"):
+        strip.add_button(key, QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+    button_a = strip._buttons["a"]
+
+    started_with: list[bytes] = []
+
+    def fake_exec(self, *args, **kwargs):
+        started_with.append(bytes(self.mimeData().data("application/x-inreach-activitybar-icon")))
+        return Qt.DropAction.MoveAction
+
+    monkeypatch.setattr(QDrag, "exec", fake_exec)
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(5, 5),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(button_a, press)
+    move = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(5, 40),  # well past QApplication.startDragDistance()
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(button_a, move)
+
+    assert started_with == [b"a"]
+    assert button_a.isDown() is False
+
+
 def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path) -> None:
     from in_reach.app import project
     from in_reach.ide.activity_bar import WIDTH
@@ -553,6 +872,28 @@ def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path
     window._zoom_in()
 
     assert window.activity_bar.width() > WIDTH
+
+
+def test_adjust_zoom_keeps_an_open_settings_json_tab_at_110_percent(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import project
+
+    window.root_dir = tmp_path
+    project.get_project_dir(tmp_path).mkdir(parents=True)
+    source = tmp_path / "settings.json"
+    source.write_text("{}", encoding="utf-8")
+    pane = window.main_panel.active_pane
+    pane.open_file(source)
+    editor = pane.widget(pane.currentIndex())
+
+    window._zoom_in()
+
+    # Zoom level itself is shared, clamped, cross-test global state (zoom_module's own module-level
+    # baseline) -- this only asserts the +10% stays correctly pinned to whatever the live app font
+    # ends up being after a zoom change, not any particular absolute size.
+    app_size = QApplication.instance().font().pointSizeF()
+    assert editor.font().pointSizeF() == pytest.approx(app_size * 1.1)
 
 
 def test_rvt_button_is_disabled_with_no_project_open(window: MainWindow) -> None:
@@ -725,6 +1066,188 @@ def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
     project_window.apply_settings_changes()
 
     assert project_window._bin_watcher.files() == [str(compiled_bin)]
+
+
+# -- View Output.txt / Export RVT File (PROMPT.md: "Underneath project tabs please add the
+# following buttons: Export RVT File (on the left) and on the right: View Output.txt") -----------
+
+
+def test_view_output_txt_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    pane = window.main_panel.active_pane
+    before = pane.count()
+
+    window.view_output_txt()
+
+    assert pane.count() == before
+
+
+def test_view_output_txt_opens_a_locked_generated_view_of_the_script(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "script").mkdir(parents=True)
+    (folder / "script" / "output.txt").write_text("do stuff\n", encoding="utf-8")
+    project_window._on_project_opened(folder)
+    pane = project_window.main_panel.active_pane
+
+    project_window.view_output_txt()
+
+    editor = pane.widget(pane.currentIndex())
+    assert editor.isReadOnly() is True
+    assert pane.tabIcon(pane.currentIndex()).isNull() is False  # the padlock icon
+    text = editor.toPlainText()
+    assert text.startswith("// This file is auto-generated and non-editable")
+    assert "do stuff" in text
+
+
+def test_view_output_txt_refreshes_an_already_open_view_with_the_scripts_latest_content(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "script").mkdir(parents=True)
+    script_path = folder / "script" / "output.txt"
+    script_path.write_text("v1", encoding="utf-8")
+    project_window._on_project_opened(folder)
+    pane = project_window.main_panel.active_pane
+    project_window.view_output_txt()
+    index = pane.currentIndex()
+    before = pane.count()
+
+    script_path.write_text("v2", encoding="utf-8")
+    project_window.view_output_txt()
+
+    assert pane.count() == before  # switched to the existing tab, not duplicated
+    assert pane.currentIndex() == index
+    assert "v2" in pane.widget(index).toPlainText()
+    assert "v1" not in pane.widget(index).toPlainText()
+
+
+def test_export_rvt_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.export_rvt_file()  # should not raise
+
+
+def test_export_rvt_file_shows_an_error_and_stops_when_compiling_fails(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    project_window._on_project_opened(folder)
+    monkeypatch.setattr(
+        apply_settings, "apply_settings_changes", lambda project_dir, target_folder: BuildResult(success=False, failure="nope")
+    )
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a[2]) or None))
+    asked = []
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: asked.append(default_path) or "")
+
+    project_window.export_rvt_file()
+
+    assert len(shown) == 1
+    assert asked == []  # never even got to the Save As dialog
+
+
+def test_export_rvt_file_cancelled_dialog_does_nothing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: "")
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()  # should not raise, nothing written anywhere else
+
+
+def test_export_rvt_file_as_bin_copies_the_freshly_compiled_variant(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled bytes")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    dest = tmp_path / "MySlayer.bin"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()
+
+    assert dest.read_bytes() == b"compiled bytes"
+
+
+def test_export_rvt_file_as_mglo_calls_write_mglo_with_the_compiled_bin_and_script(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt import mglo
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "script").mkdir(parents=True)
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    dest = tmp_path / "MySlayer.mglo"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    calls = []
+    monkeypatch.setattr(mglo, "write_mglo", lambda bin_path, script_path, dest_path: calls.append((bin_path, script_path, dest_path)) or True)
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()
+
+    assert calls == [(compiled_bin, folder / "script" / "output.txt", dest)]
+
+
+def test_export_rvt_file_as_mglo_reports_an_error_when_write_mglo_fails(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt import mglo
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    dest = tmp_path / "MySlayer.mglo"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    monkeypatch.setattr(mglo, "write_mglo", lambda bin_path, script_path, dest_path: False)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a[2]) or None))
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()
+
+    assert len(shown) == 1
+    assert not dest.exists()
 
 
 def _recent_button_labels(welcome) -> list[str]:
@@ -1757,7 +2280,7 @@ def test_close_project_clears_the_explorer_panel(project_window: MainWindow, tmp
     folder = tmp_path / "Project"
     folder.mkdir()
     project_window._on_project_opened(folder)
-    assert project_window.explorer_panel.script_section.isVisibleTo(project_window.explorer_panel) is True
+    assert project_window.explorer_panel.settings_section.isVisibleTo(project_window.explorer_panel) is True
 
     project_window.close_project()
 

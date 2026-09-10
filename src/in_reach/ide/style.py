@@ -38,9 +38,31 @@ MENU_STYLE = (
     "QMenu::separator { height: 1px; background-color: palette(mid); margin: 4px 6px; }"
 )
 
-# A plain (non-tabbed) panel card -- the primary sidebar.
+# PROMPT.md: "the text help background needs to have contrast to the text help colour" -- a real,
+# confirmed Qt QSS quirk: once *any* widget's own setStyleSheet() carries a **bare** declaration
+# (no selector at all, e.g. ``widget.setStyleSheet("background-color: #2c2c2c;")``), that widget
+# becomes the "nearest styled ancestor" for every tooltip shown by it *or any descendant*, and its
+# own ``background-color`` -- not the app-level ``QToolTip`` rule below -- is what actually gets
+# used for that tooltip's background (confirmed in isolation: a plain QWidget with only
+# ``setStyleSheet("background-color: X;")`` set makes a child's tooltip render with background X,
+# regardless of what the app-level stylesheet says QToolTip should look like). A rule with an
+# explicit selector -- even a bare ``QWidget { ... }``, or just a type selector like
+# ``QToolButton { ... }`` -- does not have this problem. ``theme.py``'s own ``apply_theme()`` is
+# the one place that sets this rule; nothing else needs to duplicate or re-embed it, since the
+# actual fix is "always scope your own local stylesheet's selector", not "also carry a copy of
+# this rule" -- every *other* local stylesheet in this module already does that.
+TOOLTIP_STYLE = (
+    "QToolTip { background-color: palette(tooltip-base); color: palette(tooltip-text);"
+    " border: 1px solid palette(mid); padding: 2px; }"
+)
+
+# A plain (non-tabbed) panel card -- the primary sidebar. Scoped to #primarySidebar specifically
+# (see main_window.py's own _build_primary_sidebar(), which sets that object name before applying
+# this) rather than a bare declaration -- see TOOLTIP_STYLE's own docstring above for why a bare
+# one would otherwise quietly break every tooltip shown by anything inside the primary sidebar.
 PANEL_BORDER_STYLE = (
-    f"border: 1px solid palette(mid); border-radius: {PANEL_RADIUS}px; background-color: palette(base);"
+    f"QWidget#primarySidebar {{ border: 1px solid palette(mid); border-radius: {PANEL_RADIUS}px;"
+    " background-color: palette(base); }"
 )
 
 # The outer card a tab widget sits inside -- see wrap_tab_widget()'s own docstring for why the

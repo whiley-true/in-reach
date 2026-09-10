@@ -30,6 +30,7 @@ class StatusBar(QWidget):
         self._window = window
         self.setFixedHeight(_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("statusBar")
         self.setMouseTracking(True)
 
         layout = QHBoxLayout(self)
@@ -39,7 +40,11 @@ class StatusBar(QWidget):
         layout.addWidget(self._project_label, 1, Qt.AlignmentFlag.AlignCenter)
 
     def set_color(self, color_hex: str) -> None:
-        self.setStyleSheet(f"background-color: {color_hex};")
+        # Scoped to #statusBar, not a bare declaration -- see style.TOOLTIP_STYLE's own docstring
+        # for why a bare one would risk quietly breaking any tooltip shown by something inside
+        # this bar (nothing currently sets one here, but a bare rule is a landmine for the next
+        # thing that does).
+        self.setStyleSheet(f"QWidget#statusBar {{ background-color: {color_hex}; }}")
 
     def set_project_label(self, text: str) -> None:
         """Sets the centered "<title> (<folder id>)" text (PROMPT.md), or clears it for ``""``

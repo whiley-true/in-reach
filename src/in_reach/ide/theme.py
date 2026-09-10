@@ -117,18 +117,16 @@ def apply_theme(app: QApplication, theme_name: str) -> Theme:
     # dark themes. Setting it explicitly here is the standard fix.
     QToolTip.setPalette(palette)
     # PROMPT.md: "when showing the helper text for icons we need to have a background colour for
-    # the text to display on" -- the palette alone (above) still left a tooltip's background
+    # the text to display on" -- the palette alone (above) still leaves a tooltip's background
     # effectively transparent in practice (a known Fusion-style quirk: QToolTip's own paintEvent
     # doesn't reliably auto-fill from ToolTipBase the way an ordinary widget would), so this pins
     # it down with an explicit, opaque QSS rule too -- belt and braces, not a replacement for the
     # palette set above (native platforms that *do* honour the palette still get themed borders/
-    # colors consistent with it either way).
-    app.setStyleSheet(
-        f"QToolTip {{ background-color: {theme.palette_colors.get('tooltip_base', '#ffffdc')};"
-        f" color: {theme.palette_colors.get('tooltip_text', '#000000')};"
-        f" border: 1px solid {theme.palette_colors.get('mid', '#767676')}; padding: 2px; }}"
-        f"{style.MENU_STYLE}"
-    )
+    # colors consistent with it either way). See style.TOOLTIP_STYLE's own docstring for why this
+    # is the *only* place that should ever set a "QToolTip { ... }" rule -- every other local
+    # per-widget stylesheet in the app just needs its own selector properly scoped (never a bare
+    # declaration) to not shadow this one, rather than each carrying its own copy of it.
+    app.setStyleSheet(f"{style.TOOLTIP_STYLE}{style.MENU_STYLE}")
     # A per-widget stylesheet rule that references the dynamic palette() QSS function is cached as
     # a "render rule" the first time a widget is polished -- a bare PaletteChange event doesn't
     # invalidate that cache, only a real unpolish/polish cycle does. Without this, an
