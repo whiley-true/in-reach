@@ -473,6 +473,16 @@ def test_clicking_a_view_with_no_project_open_pops_out_a_blank_placeholder(windo
     assert window._sidebar_stack.currentWidget() is window._no_project_page
     assert window._no_project_page._label.text() == "Open a Project to use Dashboard"
 
+    window.activity_bar.git_button.click()
+
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+    assert window._no_project_page._label.text() == "Open a Project to use Git"
+
+    window.activity_bar.scripts_button.click()
+
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+    assert window._no_project_page._label.text() == "Open a Project to use Scripts"
+
 
 def test_opening_the_first_project_reveals_the_dashboard(
     project_window: MainWindow, tmp_path: Path
@@ -796,6 +806,61 @@ def test_set_apply_enabled_swaps_the_badge_off_and_on(qtbot) -> None:
     assert enabled_pixmap != disabled_pixmap
 
 
+# -- Halo install/running status indicator (PROMPT.md: "a flame icon which can be of different
+# states depending on the status of the players halo install and running detection") -------------
+
+
+def test_git_and_scripts_view_buttons_exist_and_toggle(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    seen = []
+    bar.view_selected.connect(seen.append)
+
+    bar.git_button.click()
+    bar.scripts_button.click()
+
+    assert seen == ["git", "scripts"]
+
+
+def test_status_button_defaults_to_unverified(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    assert bar.status_button.icon().pixmap(28, 28).toImage() == icons.status_icon(
+        icons.STATUS_UNVERIFIED, "#cccccc", 28
+    ).pixmap(28, 28).toImage()
+
+
+def test_set_halo_status_updates_the_icon_and_tooltip_per_state(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+
+    for state in (icons.STATUS_UNVERIFIED, icons.STATUS_VERIFIED, icons.STATUS_RUNNING):
+        bar.set_halo_status(state)
+        assert bar.status_button.icon().pixmap(28, 28).toImage() == icons.status_icon(
+            state, "#cccccc", 28
+        ).pixmap(28, 28).toImage()
+        assert bar.status_button.toolTip() != ""
+
+    # Each state's tooltip is distinct.
+    tooltips = set()
+    for state in (icons.STATUS_UNVERIFIED, icons.STATUS_VERIFIED, icons.STATUS_RUNNING):
+        bar.set_halo_status(state)
+        tooltips.add(bar.status_button.toolTip())
+    assert len(tooltips) == 3
+
+
+def test_status_button_rescales_with_zoom(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    bar.set_halo_status(icons.STATUS_RUNNING)
+
+    bar.refresh_icon_scale(2.0)
+
+    assert bar.status_button.size().width() > 28  # grew along with every other icon
+
+
 # -- reorderable icon strip (PROMPT.md: "please also move this arrow to the top of the icons,
 # then rvt icon, then dashboard, then locations, then search (please also make them drag
 # re-oderable by the user (should be saved in .env in .inreach))") -------------------------------
@@ -805,7 +870,7 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
 
-    assert bar._icon_strip.order == ["compile", "rvt", "explorer", "locations", "search"]
+    assert bar._icon_strip.order == ["compile", "explorer", "git", "scripts", "rvt", "locations", "search"]
 
 
 def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) -> None:
@@ -818,7 +883,9 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    assert bar._icon_strip.order == ["search", "explorer", "rvt", "locations", "compile"]
+    # git/scripts aren't named in the saved order at all -- appended after it, in their existing
+    # (default) relative order, same as any other icon added after a user's own .env was written.
+    assert bar._icon_strip.order == ["search", "explorer", "rvt", "locations", "compile", "git", "scripts"]
 
 
 def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
@@ -836,7 +903,7 @@ def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path
 
     order = bar._icon_strip.order
     assert order[:2] == ["search", "rvt"]
-    assert set(order) == {"compile", "rvt", "explorer", "locations", "search"}
+    assert set(order) == {"compile", "rvt", "explorer", "git", "scripts", "locations", "search"}
 
 
 def test_activity_bar_with_no_env_path_does_not_persist_reordering(qtbot) -> None:
@@ -2582,6 +2649,63 @@ def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
     assert notified == ["Whiley"]
     assert dialog._theme_buttons["Whiley"].isChecked() is True
     assert dialog._theme_buttons["Light"].isChecked() is False
+
+
+# -- Halo install/running status (PROMPT.md: "a flame icon which can be of different states
+# depending on the status of the players halo install and running detection") --------------------
+
+
+def test_refresh_halo_status_is_unverified_by_default(project_window: MainWindow) -> None:
+    project_window._refresh_halo_status()
+
+    assert project_window.activity_bar._halo_status == icons.STATUS_UNVERIFIED
+
+
+def test_refresh_halo_status_is_verified_once_the_env_key_is_set_and_mcc_is_not_running(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import halo_status, project as project_module, system_verify
+
+    env_path = system_verify.env_path_for(project_module.get_project_dir(project_window.root_dir))
+    env_path.write_text(f"{system_verify.HALO_MCC_KEY}=C:\\MCC\n", encoding="utf-8")
+    monkeypatch.setattr(halo_status, "is_mcc_running", lambda: False)
+
+    project_window._refresh_halo_status()
+
+    assert project_window.activity_bar._halo_status == icons.STATUS_VERIFIED
+
+
+def test_refresh_halo_status_is_running_when_mcc_is_detected(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import halo_status, project as project_module, system_verify
+
+    env_path = system_verify.env_path_for(project_module.get_project_dir(project_window.root_dir))
+    env_path.write_text(f"{system_verify.HALO_MCC_KEY}=C:\\MCC\n", encoding="utf-8")
+    monkeypatch.setattr(halo_status, "is_mcc_running", lambda: True)
+
+    project_window._refresh_halo_status()
+
+    assert project_window.activity_bar._halo_status == icons.STATUS_RUNNING
+
+
+def test_halo_status_timer_polls_every_half_second(window: MainWindow) -> None:
+    assert window._halo_status_timer.isActive() is True
+    assert window._halo_status_timer.interval() == 500
+
+
+def test_git_and_scripts_buttons_switch_the_sidebar_to_their_own_panels(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.git_button.click()
+    assert project_window._sidebar_stack.currentWidget() is project_window.git_panel
+
+    project_window.activity_bar.scripts_button.click()
+    assert project_window._sidebar_stack.currentWidget() is project_window.scripts_panel
 
 
 def test_settings_cog_opens_the_settings_dialog(

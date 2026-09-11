@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtSvg import QSvgRenderer
 
 DEFAULT_COLOR = "#cccccc"
@@ -102,6 +102,28 @@ _ICON_SOURCES = {
         '<circle cx="8" cy="8" r="6.3" fill="none" stroke="{color}" stroke-width="1.3"/>'
         '<path d="M8 3.2L9.6 8L8 8.9L6.4 8Z" fill="{color}"/>'
         '<path d="M8 12.8L6.4 8L8 7.1L9.6 8Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "git": (  # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a
+        # dulwich gui))" -- a plain three-node branch graph (a main-line commit at top and bottom,
+        # a branch point curving off to a third node), same "deliberately simple, not traced from
+        # any icon set" reasoning as "compass"/"dashboard" below.
+        "0 0 16 16",
+        '<circle cx="4" cy="3" r="1.5" fill="{color}"/>'
+        '<circle cx="4" cy="13" r="1.5" fill="{color}"/>'
+        '<circle cx="12" cy="9" r="1.5" fill="{color}"/>'
+        '<path d="M4 4.5V11.5" stroke="{color}" stroke-width="1.3" fill="none"/>'
+        '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
+    ),
+    "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
+        # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"
+        # reasoning as "compass"/"dashboard" below.
+        "0 0 16 16",
+        '<path d="M1.5 13.5H14.5" stroke="{color}" stroke-width="1.2" stroke-linecap="round" fill="none"/>'
+        '<rect x="2.3" y="4.2" width="2" height="9" fill="{color}"/>'
+        '<rect x="5.1" y="2.6" width="2" height="10.6" fill="{color}"/>'
+        '<rect x="7.9" y="5.4" width="2" height="7.8" fill="{color}"/>'
+        '<rect x="10.7" y="3.6" width="2" height="9.6" fill="{color}"/>'
+        '<rect x="13.2" y="6.6" width="1.2" height="6.6" fill="{color}"/>',
     ),
     "help": (  # PROMPT.md: "please then add a help (?) icon above the settings icon" -- a plain
         # circled question mark, same "deliberately simple" reasoning as "compass" above.
@@ -307,5 +329,80 @@ def lock_icon(size: int = 16) -> QIcon:
     font.setPixelSize(round(size * 0.85))
     painter.setFont(font)
     painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "🔒")
+    painter.end()
+    return QIcon(pixmap)
+
+
+#: PROMPT.md: "a flame icon which can be of different states depending on the status of the
+#: players halo install and running detection ... just firewood: player has not verified their
+#: install ... after being verified the firewood should have the outline of a flame ... if [Halo:
+#: MCC] is running ... the flame should be filled" -- the activity bar's bottom-pinned Halo status
+#: indicator (see :meth:`~in_reach.ide.activity_bar.ActivityBar.set_halo_status`).
+STATUS_UNVERIFIED = "unverified"
+STATUS_VERIFIED = "verified"
+STATUS_RUNNING = "running"
+
+
+def _firewood_path(size: float) -> tuple[QPainterPath, float]:
+    """Two crossed logs sitting near the bottom of the icon box (and the stroke width to draw them
+    at) -- present in every :func:`status_icon` state, per PROMPT.md's own "just firewood" starting
+    point."""
+    path = QPainterPath()
+    log_width = size * 0.16
+    for start, end in (
+        (QPointF(size * 0.16, size * 0.88), QPointF(size * 0.56, size * 0.64)),
+        (QPointF(size * 0.44, size * 0.88), QPointF(size * 0.84, size * 0.64)),
+    ):
+        segment = QPainterPath()
+        segment.moveTo(start)
+        segment.lineTo(end)
+        path.addPath(segment)
+    return path, log_width
+
+
+def _flame_path(size: float) -> QPainterPath:
+    """A simple asymmetric teardrop above the firewood -- deliberately simple geometry (just two
+    curves, no inner "flicker" notch -- that self-intersected, which left a hole in the middle
+    when filled), same reasoning as this module's other hand-drawn glyphs (compass/dashboard/
+    help/apply_icon), not traced from any icon set."""
+    path = QPainterPath()
+    path.moveTo(size * 0.52, size * 0.06)
+    path.cubicTo(size * 0.92, size * 0.38, size * 0.80, size * 0.70, size * 0.50, size * 0.94)
+    path.cubicTo(size * 0.20, size * 0.70, size * 0.10, size * 0.38, size * 0.52, size * 0.06)
+    path.closeSubpath()
+    return path
+
+
+def status_icon(state: str, color: str = DEFAULT_COLOR, size: int = 24) -> QIcon:
+    """The activity bar's Halo install/running status indicator.
+
+    Args:
+        state: One of :data:`STATUS_UNVERIFIED` (just the firewood -- nothing verified yet),
+            :data:`STATUS_VERIFIED` (firewood plus a flame *outline*), or :data:`STATUS_RUNNING`
+            (firewood plus a *filled* flame). Falls back to :data:`STATUS_UNVERIFIED` for any
+            other value rather than raising.
+        color: Stroke/fill color for both the firewood and the flame.
+        size: Pixel width/height to render at.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    logs_path, log_width = _firewood_path(size)
+    pen = QPen(QColor(color))
+    pen.setWidthF(log_width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.strokePath(logs_path, pen)
+
+    if state in (STATUS_VERIFIED, STATUS_RUNNING):
+        flame_path = _flame_path(size)
+        if state == STATUS_RUNNING:
+            painter.fillPath(flame_path, QColor(color))
+        else:
+            outline_pen = QPen(QColor(color))
+            outline_pen.setWidthF(max(1.0, size * 0.045))
+            painter.strokePath(flame_path, outline_pen)
+
     painter.end()
     return QIcon(pixmap)

@@ -1,17 +1,19 @@
-"""The far-left activity bar: five reorderable icons at the top -- a compile/"Apply" action, a
-ReachVariantTool launcher action, and three sidebar-view toggles (Dashboard, Locations, Search),
-exactly one of whose views is ever active, switching the primary sidebar's content, VSCode-style:
-clicking the already-active one collapses the sidebar instead of switching -- then a help icon
-(still a no-op) and a settings cog pinned at the bottom, which opens the Settings popout (see
+"""The far-left activity bar: seven reorderable icons at the top -- a compile/"Apply" action, a
+ReachVariantTool launcher action, and five sidebar-view toggles (Dashboard, Git, Scripts,
+Locations, Search), exactly one of whose views is ever active, switching the primary sidebar's
+content, VSCode-style: clicking the already-active one collapses the sidebar instead of switching
+-- then, pinned at the bottom: a flame status indicator (see :meth:`ActivityBar.set_halo_status`),
+a help icon (still a no-op), and a settings cog, which opens the Settings popout (see
 :class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns actually building/showing
 it, this bar just emits :attr:`ActivityBar.settings_requested`).
 
-PROMPT.md: "please also move this arrow to the top of the icons, then rvt icon, then dashboard,
-then locations, then search (please also make them drag re-orderable by the user (should be saved
-in .env in .inreach))" -- the five top icons live in a dedicated :class:`_IconStrip` that supports
-a real mouse-drag reorder (:class:`~in_reach.ide.tabs._DragTabBar`'s own pattern, adapted to a
-vertical icon list instead of a horizontal tab strip) and persists the result to the project's own
-``.env`` (``ACTIVITY_BAR_ORDER``), read back on the next launch.
+PROMPT.md: "please move the panel ordering so it goes compile, dashboard, then a git symbol
+(stubbed empty panel for now (where we will implement a dulwich gui)), then a bookshelf with the
+label Scripts (also stubbed for now), then rvt, then locations, then search" -- the seven top
+icons live in a dedicated :class:`_IconStrip` that supports a real mouse-drag reorder
+(:class:`~in_reach.ide.tabs._DragTabBar`'s own pattern, adapted to a vertical icon list instead of
+a horizontal tab strip) and persists the result to the project's own ``.env``
+(``ACTIVITY_BAR_ORDER``), read back on the next launch.
 """
 
 from __future__ import annotations
@@ -49,12 +51,21 @@ _CHECKED_BORDER_COLOR = "#808080"
 
 DEFAULT_VIEW = "explorer"
 
-#: PROMPT.md: "move this arrow to the top of the icons, then rvt icon, then dashboard, then
-#: locations, then search" -- the reorderable group's default top-to-bottom order, keyed the same
-#: way :data:`_buttons`/:meth:`ActivityBar._handle_click` already key the view-toggle buttons
+#: Tooltip text for each of the flame status indicator's states -- see
+#: :meth:`ActivityBar.set_halo_status`.
+_STATUS_TOOLTIPS = {
+    icons.STATUS_UNVERIFIED: "Halo install not verified yet -- Verify System Settings from the Welcome tab",
+    icons.STATUS_VERIFIED: "Halo: MCC install verified",
+    icons.STATUS_RUNNING: "Halo: MCC is running",
+}
+
+#: PROMPT.md: "please move the panel ordering so it goes compile, dashboard, then a git symbol
+#: ..., then a bookshelf ... Scripts ..., then rvt, then locations, then search" -- the
+#: reorderable group's default top-to-bottom order, keyed the same way
+#: :data:`_buttons`/:meth:`ActivityBar._handle_click` already key the view-toggle buttons
 #: ("explorer" being the Dashboard button's own long-established internal name, see
 #: :data:`DEFAULT_VIEW`).
-_DEFAULT_ORDER = ("compile", "rvt", "explorer", "locations", "search")
+_DEFAULT_ORDER = ("compile", "explorer", "git", "scripts", "rvt", "locations", "search")
 ORDER_ENV_KEY = "ACTIVITY_BAR_ORDER"
 
 _REORDER_MIME = "application/x-inreach-activitybar-icon"
@@ -321,6 +332,18 @@ class ActivityBar(QWidget):
         )
         self.explorer_button.clicked.connect(lambda: self._handle_click("explorer"))
 
+        # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a dulwich
+        # gui))" -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder
+        # view behind it (see MainWindow's own GitPanel wiring).
+        self.git_button = _bar_button("git", "Git (toggle primary sidebar)", checkable=True, checked=False)
+        self.git_button.clicked.connect(lambda: self._handle_click("git"))
+
+        # PROMPT.md: "a bookshelf with the label Scripts (also stubbed for now)".
+        self.scripts_button = _bar_button(
+            "bookshelf", "Scripts (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.scripts_button.clicked.connect(lambda: self._handle_click("scripts"))
+
         # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
         # expanded view for now" (later: "for locations please use a compass icon") -- a real
         # sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it (see
@@ -337,6 +360,8 @@ class ActivityBar(QWidget):
 
         self._buttons = {
             "explorer": self.explorer_button,
+            "git": self.git_button,
+            "scripts": self.scripts_button,
             "locations": self.locations_button,
             "search": self.search_button,
         }
@@ -349,6 +374,8 @@ class ActivityBar(QWidget):
                     "compile": self.apply_button,
                     "rvt": self.rvt_button,
                     "explorer": self.explorer_button,
+                    "git": self.git_button,
+                    "scripts": self.scripts_button,
                     "locations": self.locations_button,
                     "search": self.search_button,
                 }[key],
@@ -360,6 +387,18 @@ class ActivityBar(QWidget):
         layout.addWidget(self._icon_strip)
 
         layout.addStretch(1)
+
+        # PROMPT.md: "a flame icon which can be of different states depending on the status of
+        # the players halo install and running detection" -- a pure status indicator (no click
+        # behavior of its own), see set_halo_status(). Pinned above Help, per PROMPT.md.
+        self._halo_status = icons.STATUS_UNVERIFIED
+        self.status_button = QToolButton()
+        self.status_button.setIcon(icons.status_icon(self._halo_status, _ICON_COLOR, _ICON_SIZE))
+        self.status_button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
+        self.status_button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
+        self.status_button.setAutoRaise(True)
+        self.set_halo_status(self._halo_status)  # also sets the initial tooltip
+        layout.addWidget(self.status_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         # PROMPT.md: "please then add a help (?) icon above the settings icon" -- stubbed, same
         # "does nothing yet" treatment as settings_button below.
@@ -422,6 +461,20 @@ class ActivityBar(QWidget):
         self.apply_button.setEnabled(enabled)
         self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, round(_ICON_SIZE * self._icon_scale), enabled=enabled))
 
+    # -- Halo install/running status -----------------------------------------------------------------
+
+    def set_halo_status(self, state: str) -> None:
+        """Updates the bottom-pinned flame indicator (PROMPT.md: "a flame icon which can be of
+        different states depending on the status of the players halo install and running
+        detection") -- :attr:`~in_reach.ide.icons.STATUS_UNVERIFIED`/``STATUS_VERIFIED``/
+        ``STATUS_RUNNING``, see :func:`~in_reach.ide.icons.status_icon`'s own docstring for what
+        each looks like. MainWindow re-checks and calls this on a timer (PROMPT.md: "it should
+        check every .5s") -- this method just applies whatever state it's given.
+        """
+        self._halo_status = state
+        self.status_button.setIcon(icons.status_icon(state, _ICON_COLOR, round(_ICON_SIZE * self._icon_scale)))
+        self.status_button.setToolTip(_STATUS_TOOLTIPS.get(state, _STATUS_TOOLTIPS[icons.STATUS_UNVERIFIED]))
+
     # -- zoom ---------------------------------------------------------------------------------------
 
     def refresh_icon_scale(self, scale: float = 1.0) -> None:
@@ -448,3 +501,7 @@ class ActivityBar(QWidget):
         self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, icon_size, enabled=self._apply_enabled))
         self.apply_button.setIconSize(QSize(icon_size, icon_size))
         self.apply_button.setFixedSize(button_size, button_size)
+
+        self.status_button.setIcon(icons.status_icon(self._halo_status, _ICON_COLOR, icon_size))
+        self.status_button.setIconSize(QSize(icon_size, icon_size))
+        self.status_button.setFixedSize(button_size, button_size)

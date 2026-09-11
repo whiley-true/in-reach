@@ -26,6 +26,22 @@ def test_compass_icon_renders(qtbot) -> None:
     assert _has_opaque_pixel(pixmap.toImage())
 
 
+def test_git_icon_renders(qtbot) -> None:
+    icon = icons.icon("git", color="#ff0000", size=16)
+    pixmap = icon.pixmap(16, 16)
+
+    assert not pixmap.isNull()
+    assert _has_opaque_pixel(pixmap.toImage())
+
+
+def test_bookshelf_icon_renders(qtbot) -> None:
+    icon = icons.icon("bookshelf", color="#ff0000", size=16)
+    pixmap = icon.pixmap(16, 16)
+
+    assert not pixmap.isNull()
+    assert _has_opaque_pixel(pixmap.toImage())
+
+
 def test_icon_falls_back_to_a_blank_pixmap_for_an_unknown_name(qtbot) -> None:
     icon = icons.icon("not-a-real-icon", size=16)
     pixmap = icon.pixmap(16, 16)
@@ -101,3 +117,39 @@ def test_apply_icon_disabled_badge_survives_disabled_icon_mode(qtbot) -> None:
     icon = icons.apply_icon(size=32, enabled=False)
     pixmap = icon.pixmap(32, 32, mode=QIcon.Mode.Disabled)
     assert _has_green_badge_pixel(pixmap.toImage())
+
+
+# -- status_icon (PROMPT.md: "a flame icon which can be of different states depending on the
+# status of the players halo install and running detection") --------------------------------------
+
+
+def _opaque_pixel_count(image) -> int:
+    return sum(1 for x in range(image.width()) for y in range(image.height()) if image.pixelColor(x, y).alpha() > 0)
+
+
+def test_status_icon_unverified_renders_only_the_firewood(qtbot) -> None:
+    pixmap = icons.status_icon(icons.STATUS_UNVERIFIED, size=32).pixmap(32, 32)
+    assert not pixmap.isNull()
+    assert _has_opaque_pixel(pixmap.toImage())
+
+
+def test_status_icon_verified_draws_more_than_just_firewood(qtbot) -> None:
+    # "after being verified the firewood should have the outline of a flame" -- more opaque pixels
+    # than the bare-firewood state, from the added flame outline.
+    unverified = _opaque_pixel_count(icons.status_icon(icons.STATUS_UNVERIFIED, size=32).pixmap(32, 32).toImage())
+    verified = _opaque_pixel_count(icons.status_icon(icons.STATUS_VERIFIED, size=32).pixmap(32, 32).toImage())
+    assert verified > unverified
+
+
+def test_status_icon_running_fills_more_than_the_verified_outline(qtbot) -> None:
+    # "if [Halo: MCC] is running ... the flame should be filled" -- a solid fill covers more pixels
+    # than just its own outline.
+    verified = _opaque_pixel_count(icons.status_icon(icons.STATUS_VERIFIED, size=32).pixmap(32, 32).toImage())
+    running = _opaque_pixel_count(icons.status_icon(icons.STATUS_RUNNING, size=32).pixmap(32, 32).toImage())
+    assert running > verified
+
+
+def test_status_icon_falls_back_to_unverified_for_an_unknown_state(qtbot) -> None:
+    fallback = icons.status_icon("not-a-real-state", size=32).pixmap(32, 32).toImage()
+    unverified = icons.status_icon(icons.STATUS_UNVERIFIED, size=32).pixmap(32, 32).toImage()
+    assert fallback == unverified

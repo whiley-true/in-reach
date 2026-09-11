@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt
+from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -27,14 +27,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import env_file, new_project, open_projects, project, recent, rvt_launcher
+from in_reach.app import env_file, halo_status, new_project, open_projects, project, recent, rvt_launcher, system_verify
 from in_reach.ide import icons, style
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
+from in_reach.ide.git_panel import GitPanel
 from in_reach.ide.locations_panel import LocationsPanel
+from in_reach.ide.scripts_panel import ScriptsPanel
 from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.settings_dialog import SettingsDialog
 from in_reach.ide.status_bar import StatusBar
@@ -46,6 +48,9 @@ _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
 _TOPBAR_MARK_SIZE = 22  # PROMPT.md: "increase the taskbar icon size by 10%" -- 16 -> 18 -> 20 -> 22
 _WINDOW_BUTTON_WIDTH = 46
+#: PROMPT.md: "it should check every .5s" -- how often the activity bar's own flame status
+#: indicator re-checks Halo install verification + Halo: MCC running detection.
+_HALO_STATUS_POLL_MS = 500
 #: PROMPT.md: "make sure file explorer panel expands by default so text is visible without
 #: contracting (at the moment we see Personal G..e Variants)" -- 180 let the sidebar (and with it,
 #: the "Personal Game/Map Variants" section headers) get squeezed narrow enough to middle-elide.
@@ -76,7 +81,13 @@ _RVT_SYNCED_JSON_FILENAMES = ("settings.json", "script_settings.json", "strings.
 #: "search" (see activity_bar.py's own note on "explorer" being the Dashboard button's long-
 #: established internal name); this is the user-facing name each one's own
 #: :class:`_NoProjectSidebarPage` text should read instead.
-_VIEW_DISPLAY_NAMES = {"explorer": "Dashboard", "locations": "Locations", "search": "Search"}
+_VIEW_DISPLAY_NAMES = {
+    "explorer": "Dashboard",
+    "git": "Git",
+    "scripts": "Scripts",
+    "locations": "Locations",
+    "search": "Search",
+}
 
 
 class _NoProjectSidebarPage(QWidget):
@@ -475,6 +486,28 @@ class MainWindow(QWidget):
         if app is not None:
             self.activity_bar.refresh_icon_scale(zoom_module.current_scale(app))
 
+        # PROMPT.md: "a flame icon which can be of different states depending on the status of
+        # the players halo install and running detection ... it should check every .5s" -- polls
+        # both halves (verification, a cheap .env read, and MCC-running, a cheap win32 window
+        # lookup) on the same timer rather than wiring a signal through the Welcome tab's own
+        # verify flow, so the indicator is never more than half a second stale regardless of what
+        # changed it (a fresh Verify System Settings run, MCC starting/closing, ...).
+        self._refresh_halo_status()
+        self._halo_status_timer = QTimer(self)
+        self._halo_status_timer.timeout.connect(self._refresh_halo_status)
+        self._halo_status_timer.start(_HALO_STATUS_POLL_MS)
+
+    def _refresh_halo_status(self) -> None:
+        project_dir = project.get_project_dir(self.root_dir)
+        verified = system_verify.verified_keys(project_dir).get(system_verify.HALO_MCC_KEY, False)
+        if not verified:
+            state = icons.STATUS_UNVERIFIED
+        elif halo_status.is_mcc_running():
+            state = icons.STATUS_RUNNING
+        else:
+            state = icons.STATUS_VERIFIED
+        self.activity_bar.set_halo_status(state)
+
     def _build_primary_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
@@ -493,8 +526,12 @@ class MainWindow(QWidget):
         self.explorer_panel = ExplorerPanel()
         self.search_panel = SearchPanel()
         self.locations_panel = LocationsPanel()
+        self.git_panel = GitPanel()
+        self.scripts_panel = ScriptsPanel()
         self._sidebar_pages = {
             "explorer": self.explorer_panel,
+            "git": self.git_panel,
+            "scripts": self.scripts_panel,
             "locations": self.locations_panel,
             "search": self.search_panel,
         }
