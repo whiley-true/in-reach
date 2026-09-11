@@ -411,6 +411,35 @@ def test_section_headers_are_10_percent_smaller_than_the_panel_font(panel: Explo
         )
 
 
+def test_settings_tree_font_is_10_percent_larger_than_the_panel_font(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "in the dashboard panel please make the font for the settings jsons 10% bigger,
+    # they look too small in the sidebar".
+    panel_size = panel.font().pointSizeF()
+
+    assert panel.settings_tree.font().pointSizeF() == pytest.approx(
+        panel_size * ExplorerPanel.SETTINGS_TREE_TEXT_SCALE
+    )
+
+
+def test_settings_tree_font_tracks_a_later_app_font_change(panel: ExplorerPanel) -> None:
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 2)
+        app.setFont(bigger)
+
+        panel.refresh_font_scale()
+
+        expected = bigger.pointSizeF() * ExplorerPanel.TEXT_SCALE * ExplorerPanel.SETTINGS_TREE_TEXT_SCALE
+        assert panel.settings_tree.font().pointSizeF() == pytest.approx(expected)
+    finally:
+        app.setFont(original)
+
+
 # -- multi-project tabs ------------------------------------------------------------------------
 
 
@@ -695,3 +724,14 @@ def test_export_and_view_output_buttons_each_have_their_own_background_and_no_sh
     # style that could read as one connected control.
     assert panel.export_button.styleSheet() == panel.view_output_button.styleSheet()
     assert panel.button_row.styleSheet() == ""
+
+
+def test_dashboard_buttons_hover_with_the_theme_highlight_not_the_unthemed_light_role(
+    panel: ExplorerPanel,
+) -> None:
+    # None of the dark/Whiley themes' own JSON sets a "light" QPalette role, so a hover styled
+    # with `palette(light)` fell back to Qt's own unrelated (plain white) default -- unreadable
+    # against those themes' own light button text. `palette(highlight)` is always themed.
+    sheet = panel.export_button.styleSheet()
+    assert "palette(light)" not in sheet
+    assert "QToolButton:hover { background-color: palette(highlight)" in sheet

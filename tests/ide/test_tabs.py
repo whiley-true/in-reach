@@ -1085,3 +1085,66 @@ def test_main_panel_save_all_covers_every_pane_not_just_the_first(
 
     assert path1.read_text(encoding="utf-8") == "one"
     assert path2.read_text(encoding="utf-8") == "two"
+
+
+# -- dirty_tab_names / reload_open_tabs (PROMPT.md: RVT resync should update clean settings/
+# script_settings/strings.json tabs in place, and ask before overwriting a dirty one) -----------
+
+
+def test_dirty_tab_names_is_empty_when_no_matching_tab_has_unsaved_edits(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+
+    assert main_panel.dirty_tab_names([settings_path]) == []
+
+
+def test_dirty_tab_names_reports_a_dirty_matching_tab_by_file_name(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+    main_panel.active_pane.widget(main_panel.active_pane.currentIndex()).document().setModified(True)
+
+    assert main_panel.dirty_tab_names([settings_path]) == ["settings.json"]
+
+
+def test_dirty_tab_names_ignores_a_dirty_tab_not_in_the_given_paths(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    other_path = tmp_path / "notes.txt"
+    other_path.write_text("hi", encoding="utf-8")
+    main_panel.active_pane.open_file(other_path)
+    main_panel.active_pane.widget(main_panel.active_pane.currentIndex()).document().setModified(True)
+
+    assert main_panel.dirty_tab_names([tmp_path / "settings.json"]) == []
+
+
+def test_reload_open_tabs_rereads_matching_tabs_from_disk_in_place(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("v1", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+    index = main_panel.active_pane.currentIndex()
+
+    settings_path.write_text("v2", encoding="utf-8")
+    main_panel.reload_open_tabs([settings_path])
+
+    assert main_panel.active_pane.widget(index).toPlainText() == "v2"
+    assert main_panel.active_pane.widget(index).document().isModified() is False
+
+
+def test_reload_open_tabs_is_a_no_op_for_a_path_that_is_not_open(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+
+    main_panel.reload_open_tabs([tmp_path / "settings.json"])  # should not raise

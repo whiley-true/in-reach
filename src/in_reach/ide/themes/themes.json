@@ -19,7 +19,8 @@
         "link": "#0000ff",
         "highlight": "#308cc6",
         "highlighted_text": "#ffffff",
-        "mid": "#d4d4d4"
+        "mid": "#d4d4d4",
+        "placeholder_text": "#767676"
       },
       "disabled_text": "#787878"
     },
@@ -41,29 +42,31 @@
         "link": "#2a82da",
         "highlight": "#2a82da",
         "highlighted_text": "#000000",
-        "mid": "#3f3f3f"
+        "mid": "#3f3f3f",
+        "placeholder_text": "#9d9d9d"
       },
       "disabled_text": "#7f7f7f"
     },
     {
       "name": "Whiley",
       "editable": false,
-      "status_bar_color": "#c41e3a",
+      "status_bar_color": "#700000",
       "palette": {
-        "window": "#1a0f0f",
-        "window_text": "#f2e0e0",
-        "base": "#241616",
-        "alternate_base": "#2d1b1b",
-        "tooltip_base": "#2d1b1b",
+        "window": "#5c1414",
+        "window_text": "#cccccc",
+        "base": "#390000",
+        "alternate_base": "#3f0a0a",
+        "tooltip_base": "#3f0a0a",
         "tooltip_text": "#f2e0e0",
-        "text": "#f2e0e0",
-        "button": "#2d1b1b",
-        "button_text": "#f2e0e0",
+        "text": "#cccccc",
+        "button": "#883333",
+        "button_text": "#ffffff",
         "bright_text": "#ff6b6b",
-        "link": "#e05252",
-        "highlight": "#c41e3a",
+        "link": "#e08080",
+        "highlight": "#770000",
         "highlighted_text": "#ffffff",
-        "mid": "#4a2e2e"
+        "mid": "#862424",
+        "placeholder_text": "#b28a8a"
       },
       "disabled_text": "#8a6a6a"
     }

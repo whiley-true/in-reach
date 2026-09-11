@@ -8,9 +8,10 @@ from in_reach.app import env_file, new_project
 from in_reach.app.categories import EngineCategory, EngineIcon
 from in_reach.app.rvt import rvt_bridge
 
-#: PROMPT.md: "can it be a short uuid" -- 8-character base64url tokens (see
-#: new_project._generate_project_id's own docstring for why base64url rather than hex).
-_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8}$")
+#: PROMPT.md: "can it be a short uuid"; later: "please dont have hyphens in uuids for file names"
+#: -- 8-character plain alphanumeric tokens, no hyphens (see
+#: new_project._generate_project_id's own docstring for why not hex, or base64url).
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 
 _JUGGERNAUT_BIN = Path(__file__).parent / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
 _NEEDS_NATIVE_RVT = pytest.mark.skipif(
@@ -177,15 +178,23 @@ def test_two_projects_created_in_a_row_get_different_ids(project_dir: Path) -> N
 # dulwich (the vcs we will be adding)") -----------------------------------------------------------
 
 
-def test_generate_project_id_returns_a_short_base64url_token(tmp_path: Path) -> None:
+def test_generate_project_id_returns_a_short_alphanumeric_token(tmp_path: Path) -> None:
     candidate = new_project._generate_project_id(tmp_path)
 
     assert _PROJECT_ID_RE.match(candidate)
 
 
+def test_generate_project_id_never_contains_a_hyphen(tmp_path: Path) -> None:
+    # PROMPT.md: "please dont have hyphens in uuids for file names" -- base64url (the previous
+    # scheme, see _generate_project_id's own docstring) could render one; run enough times that a
+    # hyphen would show up almost certainly if the alphabet still allowed it.
+    for _ in range(200):
+        assert "-" not in new_project._generate_project_id(tmp_path)
+
+
 def test_generate_project_id_is_not_shaped_like_a_dulwich_sha1_object_id(tmp_path: Path) -> None:
     # Dulwich (and git generally) identifies objects by a 40-character, hex-only SHA-1 digest --
-    # a base64url token must never be mistakable for one at a glance, truncated or not.
+    # a project id token must never be mistakable for one at a glance, truncated or not.
     candidate = new_project._generate_project_id(tmp_path)
 
     assert len(candidate) != 40
@@ -199,7 +208,7 @@ def test_generate_project_id_never_returns_a_name_already_used_under_root(
     free = "freetoken"
     (tmp_path / used).mkdir()
     calls = iter([used, free])
-    monkeypatch.setattr(new_project.secrets, "token_urlsafe", lambda nbytes: next(calls))
+    monkeypatch.setattr(new_project, "_random_token", lambda: next(calls))
 
     candidate = new_project._generate_project_id(tmp_path)
 
@@ -211,7 +220,7 @@ def test_generate_project_id_gives_up_after_max_attempts_of_pure_collisions(
 ) -> None:
     collider = "alwaysthesame"
     (tmp_path / collider).mkdir()
-    monkeypatch.setattr(new_project.secrets, "token_urlsafe", lambda nbytes: collider)
+    monkeypatch.setattr(new_project, "_random_token", lambda: collider)
 
     with pytest.raises(FileExistsError):
         new_project._generate_project_id(tmp_path)

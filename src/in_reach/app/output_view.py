@@ -21,19 +21,25 @@ from pathlib import Path
 from in_reach.app.new_project import BUILD_DIRNAME, SCRIPT_DIRNAME
 from in_reach.app.rvt.decompile import SCRIPT_FILENAME
 
-#: PROMPT.md: "please split this [banner] over two lines" -- each half is its own ``//`` comment
-#: line, same as a real multi-line Megalo comment would be, rather than one very long line.
+#: The generated view's own filename -- deliberately distinct from :data:`SCRIPT_FILENAME`
+#: (``script/output.txt``, the hand-edited source this view is generated *from*), so the two never
+#: share a name even though they live in different folders.
+VIEW_FILENAME = "Compiled.txt"
+
+#: PROMPT.md: "please split this [banner] over two lines" -- each half is its own ``--`` comment
+#: line (Megalo's own line-comment token, not ``//``), same as a real multi-line Megalo comment
+#: would be, rather than one very long line.
 _BANNER = (
-    "// This file is auto-generated and non-editable and represents the active project's present"
+    "-- This file is auto-generated and non-editable and represents the active project's present"
     " megalo script as it would appear post-compiling in RVT.\n"
-    "// It's provided for reference and debugging purposes only. Please use the in-reach's script"
+    "-- It's provided for reference and debugging purposes only. Please use the in-reach's script"
     " management utilities if you want to also persist comments, modules, envs etc.\n\n"
 )
 
 
 def output_view_path(folder: Path) -> Path:
-    """Where :func:`write_output_view` writes -- ``build/output.txt``."""
-    return folder / BUILD_DIRNAME / SCRIPT_FILENAME
+    """Where :func:`write_output_view` writes -- ``build/Compiled.txt``."""
+    return folder / BUILD_DIRNAME / VIEW_FILENAME
 
 
 def write_output_view(folder: Path) -> Path:

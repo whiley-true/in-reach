@@ -8,6 +8,7 @@ hand-implemented here rather than provided by the OS chrome -- see ``in_reach.id
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt
@@ -35,6 +36,7 @@ from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.locations_panel import LocationsPanel
 from in_reach.ide.search_panel import SearchPanel
+from in_reach.ide.settings_dialog import SettingsDialog
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
@@ -61,6 +63,42 @@ _SIDEBAR_MIN_WIDTH = 300
 #: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
 #: primaryScreen() read, taken once at construction) as the window's own minimum-size floor below.
 _SIDEBAR_MAX_WIDTH_FRACTION = 4
+
+#: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
+#: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
+#: project in rvt, upon save: any open script_settings.json, settings.json, or strings.json
+#: without saved changes should immediately update in place[; a]ny of the above with unsaved
+#: changes should pop up ... asking whether to confirm overwrite or abort" -- see
+#: :meth:`MainWindow._on_watched_bin_changed`.
+_RVT_SYNCED_JSON_FILENAMES = ("settings.json", "script_settings.json", "strings.json")
+
+#: The activity bar's own view-toggle buttons are keyed internally as "explorer"/"locations"/
+#: "search" (see activity_bar.py's own note on "explorer" being the Dashboard button's long-
+#: established internal name); this is the user-facing name each one's own
+#: :class:`_NoProjectSidebarPage` text should read instead.
+_VIEW_DISPLAY_NAMES = {"explorer": "Dashboard", "locations": "Locations", "search": "Search"}
+
+
+class _NoProjectSidebarPage(QWidget):
+    """What the primary sidebar shows for a view clicked with no project open -- a centered "Open
+    a Project to use ..." prompt, rather than that view's own real (otherwise-empty) panel. One
+    shared instance serves all three views (see :meth:`MainWindow._on_sidebar_view_selected`);
+    :meth:`set_view_label` retargets its text to whichever one was just clicked."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        self._label = QLabel()
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setEnabled(False)  # the theme's own muted/disabled-text shade, not an error
+        layout.addStretch(1)
+        layout.addWidget(self._label)
+        layout.addStretch(1)
+
+    def set_view_label(self, view: str) -> None:
+        self._label.setText(f"Open a Project to use {_VIEW_DISPLAY_NAMES.get(view, view)}")
 
 
 class _DropdownButton(QToolButton):
@@ -89,16 +127,13 @@ class _FileMenuButton(QToolButton):
         self.setAutoRaise(True)
 
         menu = QMenu(self)
-        menu.addAction("New File", window.new_file)
         menu.addAction("New Window", window.open_new_window)
         menu.addAction("Load Welcome Tab", window.open_welcome_tab)
-        menu.addAction("Open File...", window.open_file)
         menu.addAction("Open Folder...", window.open_folder)
         self.open_recent_menu = menu.addMenu("Open Recent")
         self.open_recent_menu.aboutToShow.connect(self._populate_open_recent)
         menu.addSeparator()
         menu.addAction("Save", window.save_current)
-        menu.addAction("Save As...", window.save_current_as)
         menu.addAction("Save All", window.save_all)
         menu.addSeparator()
         menu.addAction("Close Project", window.close_project)
@@ -289,6 +324,10 @@ class MainWindow(QWidget):
         # a window opened via File > New Window would be garbage-collected (and vanish) as soon as
         # open_new_window() returns.
         self._child_windows: list[MainWindow] = []
+        # PROMPT.md: "if project is closed in ide, if Reach Variant tool is open for that project
+        # it should be closed" -- the RVT process launch_rvt() most recently started for each
+        # project folder, so _close_rvt_for_project() knows what (if anything) to terminate.
+        self._rvt_processes: dict[Path, subprocess.Popen] = {}
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
@@ -364,6 +403,7 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
         self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
         self.explorer_panel.open_projects_changed.connect(self._on_open_projects_changed)
+        self.explorer_panel.project_closed.connect(self._close_rvt_for_project)
         restored = open_projects.list_open(env_project_dir)
         if not restored:
             already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
@@ -401,6 +441,7 @@ class MainWindow(QWidget):
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
         self.activity_bar.launch_rvt_requested.connect(self.launch_rvt)
         self.activity_bar.apply_requested.connect(self.apply_settings_changes)
+        self.activity_bar.settings_requested.connect(self.open_settings_dialog)
         self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
         self.top_bar.panel_toggle.toggled.connect(self._bottom_panel_card.setVisible)
         self.top_bar.minimize_button.clicked.connect(self.showMinimized)
@@ -457,9 +498,11 @@ class MainWindow(QWidget):
             "locations": self.locations_panel,
             "search": self.search_panel,
         }
+        self._no_project_page = _NoProjectSidebarPage()
         self._sidebar_stack = QStackedWidget()
         for page in self._sidebar_pages.values():
             self._sidebar_stack.addWidget(page)
+        self._sidebar_stack.addWidget(self._no_project_page)
         self._sidebar_stack.setCurrentWidget(self._sidebar_pages[DEFAULT_VIEW])
         layout.addWidget(self._sidebar_stack)
         return sidebar
@@ -472,7 +515,16 @@ class MainWindow(QWidget):
 
     def _on_sidebar_view_selected(self, view: str) -> None:
         self._active_sidebar_view = view
-        self._sidebar_stack.setCurrentWidget(self._sidebar_pages[view])
+        if self.explorer_panel.current_folder is None:
+            # "when no project is opened, clicking on dashboard, locations or search a blank
+            # sidebar should popout" -- the real panel underneath has nothing but its own "no
+            # project opened yet" placeholder to show anyway; this reads the same regardless of
+            # which of the three was clicked, rather than that panel's own full (otherwise-empty)
+            # chrome around it.
+            self._no_project_page.set_view_label(view)
+            self._sidebar_stack.setCurrentWidget(self._no_project_page)
+        else:
+            self._sidebar_stack.setCurrentWidget(self._sidebar_pages[view])
         self._show_sidebar(True)
 
     def _on_sidebar_view_collapsed(self) -> None:
@@ -526,9 +578,6 @@ class MainWindow(QWidget):
 
     # -- File menu ------------------------------------------------------------------------------
 
-    def new_file(self) -> None:
-        self.main_panel.new_tab_in(self.main_panel.active_pane)
-
     def open_welcome_tab(self) -> None:
         """"Load Welcome Tab" (PROMPT.md) -- brings the Welcome tab back into the active pane,
         e.g. after it's been closed."""
@@ -539,16 +588,6 @@ class MainWindow(QWidget):
         window = MainWindow(root_dir=self.root_dir)
         window.showMaximized()
         self._child_windows.append(window)
-
-    def open_file(self) -> None:
-        chosen = self.ask_open_file()
-        if chosen:
-            self.main_panel.active_pane.open_file(Path(chosen))
-
-    def ask_open_file(self) -> str:
-        """Kept as its own method purely as a test seam (see ``tabs.py``'s ``_ask_save_path``)."""
-        chosen, _selected_filter = QFileDialog.getOpenFileName(self, "Open File", str(self.root_dir))
-        return chosen
 
     def open_folder(self) -> None:
         """"Open Folder" -- the same "adopt this folder as the current gametype project" action as
@@ -561,13 +600,20 @@ class MainWindow(QWidget):
         return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
 
     def ask_export_path(self, default_path: Path) -> str:
-        """Kept as its own method purely as a test seam (same reasoning as ``ask_open_file``) --
+        """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
         "Export RVT File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's
         own bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
         chosen, _selected_filter = QFileDialog.getSaveFileName(
             self, "Export RVT File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
         )
         return chosen
+
+    def open_settings_dialog(self) -> None:
+        """The activity bar's settings cog -- opens the Settings popout (System/UI stubbed, Theme
+        live) centered at half the screen's size (see
+        :class:`~in_reach.ide.settings_dialog.SettingsDialog`'s own ``showEvent``)."""
+        dialog = SettingsDialog(self, on_theme_changed=self.on_theme_applied)
+        dialog.exec()
 
     def open_recent_project(self, folder: Path) -> None:
         self._adopt_project(folder)
@@ -578,9 +624,6 @@ class MainWindow(QWidget):
 
     def save_current(self) -> None:
         self.main_panel.active_pane.save_current()
-
-    def save_current_as(self) -> None:
-        self.main_panel.active_pane.save_current_as()
 
     def save_all(self) -> None:
         self.main_panel.save_all()
@@ -709,9 +752,23 @@ class MainWindow(QWidget):
         :func:`~in_reach.app.new_project.source_variant_path` instead, the project's frozen
         original starting point (never touched again after creation), so RVT always opened onto
         whatever that looked like, never anything the user had actually saved since.
+
+        Records the launched process against ``folder`` in :attr:`_rvt_processes` (PROMPT.md: "if
+        project is closed in ide, if Reach Variant tool is open for that project it should be
+        closed") so :meth:`_close_rvt_for_project` has something to terminate later.
+
+        Refuses to launch at all -- rather than the best-effort "launch against whatever happens
+        to already compile cleanly" treatment above -- if any of the active project's own
+        settings.json/script_settings.json/strings.json tabs are open with unsaved edits: RVT would
+        otherwise open against whatever those files last held *on disk*, silently ignoring changes
+        the user can still see sitting unsaved in an open tab.
         """
         folder = self.explorer_panel.current_folder
         if folder is not None:
+            dirty_names = self.main_panel.dirty_tab_names(self._rvt_synced_json_paths(folder))
+            if dirty_names:
+                self._warn_unsaved_settings_before_rvt(dirty_names)
+                return
             from in_reach.app import apply_settings
 
             try:
@@ -726,9 +783,40 @@ class MainWindow(QWidget):
             # to be opened against, below) is actually noticed.
             self._rewatch_project_bin(folder)
         try:
-            rvt_launcher.launch_rvt(self._current_project_bin())
+            process = rvt_launcher.launch_rvt(self._current_project_bin())
         except OSError as exc:
             QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")
+            return
+        if folder is not None:
+            self._rvt_processes[folder] = process
+
+    def _rvt_synced_json_paths(self, folder: Path) -> list[Path]:
+        """``folder``'s own settings.json/script_settings.json/strings.json paths -- the three
+        files an RVT resync/launch reads or overwrites (see :data:`_RVT_SYNCED_JSON_FILENAMES`)."""
+        settings_dir = folder / new_project.SETTINGS_DIRNAME
+        return [settings_dir / name for name in _RVT_SYNCED_JSON_FILENAMES]
+
+    def _warn_unsaved_settings_before_rvt(self, dirty_names: list[str]) -> None:
+        """"RVT should not be openable if a user has unsaved changes to any of the settings jsons"
+        -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_overwrite_rvt_changes`."""
+        joined = "\n".join(dirty_names)
+        QMessageBox.warning(
+            self,
+            "in-reach",
+            "Save your changes to the following files before launching ReachVariantTool:\n\n"
+            f"{joined}",
+        )
+
+    def _close_rvt_for_project(self, folder: Path) -> None:
+        """PROMPT.md: "if project is closed in ide, if Reach Variant tool is open for that project
+        it should be closed" -- terminates whichever RVT process :meth:`launch_rvt` most recently
+        started for ``folder``, if it's still running. A no-op if RVT was never launched for this
+        project, or if that process has already exited on its own (``Popen.poll()`` returns
+        ``None`` only while a process is still running)."""
+        process = self._rvt_processes.pop(folder, None)
+        if process is not None and process.poll() is None:
+            process.terminate()
 
     def _current_project_bin(self) -> Path | None:
         folder = self.explorer_panel.current_folder
@@ -745,11 +833,11 @@ class MainWindow(QWidget):
         self._refresh_apply_enabled(folder)
 
     def _sync_project_dependent_views(self, folder: Path | None) -> None:
-        """PROMPT.md: "if no project is loaded the panels cannot be expanded" -- the Dashboard/
-        Locations/Search sidebar views have nothing but a "no project opened yet" placeholder to
-        show without one, so the primary sidebar is forced collapsed and all three of the activity
-        bar's own view-toggle buttons (plus the top bar's own sidebar toggle, the other way to open
-        it) are disabled whenever no project is open, re-enabled the moment one is.
+        """Collapses the primary sidebar whenever the active project closes (nothing left open in
+        it worth showing on screen unasked) -- clicking a view button again still works with no
+        project open, it just switches to that view's own "Open a Project to use ..." placeholder
+        rather than the real panel (see :meth:`_on_sidebar_view_selected`); the view-toggle buttons
+        and the top bar's own sidebar toggle are never disabled for this, unlike before.
 
         Only reacts to the *has-a-project/has-none* transition, not to which project is active --
         switching between two already-open project tabs re-fires ``active_project_changed`` too
@@ -762,8 +850,6 @@ class MainWindow(QWidget):
         with the sidebar open).
         """
         has_project = folder is not None
-        self.activity_bar.set_views_enabled(has_project)
-        self.top_bar.sidebar_toggle.setEnabled(has_project)
         if not has_project:
             self._show_sidebar(False)
             self.activity_bar.set_active_view(None)
@@ -846,11 +932,20 @@ class MainWindow(QWidget):
         freshly-compiled variant) or RVT's own bare/script-only ``.mglo`` (PROMPT.md: "please check
         old repos for guidance" -- ported from v2's own ``app/mglo.py``, see
         :func:`~in_reach.app.rvt.mglo.write_mglo`'s own docstring). A no-op with no project open.
+
+        If the active project's own ``settings/`` has changes that haven't been compiled yet (the
+        activity bar's own Apply/compile arrow isn't "green" -- see
+        :func:`~in_reach.app.apply_settings.settings_have_unapplied_changes`), asks whether to
+        compile them first rather than silently exporting whatever ``build/dist/*.bin`` already
+        happens to hold (see :meth:`_confirm_compile_before_export`).
         """
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
         from in_reach.app import apply_settings
+
+        if apply_settings.settings_have_unapplied_changes(folder) and not self._confirm_compile_before_export():
+            return
 
         project_dir = project.get_project_dir(self.root_dir)
         result = apply_settings.apply_settings_changes(project_dir, folder)
@@ -859,6 +954,14 @@ class MainWindow(QWidget):
 
             QMessageBox.critical(self, "in-reach", f"Couldn't compile before export:\n{format_build_result(result)}")
             return
+        # This compile is the same one Apply's own button runs -- refresh everything that button's
+        # own click handler refreshes after a successful compile (the activity bar's own compile
+        # arrow included), or the side icon panel keeps reading as "changes pending" even though
+        # exporting here just applied them.
+        self._refresh_apply_enabled(folder)
+        self._sync_project_title(folder)
+        self._rewatch_project_bin(folder)
+        self.explorer_panel.refresh_stats()
         compiled = new_project.compiled_variant_path(folder)
         if not compiled.is_file():
             QMessageBox.critical(
@@ -937,6 +1040,16 @@ class MainWindow(QWidget):
         swallowed rather than popping an error over a background sync the user didn't explicitly
         ask for.
 
+        PROMPT.md: "when making changes to a project in rvt, upon save: any open
+        script_settings.json, settings.json, or strings.json without saved changes should
+        immediately update in place[; a]ny of the above with unsaved changes should pop up showing
+        all unsaved changes and asking whether to confirm overwrite or abort reach variant tool
+        save" -- checked *before* the resync actually runs (see :meth:`_confirm_overwrite_rvt_changes`),
+        so choosing "Abort" leaves ``settings/`` (and every open tab) untouched by this cycle
+        rather than trying to undo a write that's already landed on disk. "Overwrite" (or nothing
+        dirty at all) proceeds with the resync as before, then reloads every matching open tab in
+        place via :meth:`~in_reach.ide.tabs.MainPanelArea.reload_open_tabs`.
+
         Title/description are deliberately *not* carried forward from the old ``settings.json``
         here (unlike category, which isn't a ``.bin`` concept at all) -- PROMPT.md: "when a project
         name is changed via rvt ... the project title should change in the tabs and in the
@@ -954,26 +1067,74 @@ class MainWindow(QWidget):
             from in_reach.app.rvt import settings_io
             from in_reach.app.rvt.decompile import resync_from_bin
 
-            settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
-            category, category_icon = settings_io.load_meta_category(settings_path)
-            map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
-            try:
-                resync_from_bin(
-                    bin_path,
-                    folder,
-                    category=category,
-                    category_icon=category_icon,
-                    map_entries=map_entries,
-                )
-            except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
-                pass
-            else:
-                self._sync_project_title(folder)
-                # PROMPT.md: "please also add a stats view into the dashboard" -- this resync just
-                # regenerated build/stats.autogenerated.json too.
-                self.explorer_panel.refresh_stats()
+            watched_json_paths = self._rvt_synced_json_paths(folder)
+            dirty_names = self.main_panel.dirty_tab_names(watched_json_paths)
+            if not dirty_names or self._confirm_overwrite_rvt_changes(dirty_names):
+                settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
+                category, category_icon = settings_io.load_meta_category(settings_path)
+                map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
+                try:
+                    resync_from_bin(
+                        bin_path,
+                        folder,
+                        category=category,
+                        category_icon=category_icon,
+                        map_entries=map_entries,
+                    )
+                except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+                    pass
+                else:
+                    self.main_panel.reload_open_tabs(watched_json_paths)
+                    self._sync_project_title(folder)
+                    # PROMPT.md: "please also add a stats view into the dashboard" -- this resync
+                    # just regenerated build/stats.autogenerated.json too.
+                    self.explorer_panel.refresh_stats()
         # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
         # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so
         # the *next* save still gets caught.
         if bin_path.is_file() and str(bin_path) not in self._bin_watcher.files():
             self._bin_watcher.addPath(str(bin_path))
+
+    def _confirm_overwrite_rvt_changes(self, dirty_names: list[str]) -> bool:
+        """Asks whether to let a just-saved RVT resync overwrite unsaved edits in ``dirty_names``
+        (already-open settings/script_settings/strings.json tabs) -- kept as its own method purely
+        as a test seam, same reasoning as :meth:`~in_reach.ide.tabs.TabPane._ask_save_choice`.
+
+        Returns:
+            ``True`` for "Overwrite" (the resync should proceed), ``False`` for "Abort".
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("in-reach")
+        joined = "\n".join(dirty_names)
+        box.setText(
+            "ReachVariantTool just saved this project, but the following files have unsaved "
+            f"changes here that would be overwritten:\n\n{joined}\n\n"
+            "Overwrite your unsaved changes with ReachVariantTool's, or abort applying this save?"
+        )
+        overwrite_button = box.addButton("Overwrite", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(overwrite_button)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
+
+    def _confirm_compile_before_export(self) -> bool:
+        """"[I]f a user has made changes to the settings jsons that haven't been applied yet ...
+        then export rvt should prompt the user to compile first" (PROMPT.md) -- asked right before
+        :meth:`export_rvt_file` would otherwise silently compile over whatever ``build/dist/*.bin``
+        already holds. Kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_overwrite_rvt_changes`.
+
+        Returns:
+            ``True`` for "Compile Now" (export should proceed), ``False`` for "Cancel".
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "This project has changes in settings/ that haven't been compiled yet. Compile them "
+            "now before exporting?"
+        )
+        compile_button = box.addButton("Compile Now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(compile_button)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole

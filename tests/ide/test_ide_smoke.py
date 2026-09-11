@@ -33,6 +33,35 @@ def test_lists_the_three_shipped_themes() -> None:
     assert theme.list_themes() == ["Light", "Dark", "Whiley"]
 
 
+def test_whiley_theme_matches_the_vs_red_png_reference() -> None:
+    # PROMPT.md: "for the whiley theme, please make the colour scheme closer match vs_red.png
+    # example" -- values sampled directly from that reference screenshot's own pixels (background/
+    # sidebar/editor fill, the title-bar/selected-row/status-bar red accent, the toolbar button
+    # fill, and the panel-divider color), not eyeballed. "window" was later brightened further --
+    # "make the furthest background (the 'screen' on which panels lay on top) a brighter shade of
+    # red" -- so it no longer matches that original sample on its own.
+    whiley = theme.load_theme("Whiley")
+    assert whiley.palette_colors["base"] == "#390000"
+    assert whiley.palette_colors["highlight"] == "#770000"
+    assert whiley.palette_colors["button"] == "#883333"
+    assert whiley.palette_colors["mid"] == "#862424"
+    assert whiley.status_bar_color == "#700000"
+
+
+def test_whiley_theme_window_background_is_a_brighter_red_than_its_panels(qtbot) -> None:
+    # "please make the furthest background (the 'screen' on which panels lay on top) a brighter
+    # shade of red in whiley theme" -- the gap/outer background (QPalette Window) should read as a
+    # visibly brighter red than the darker #330000 it used to share the same hue family with, and
+    # brighter than the panel fill (Base) it sits behind.
+    from PyQt6.QtGui import QColor
+
+    whiley = theme.load_theme("Whiley")
+    window_color = QColor(whiley.palette_colors["window"])
+    base_color = QColor(whiley.palette_colors["base"])
+    assert window_color.lightness() > QColor("#330000").lightness()
+    assert window_color.lightness() > base_color.lightness()
+
+
 def test_apply_theme_falls_back_to_default_for_an_unknown_name(qtbot) -> None:
     app = QApplication.instance()
     applied = theme.apply_theme(app, "Not A Real Theme")
@@ -118,6 +147,22 @@ def test_every_theme_has_readable_tooltip_contrast() -> None:
     for name in theme.list_themes():
         loaded = theme.load_theme(name)
         assert loaded.palette_colors["tooltip_base"] != loaded.palette_colors["tooltip_text"]
+
+
+def test_every_theme_defines_a_placeholder_text_color_distinct_from_its_base(qtbot) -> None:
+    # Regression guard: QPalette::PlaceholderText was never set per-theme, so a QLineEdit's own
+    # placeholder ("My Gametype", "Optional", ...) fell back to Qt's compiled-in default (a color
+    # picked for the stock light palette) regardless of the active theme -- unreadably dark against
+    # the Dark/Whiley themes' own dark backgrounds ("background text is still dark/unreadable...
+    # when creating new project").
+    for name in theme.list_themes():
+        loaded = theme.load_theme(name)
+        assert "placeholder_text" in loaded.palette_colors
+        palette = loaded.build_palette()
+        placeholder = palette.color(QPalette.ColorRole.PlaceholderText)
+        base = palette.color(QPalette.ColorRole.Base)
+        assert placeholder != base
+        assert abs(placeholder.lightness() - base.lightness()) > 20
 
 
 def test_apply_theme_sets_the_app_palette_and_forces_fusion(qtbot) -> None:
@@ -394,21 +439,42 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
     assert bottom.tabText(bottom.currentIndex()) == "text2"
 
 
-# -- gating the sidebar views on a project being open (PROMPT.md: "if no project is loaded the
-# panels cannot be expanded") --------------------------------------------------------------------
+# -- gating the sidebar views on a project being open --------------------------------------------
 
 
-def test_sidebar_starts_collapsed_and_its_views_disabled_with_no_project_open(window: MainWindow) -> None:
+def test_sidebar_starts_collapsed_but_its_views_stay_clickable_with_no_project_open(
+    window: MainWindow,
+) -> None:
     # Dashboard/Locations/Search all have nothing but a "no project opened yet" placeholder to
-    # show without one, so there's nothing to expand into until a project exists.
+    # show without one, so the sidebar starts collapsed -- but the view buttons (and the top bar's
+    # own sidebar toggle) stay clickable, since clicking one still pops the sidebar open onto an
+    # "Open a Project to use ..." placeholder (see the test below).
     assert window.primary_sidebar.isVisible() is False
-    assert window.activity_bar.explorer_button.isEnabled() is False
-    assert window.activity_bar.locations_button.isEnabled() is False
-    assert window.activity_bar.search_button.isEnabled() is False
-    assert window.top_bar.sidebar_toggle.isEnabled() is False
+    assert window.activity_bar.explorer_button.isEnabled() is True
+    assert window.activity_bar.locations_button.isEnabled() is True
+    assert window.activity_bar.search_button.isEnabled() is True
+    assert window.top_bar.sidebar_toggle.isEnabled() is True
 
 
-def test_opening_the_first_project_enables_the_views_and_reveals_the_dashboard(
+def test_clicking_a_view_with_no_project_open_pops_out_a_blank_placeholder(window: MainWindow) -> None:
+    window.activity_bar.locations_button.click()
+
+    assert window.primary_sidebar.isVisible() is True
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+    assert window._no_project_page._label.text() == "Open a Project to use Locations"
+
+    window.activity_bar.search_button.click()
+
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+    assert window._no_project_page._label.text() == "Open a Project to use Search"
+
+    window.activity_bar.explorer_button.click()
+
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+    assert window._no_project_page._label.text() == "Open a Project to use Dashboard"
+
+
+def test_opening_the_first_project_reveals_the_dashboard(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     folder = tmp_path / "project"
@@ -427,7 +493,23 @@ def test_opening_the_first_project_enables_the_views_and_reveals_the_dashboard(
     assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["explorer"]
 
 
-def test_closing_the_last_project_disables_the_views_and_collapses_the_sidebar(
+def test_opening_the_first_project_swaps_an_already_popped_out_blank_placeholder_for_the_dashboard(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # Same "reveals the Dashboard automatically" behavior as opening the first project with the
+    # sidebar fully collapsed -- a view popped open onto the blank placeholder beforehand isn't
+    # special-cased to stay on that same view once a project actually exists.
+    project_window.activity_bar.search_button.click()
+    assert project_window._sidebar_stack.currentWidget() is project_window._no_project_page
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    project_window._on_project_opened(folder)
+
+    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["explorer"]
+
+
+def test_closing_the_last_project_collapses_the_sidebar_but_leaves_the_views_clickable(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     folder = tmp_path / "project"
@@ -437,10 +519,10 @@ def test_closing_the_last_project_disables_the_views_and_collapses_the_sidebar(
     project_window.close_project()
 
     assert project_window.primary_sidebar.isVisible() is False
-    assert project_window.activity_bar.explorer_button.isEnabled() is False
-    assert project_window.activity_bar.locations_button.isEnabled() is False
-    assert project_window.activity_bar.search_button.isEnabled() is False
-    assert project_window.top_bar.sidebar_toggle.isEnabled() is False
+    assert project_window.activity_bar.explorer_button.isEnabled() is True
+    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.search_button.isEnabled() is True
+    assert project_window.top_bar.sidebar_toggle.isEnabled() is True
 
 
 def test_switching_between_two_open_projects_does_not_force_the_sidebar_back_open(
@@ -950,6 +1032,93 @@ def test_clicking_the_disabled_rvt_button_does_not_launch_anything(
     assert calls == []
 
 
+class _FakeRvtProcess:
+    """A stand-in for :class:`subprocess.Popen` -- just enough of its interface (``poll()``/
+    ``terminate()``) for :meth:`MainWindow._close_rvt_for_project` to drive."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def poll(self):
+        return None if not self.terminated else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def test_closing_a_project_terminates_its_own_running_rvt_process(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "if project is closed in ide, if Reach Variant tool is open for that project it
+    # should be closed".
+    from in_reach.app import rvt_launcher
+
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    process = _FakeRvtProcess()
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
+
+    project_window.launch_rvt()
+    assert project_window._rvt_processes[folder] is process
+
+    project_window.explorer_panel.close_active_project()
+
+    assert process.terminated is True
+    assert folder not in project_window._rvt_processes
+
+
+def test_closing_a_project_with_no_rvt_launched_is_a_no_op(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.explorer_panel.close_active_project()  # should not raise
+
+
+def test_closing_a_project_does_not_terminate_an_already_exited_rvt_process(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    process = _FakeRvtProcess()
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
+    project_window.launch_rvt()
+    process.terminated = True  # simulate it having exited on its own already
+
+    project_window.explorer_panel.close_active_project()
+
+    # terminate() is only called while poll() still reports "running" -- it was never called here,
+    # so `terminated` stays exactly the sentinel value this test set, not flipped by a second call.
+    assert process.terminated is True
+
+
+def test_closing_a_different_project_does_not_terminate_this_ones_rvt_process(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import rvt_launcher
+
+    folder_a = tmp_path / "project-a"
+    folder_a.mkdir()
+    folder_b = tmp_path / "project-b"
+    folder_b.mkdir()
+    project_window._on_project_opened(folder_a)
+    process = _FakeRvtProcess()
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
+    project_window.launch_rvt()
+    project_window._on_project_opened(folder_b)
+
+    project_window.explorer_panel.close_project(folder_b)
+
+    assert process.terminated is False
+    assert project_window._rvt_processes[folder_a] is process
+
+
 # -- Apply --------------------------------------------------------------------------------------
 
 
@@ -1096,7 +1265,7 @@ def test_view_output_txt_opens_a_locked_generated_view_of_the_script(
     assert editor.isReadOnly() is True
     assert pane.tabIcon(pane.currentIndex()).isNull() is False  # the padlock icon
     text = editor.toPlainText()
-    assert text.startswith("// This file is auto-generated and non-editable")
+    assert text.startswith("-- This file is auto-generated and non-editable")
     assert "do stuff" in text
 
 
@@ -1124,6 +1293,121 @@ def test_view_output_txt_refreshes_an_already_open_view_with_the_scripts_latest_
 
 def test_export_rvt_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
     window.export_rvt_file()  # should not raise
+
+
+def test_export_rvt_file_prompts_to_compile_first_when_settings_have_unapplied_changes(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    prompted = []
+    monkeypatch.setattr(MainWindow, "_confirm_compile_before_export", lambda self: prompted.append(True) or False)
+    compile_calls = []
+    monkeypatch.setattr(
+        apply_settings, "apply_settings_changes", lambda pd, f: compile_calls.append((pd, f))
+    )
+
+    project_window.export_rvt_file()
+
+    assert prompted == [True]
+    assert compile_calls == []  # cancelled -- never even tried to compile
+
+
+def test_export_rvt_file_compiles_after_confirming_the_compile_prompt(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    monkeypatch.setattr(MainWindow, "_confirm_compile_before_export", lambda self: True)
+    dest = tmp_path / "MySlayer.bin"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()
+
+    assert dest.read_bytes() == b"compiled"
+
+
+def test_export_rvt_file_updates_the_apply_buttons_state_after_compiling(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "if a user clicks export rvt and has unsaved changes, then when changes are applied the
+    # changes should be compiled (updating side icon panel)" -- export_rvt_file() used to compile
+    # without ever re-checking the Apply button's own enabled state afterward, so the activity
+    # bar's compile arrow kept reading as "changes pending" even once export had just applied them.
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    settings_path = folder / "settings" / "settings.json"
+    generated_path = folder / "build" / "settings.autogenerated.json"
+    settings_path.write_text('{"a": 1}', encoding="utf-8")
+    generated_path.write_text('{"a": 0}', encoding="utf-8")
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        generated_path.write_text(settings_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+    monkeypatch.setattr(MainWindow, "_confirm_compile_before_export", lambda self: True)
+    dest = tmp_path / "MySlayer.bin"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    project_window._on_project_opened(folder)
+    assert project_window.activity_bar.apply_button.isEnabled() is True  # unapplied to start
+
+    project_window.export_rvt_file()
+
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+
+
+def test_export_rvt_file_does_not_prompt_when_settings_already_match_the_last_build(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 1}', encoding="utf-8")
+    compiled_bin = new_project.compiled_variant_path(folder)
+
+    def _fake_apply(project_dir, target_folder):
+        compiled_bin.parent.mkdir(parents=True, exist_ok=True)
+        compiled_bin.write_bytes(b"compiled")
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", _fake_apply)
+
+    def _fail_if_prompted(self):
+        pytest.fail("should not have prompted -- nothing unapplied")
+
+    monkeypatch.setattr(MainWindow, "_confirm_compile_before_export", _fail_if_prompted)
+    dest = tmp_path / "MySlayer.bin"
+    monkeypatch.setattr(MainWindow, "ask_export_path", lambda self, default_path: str(dest))
+    project_window._on_project_opened(folder)
+
+    project_window.export_rvt_file()
+
+    assert dest.read_bytes() == b"compiled"
 
 
 def test_export_rvt_file_shows_an_error_and_stops_when_compiling_fails(
@@ -1479,6 +1763,71 @@ def test_launch_rvt_applies_present_settings_before_launching(
     assert calls == [(project_dir, folder)]
 
 
+def test_launch_rvt_refuses_when_a_settings_json_tab_has_unsaved_edits(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project, rvt_launcher
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    widget = window.main_panel.active_pane.widget(window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("hand-edited, unsaved")
+    widget.document().setModified(True)
+
+    launch_calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launch_calls.append(target))
+    warned = []
+    monkeypatch.setattr(MainWindow, "_warn_unsaved_settings_before_rvt", lambda self, names: warned.append(names))
+
+    window.launch_rvt()
+
+    assert launch_calls == []
+    assert warned == [["settings.json"]]
+
+
+def test_launch_rvt_proceeds_once_the_dirty_settings_tab_is_saved(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    widget = window.main_panel.active_pane.widget(window.main_panel.active_pane.currentIndex())
+    widget.setPlainText('{"meta": {"title": "Old"}}')
+    widget.document().setModified(False)  # a clean, already-open tab
+
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", lambda pd, f: BuildResult(success=True))
+    launch_calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launch_calls.append(target))
+
+    window.launch_rvt()
+
+    assert launch_calls == [bin_path]
+
+
 def test_launch_rvt_swallows_a_compile_failure_and_still_launches(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1707,6 +2056,122 @@ def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
     window._on_watched_bin_changed(str(bin_path))  # should not raise
 
     assert str(bin_path) in window._bin_watcher.files()
+
+
+def test_watched_bin_changing_reloads_a_clean_open_settings_tab_in_place(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "any open script_settings.json, settings.json, or strings.json without saved
+    # changes should immediately update in place".
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    index = window.main_panel.active_pane.currentIndex()
+
+    def _fake_resync(bin_path, folder, **k):
+        settings_path.write_text('{"meta": {"title": "RVT Renamed"}}', encoding="utf-8")
+
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", _fake_resync)
+    prompted = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_overwrite_rvt_changes", lambda self, names: prompted.append(names) or True
+    )
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert prompted == []  # never asked -- the tab wasn't dirty
+    assert window.main_panel.active_pane.widget(index).toPlainText() == '{"meta": {"title": "RVT Renamed"}}'
+
+
+def test_watched_bin_changing_prompts_before_overwriting_a_dirty_settings_tab(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "any of the above with unsaved changes should pop up showing all unsaved changes
+    # and asking whether to confirm overwrite or abort reach variant tool save".
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    index = window.main_panel.active_pane.currentIndex()
+    widget = window.main_panel.active_pane.widget(index)
+    widget.setPlainText("hand-edited, unsaved")
+    widget.document().setModified(True)
+
+    resync_calls = []
+    monkeypatch.setattr(
+        "in_reach.app.rvt.decompile.resync_from_bin", lambda *a, **k: resync_calls.append(True)
+    )
+    prompted = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_overwrite_rvt_changes", lambda self, names: prompted.append(names) or False
+    )
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert prompted == [["settings.json"]]
+    assert resync_calls == []  # aborted -- the resync never ran
+    assert widget.toPlainText() == "hand-edited, unsaved"  # untouched
+
+
+def test_watched_bin_changing_overwrites_a_dirty_settings_tab_when_confirmed(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    index = window.main_panel.active_pane.currentIndex()
+    widget = window.main_panel.active_pane.widget(index)
+    widget.setPlainText("hand-edited, unsaved")
+    widget.document().setModified(True)
+
+    def _fake_resync(bin_path, folder, **k):
+        settings_path.write_text('{"meta": {"title": "RVT Renamed"}}', encoding="utf-8")
+
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", _fake_resync)
+    monkeypatch.setattr(MainWindow, "_confirm_overwrite_rvt_changes", lambda self, names: True)
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert widget.toPlainText() == '{"meta": {"title": "RVT Renamed"}}'
+    assert widget.document().isModified() is False
 
 
 def test_watched_bin_deleted_then_recreated_is_still_watched_afterward(
@@ -2021,6 +2486,44 @@ def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
     assert dialog._theme_buttons["Light"].isChecked() is False
 
 
+def test_settings_cog_opens_the_settings_dialog(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.ide.settings_dialog import SettingsDialog
+
+    opened = []
+    monkeypatch.setattr(SettingsDialog, "exec", lambda self: opened.append(self) or 0)
+
+    window.activity_bar.settings_button.click()
+
+    assert len(opened) == 1
+    assert isinstance(opened[0], SettingsDialog)
+
+
+def test_settings_dialog_theme_change_updates_the_main_window_chrome(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.ide.settings_dialog import SettingsDialog
+
+    captured: list[SettingsDialog] = []
+
+    def _capture_and_close(self):
+        captured.append(self)
+        return 0
+
+    monkeypatch.setattr(SettingsDialog, "exec", _capture_and_close)
+
+    window.open_settings_dialog()
+
+    dialog = captured[0]
+    dialog.theme_tab.theme_picker.apply_theme("Whiley")
+
+    # on_theme_applied() (MainWindow's own theme-change hook, passed as SettingsDialog's
+    # on_theme_changed) re-colors the status bar to match -- confirms the dialog's Theme tab is
+    # actually wired to it, not just applying the palette in isolation.
+    assert "#700000" in window.status_bar.styleSheet()
+
+
 def test_first_run_flag_defaults_to_true_and_flips_to_false_after_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2107,27 +2610,15 @@ def test_file_menu_has_every_action_prompt_md_asks_for(project_window: MainWindo
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
 
     assert labels == [
-        "New File",
         "New Window",
         "Load Welcome Tab",
-        "Open File...",
         "Open Folder...",
         "Open Recent",
         "Save",
-        "Save As...",
         "Save All",
         "Close Project",
         "Close Editor",
     ]
-
-
-def test_new_file_adds_a_tab_to_the_active_pane(project_window: MainWindow) -> None:
-    pane = project_window.main_panel.active_pane
-    before = pane.count()
-
-    project_window.new_file()
-
-    assert pane.count() == before + 1
 
 
 def test_open_welcome_tab_switches_to_the_existing_one(project_window: MainWindow) -> None:
@@ -2178,33 +2669,6 @@ def test_clicking_a_file_in_the_explorer_panel_opens_it_in_the_active_pane(
 
     assert pane.count() == before + 1
     assert pane.widget(pane.currentIndex()).toPlainText() == "print('hi')"
-
-
-def test_open_file_reads_the_chosen_file_into_the_active_pane(
-    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    source = tmp_path / "script.txt"
-    source.write_text("print(1)", encoding="utf-8")
-    monkeypatch.setattr(MainWindow, "ask_open_file", lambda self: str(source))
-    pane = project_window.main_panel.active_pane
-    before = pane.count()
-
-    project_window.open_file()
-
-    assert pane.count() == before + 1
-    assert pane.widget(pane.currentIndex()).toPlainText() == "print(1)"
-
-
-def test_open_file_cancelled_adds_nothing(
-    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(MainWindow, "ask_open_file", lambda self: "")
-    pane = project_window.main_panel.active_pane
-    before = pane.count()
-
-    project_window.open_file()
-
-    assert pane.count() == before
 
 
 def test_open_folder_adopts_it_as_the_current_project(

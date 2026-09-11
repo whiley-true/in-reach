@@ -1,8 +1,10 @@
 """The far-left activity bar: five reorderable icons at the top -- a compile/"Apply" action, a
 ReachVariantTool launcher action, and three sidebar-view toggles (Dashboard, Locations, Search),
 exactly one of whose views is ever active, switching the primary sidebar's content, VSCode-style:
-clicking the already-active one collapses the sidebar instead of switching -- then a help icon and
-a settings cog pinned at the bottom (both no-ops for now).
+clicking the already-active one collapses the sidebar instead of switching -- then a help icon
+(still a no-op) and a settings cog pinned at the bottom, which opens the Settings popout (see
+:class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns actually building/showing
+it, this bar just emits :attr:`ActivityBar.settings_requested`).
 
 PROMPT.md: "please also move this arrow to the top of the icons, then rvt icon, then dashboard,
 then locations, then search (please also make them drag re-orderable by the user (should be saved
@@ -250,6 +252,8 @@ class ActivityBar(QWidget):
     launch_rvt_requested = pyqtSignal()
     # Ditto -- MainWindow owns what "apply" actually does.
     apply_requested = pyqtSignal()
+    # Ditto -- MainWindow owns building/showing the settings popout itself.
+    settings_requested = pyqtSignal()
 
     #: Tracked purely so set_rvt_enabled() can re-render the RVT icon at the *current* scale
     #: without needing its own scale argument threaded through every caller.
@@ -289,7 +293,7 @@ class ActivityBar(QWidget):
         # PROMPT.md: "please also make it so the tick in the side panel was instead a horizontal
         # arrow (representing compiling) ... please also move this arrow to the top of the
         # icons" -- built first so it lands first in the reorderable strip's default order.
-        self.apply_button = _bar_button("apply", "Apply settings changes")
+        self.apply_button = _bar_button("apply", "Apply changes")
         self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, _ICON_SIZE, enabled=False))
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested.emit)
@@ -318,10 +322,11 @@ class ActivityBar(QWidget):
         self.explorer_button.clicked.connect(lambda: self._handle_click("explorer"))
 
         # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
-        # expanded view for now" -- a real sidebar-view toggle (like Explorer/Search), just with a
-        # placeholder view behind it (see MainWindow's own LocationsPanel wiring).
+        # expanded view for now" (later: "for locations please use a compass icon") -- a real
+        # sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it (see
+        # MainWindow's own LocationsPanel wiring).
         self.locations_button = _bar_button(
-            "bookshelf", "Locations (toggle primary sidebar)", checkable=True, checked=False
+            "compass", "Locations (toggle primary sidebar)", checkable=True, checked=False
         )
         self.locations_button.clicked.connect(lambda: self._handle_click("locations"))
 
@@ -361,9 +366,9 @@ class ActivityBar(QWidget):
         self.help_button = _bar_button("help", "Help")
         layout.addWidget(self.help_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        # Settings intentionally does nothing yet -- see PROMPT.md's "for now settings should do
-        # nothing".
+        # Opens the Settings popout (System/UI/Theme tabs) -- MainWindow owns building/showing it.
         self.settings_button = _bar_button("settings", "Settings")
+        self.settings_button.clicked.connect(self.settings_requested.emit)
         layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.set_rvt_enabled(False)
@@ -394,18 +399,6 @@ class ActivityBar(QWidget):
     @property
     def active_view(self) -> str | None:
         return self._active_view
-
-    def set_views_enabled(self, enabled: bool) -> None:
-        """PROMPT.md: "if no project is loaded the panels cannot be expanded" -- the Dashboard/
-        Locations/Search sidebar views all have nothing but a "no project opened yet" placeholder
-        to show without one, so their three toggle buttons are disabled outright until a project
-        exists, rather than letting the primary sidebar open onto one of those empty panels at
-        all -- consistent with how :meth:`set_rvt_enabled`/:meth:`set_apply_enabled` already gate
-        this bar's other project-dependent buttons. MainWindow owns actually collapsing the
-        sidebar to match (see its own ``_sync_project_dependent_views``); this just gates the
-        buttons themselves."""
-        for button in self._buttons.values():
-            button.setEnabled(enabled)
 
     # -- RVT / Apply enablement ---------------------------------------------------------------------
 

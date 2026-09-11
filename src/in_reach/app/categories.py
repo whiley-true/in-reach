@@ -89,12 +89,22 @@ _CATEGORY_TO_ICON_NAME = {
     EngineCategory.race.name: EngineIcon.race_and_rally.name,
 }
 
+#: PROMPT.md: "one of the categories when creating a new game shows 'Unkown Vip' instead of 'Vip'"
+#: -- a plain ``member.name.replace("_", " ").title()`` reads :attr:`EngineCategory.unknown_vip`
+#: as "Unknown Vip"; this member-specific override is what :func:`display_name` checks first.
+_DISPLAY_NAME_OVERRIDES = {
+    EngineCategory.unknown_vip.name: "Vip",
+}
+
 
 def display_name(member: EngineCategory | EngineIcon) -> str:
     """A human-readable label for a category/icon enum member, e.g. ``king_of_the_hill`` ->
     ``"King Of The Hill"``."""
     if isinstance(member, EngineCategory) and member is EngineCategory.none:
         return "None (Forge)"
+    override = _DISPLAY_NAME_OVERRIDES.get(member.name)
+    if override is not None:
+        return override
     return member.name.replace("_", " ").title()
 
 

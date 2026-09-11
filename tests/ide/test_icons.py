@@ -17,6 +17,15 @@ def test_icon_renders_a_known_glyph(qtbot) -> None:
     assert _has_opaque_pixel(pixmap.toImage())
 
 
+def test_compass_icon_renders(qtbot) -> None:
+    # PROMPT.md: "for locations please use a compass icon" (replacing the earlier "bookshelf").
+    icon = icons.icon("compass", color="#ff0000", size=16)
+    pixmap = icon.pixmap(16, 16)
+
+    assert not pixmap.isNull()
+    assert _has_opaque_pixel(pixmap.toImage())
+
+
 def test_icon_falls_back_to_a_blank_pixmap_for_an_unknown_name(qtbot) -> None:
     icon = icons.icon("not-a-real-icon", size=16)
     pixmap = icon.pixmap(16, 16)

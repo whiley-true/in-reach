@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import secrets
 import shutil
+import string
 from pathlib import Path
 
 from in_reach.app import env_file, maps_io
@@ -66,15 +67,20 @@ MAX_TITLE_LENGTH = 32
 MAX_DESCRIPTION_LENGTH = 137
 
 #: How many collision retries :func:`_generate_project_id` allows before giving up -- a collision
-#: at :data:`PROJECT_ID_BYTES` bytes of real randomness is practically impossible; this loop exists
-#: purely so a freak one fails into "try another id" rather than :func:`create_gametype_project`
-#: raising :class:`FileExistsError` for a reason that has nothing to do with the caller's own title.
+#: at :data:`PROJECT_ID_LENGTH` characters of real randomness is practically impossible; this loop
+#: exists purely so a freak one fails into "try another id" rather than
+#: :func:`create_gametype_project` raising :class:`FileExistsError` for a reason that has nothing
+#: to do with the caller's own title.
 _MAX_ID_ATTEMPTS = 20
 
-#: Random bytes behind each generated project id -- ``secrets.token_urlsafe(PROJECT_ID_BYTES)``
-#: renders as exactly 8 base64url characters for 6 input bytes (see :func:`_generate_project_id`'s
-#: own docstring for why base64url specifically, not hex).
-PROJECT_ID_BYTES = 6
+#: How many characters :func:`_random_token` draws from :data:`_PROJECT_ID_ALPHABET` -- see
+#: :func:`_generate_project_id`'s own docstring for why plain alphanumeric rather than base64url.
+PROJECT_ID_LENGTH = 8
+
+#: PROMPT.md: "please dont have hyphens in uuids for file names" -- plain alphanumeric only, no
+#: ``-``/``_`` separator characters that a base64url alphabet would otherwise include (see
+#: :func:`_generate_project_id`'s own docstring).
+_PROJECT_ID_ALPHABET = string.ascii_letters + string.digits
 
 _ENV_NAME = ".env"
 _VARIANT_SUFFIX = ".bin"
@@ -275,9 +281,17 @@ def _decompile_source_variant(
     return None
 
 
+def _random_token() -> str:
+    """:data:`PROJECT_ID_LENGTH` characters drawn from :data:`_PROJECT_ID_ALPHABET`. Its own
+    function purely as a test seam (same reasoning as e.g. ``MainWindow.ask_open_folder``), so
+    :func:`_generate_project_id`'s collision-retry tests can monkeypatch a fixed sequence of
+    candidates without needing them to actually be :data:`PROJECT_ID_LENGTH` characters long."""
+    return "".join(secrets.choice(_PROJECT_ID_ALPHABET) for _ in range(PROJECT_ID_LENGTH))
+
+
 def _generate_project_id(root: Path) -> str:
-    """A short, random id that doesn't already name a folder under ``root`` -- 8 base64url
-    characters (PROMPT.md: "can it be a short uuid").
+    """A short, random id that doesn't already name a folder under ``root`` -- 8 plain
+    alphanumeric characters (PROMPT.md: "can it be a short uuid").
 
     A full, un-truncated uuid4 was tried first (per an earlier PROMPT.md pass: "please use a uuid
     that is just a different uuid scheme the[n] used by dulwich" -- this repo is getting its own
@@ -286,22 +300,28 @@ def _generate_project_id(root: Path) -> str:
     long for everyday use. Shortening it back down to a hex fragment would have reintroduced the
     exact problem an earlier PROMPT.md pass already flagged once (a short hex id reads too much
     like a truncated git hash -- the reason a brief random-animal-name scheme existed in between).
-    ``secrets.token_urlsafe`` sidesteps both problems at once: it's short, and its base64url
-    alphabet (``A-Za-z0-9-_``) makes an all-hex-digit result astronomically unlikely, so it can't
-    be mistaken for a hash of any length, truncated or not.
+    ``secrets.token_urlsafe`` was tried next -- short, and its base64url alphabet makes an
+    all-hex-digit result astronomically unlikely, so it can't be mistaken for a hash of any
+    length, truncated or not -- but that alphabet (``A-Za-z0-9-_``) can itself render with a
+    leading/embedded ``-``, which a later PROMPT.md pass flagged as an unwanted character in a
+    file/folder name: "please dont have hyphens in uuids for file names". Drawing straight from
+    :data:`_PROJECT_ID_ALPHABET` (plain letters and digits, via :func:`_random_token`) sidesteps
+    that too, at the same length and comparable entropy (62 possibilities per character vs.
+    base64url's 64).
 
     Args:
         root: The folder new project folders are created directly under.
 
     Returns:
-        An 8-character base64url token not already used as a folder name under ``root``.
+        A :data:`PROJECT_ID_LENGTH`-character alphanumeric token not already used as a folder name
+        under ``root``.
 
     Raises:
         FileExistsError: In the practically-impossible case that :data:`_MAX_ID_ATTEMPTS`
             freshly-generated tokens in a row all collide with an existing folder under ``root``.
     """
     for _ in range(_MAX_ID_ATTEMPTS):
-        candidate = secrets.token_urlsafe(PROJECT_ID_BYTES)
+        candidate = _random_token()
         if not (root / candidate).exists():
             return candidate
     raise FileExistsError(f"Could not find a free project id under {root} after {_MAX_ID_ATTEMPTS} attempts.")

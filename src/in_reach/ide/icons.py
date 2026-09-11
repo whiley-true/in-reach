@@ -93,22 +93,18 @@ _ICON_SOURCES = {
         "0 0 16 16",
         '<circle cx="8" cy="8" r="3.5"/>',
     ),
-    "bookshelf": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)"
-        # -- a thick shelf line plus five book "spines" of varying width/height (one tilted, as a
-        # leaning book), same "deliberately simple, not traced from any icon set" reasoning as
-        # "dashboard"/"stats" above -- varying width (not just height, unlike "stats"'s own plain
-        # ascending bar-chart) and the tilt are what keep this reading as books rather than a bar
-        # chart at a glance.
+    "compass": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)",
+        # later: "for locations please use a compass icon" -- a ring plus a two-tone needle
+        # (the north half solid, the south half translucent, both traced as plain kite-shaped
+        # polygons), same "deliberately simple, not traced from any icon set" reasoning as
+        # "dashboard"/"stats" above.
         "0 0 16 16",
-        '<path d="M1.5 13.7H14.5" stroke="{color}" stroke-width="1.6" stroke-linecap="round"/>'
-        '<rect x="2.2" y="5" width="1.8" height="8.2" fill="{color}"/>'
-        '<rect x="4.4" y="7.2" width="2.6" height="6" fill="{color}"/>'
-        '<g transform="rotate(-8 9 9)"><rect x="7.6" y="4.2" width="1.9" height="9" fill="{color}"/></g>'
-        '<rect x="10.4" y="6" width="1.8" height="7.2" fill="{color}"/>'
-        '<rect x="12.6" y="8" width="1.6" height="5.2" fill="{color}"/>',
+        '<circle cx="8" cy="8" r="6.3" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        '<path d="M8 3.2L9.6 8L8 8.9L6.4 8Z" fill="{color}"/>'
+        '<path d="M8 12.8L6.4 8L8 7.1L9.6 8Z" fill="{color}" fill-opacity="0.45"/>',
     ),
     "help": (  # PROMPT.md: "please then add a help (?) icon above the settings icon" -- a plain
-        # circled question mark, same "deliberately simple" reasoning as "bookshelf" above.
+        # circled question mark, same "deliberately simple" reasoning as "compass" above.
         "0 0 16 16",
         '<circle cx="8" cy="8" r="6.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
         '<path d="M6.2 6.1c0-1.05.85-1.9 1.9-1.9s1.9.72 1.9 1.7c0 .95-.6 1.35-1.15 1.75'
@@ -217,7 +213,7 @@ def apply_icon(color: str = DEFAULT_COLOR, size: int = 24, *, enabled: bool = Tr
     "make it so the tick in the side panel was instead a horizontal arrow (representing
     compiling)"; originally a checkmark, see git history for that). Deliberately simple geometric
     shape, same "not traced from any icon set" reasoning as :data:`_ICON_SOURCES`'s own
-    "dashboard"/"stats"/"bookshelf" entries -- a mis-plotted polygon here is an easy, easy-to-miss
+    "dashboard"/"stats"/"compass" entries -- a mis-plotted polygon here is an easy, easy-to-miss
     mistake, and there's no ready-made codicon for "compile".
 
     Args:

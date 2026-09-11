@@ -42,6 +42,7 @@ _PALETTE_ROLES = {
     "highlight": QPalette.ColorRole.Highlight,
     "highlighted_text": QPalette.ColorRole.HighlightedText,
     "mid": QPalette.ColorRole.Mid,
+    "placeholder_text": QPalette.ColorRole.PlaceholderText,
 }
 
 

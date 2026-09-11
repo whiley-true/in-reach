@@ -127,7 +127,13 @@ _FLAT_PROGRESS_BAR_STYLE = (
 _DASHBOARD_BUTTON_STYLE = (
     "QToolButton { background-color: palette(button); border: 1px solid palette(mid);"
     " border-radius: 4px; padding: 4px 10px; }"
-    "QToolButton:hover { background-color: palette(light); }"
+    # Was `palette(light)` -- none of the dark/Whiley themes' own JSON ever sets that QPalette role
+    # (theme.py's build_palette() only assigns the roles it's explicitly given, so "light" is left
+    # at Qt's own unrelated default, which reads as plain white) -- a hover turned the whole button
+    # white, and with it white/near-white button text, unreadable. Highlighting with the theme's
+    # own accent color instead is themed by construction, and matches how every other hover/select
+    # state in this app already reads (menus, tabs, the activity bar's checked border).
+    "QToolButton:hover { background-color: palette(highlight); color: palette(highlighted-text); }"
     "QToolButton:pressed { background-color: palette(mid); }"
 )
 
@@ -198,6 +204,12 @@ class ExplorerPanel(QWidget):
     #: changing which one is active.
     open_projects_changed = pyqtSignal(list)
 
+    #: Emitted with a project's folder right after its own tab actually closes (PROMPT.md: "if
+    #: project is closed in ide, if Reach Variant tool is open for that project it should be
+    #: closed") -- unlike :attr:`open_projects_changed`, this names exactly which folder just
+    #: closed, which is what MainWindow needs to know which (if any) RVT process to terminate.
+    project_closed = pyqtSignal(Path)
+
     #: PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File (on
     #: the left) and on the right: View Output.txt" -- MainWindow owns what each button actually
     #: does (compiling + a save-as dialog; regenerating and opening the locked output view).
@@ -212,6 +224,12 @@ class ExplorerPanel(QWidget):
     #: (already +10%'d) text, so they read as "10% smaller than its neighbors" rather than landing
     #: back near the app's own plain size.
     HEADER_TEXT_SCALE = 0.9
+
+    #: PROMPT.md: "in the dashboard panel please make the font for the settings jsons 10% bigger,
+    #: they look too small in the sidebar" -- on top of :data:`TEXT_SCALE`, applied only to
+    #: :attr:`settings_tree`'s own three rows (settings.json/script_settings.json/strings.json),
+    #: not the rest of this panel.
+    SETTINGS_TREE_TEXT_SCALE = 1.1
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -266,7 +284,7 @@ class ExplorerPanel(QWidget):
         button_row_layout.addWidget(self.export_button)
         button_row_layout.addStretch(1)
         self.view_output_button = QToolButton()
-        self.view_output_button.setText("View Output.txt")
+        self.view_output_button.setText("View Compiled.txt")
         self.view_output_button.setToolTip("Open a read-only view of this project's compiled Megalo script")
         self.view_output_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.view_output_button.setAutoRaise(False)
@@ -372,6 +390,10 @@ class ExplorerPanel(QWidget):
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
 
+        settings_tree_font = QFont(font)
+        settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
+        self.settings_tree.setFont(settings_tree_font)
+
         _cap_tree_rows(self.settings_tree, 3)  # settings/settings.json, script_settings.json, strings.json
 
     def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
@@ -433,6 +455,7 @@ class ExplorerPanel(QWidget):
         for index in range(self.project_tabs.count()):
             if Path(self.project_tabs.tabData(index)) == folder:
                 self.project_tabs.removeTab(index)
+                self.project_closed.emit(folder)
                 self.open_projects_changed.emit(self.open_projects)
                 return
 

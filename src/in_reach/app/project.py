@@ -20,6 +20,8 @@ _TEMPLATE_ENV_NAME = "example.env"
 _ENV_NAME = ".env"
 _GITIGNORE_NAME = ".gitignore"
 _GITIGNORE_CONTENT = "*\n"
+_README_NAME = "README.md"
+_README_CONTENT = "# in-reach\n\nStub README -- more to come.\n"
 
 
 def get_project_dir(root: Path | None = None) -> Path:
@@ -89,3 +91,20 @@ def ensure_gitignore(project_dir: Path) -> None:
     path = project_dir / _GITIGNORE_NAME
     if not path.exists():
         path.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
+
+
+def ensure_readme(root: Path | None = None) -> None:
+    """Writes ``<root>/README.md`` (a stub) if it doesn't already exist.
+
+    Called on every ``in-reach run``, same as :func:`ensure_gitignore` -- ``root`` is the repo
+    root itself (``get_project_dir(root)``'s own ``root``), not the ``.in-reach`` folder, since a
+    README belongs alongside a project's own files, not tucked inside its local config folder. An
+    existing README (the user's own, or a real one that later replaces this stub) is left alone.
+
+    Args:
+        root: Repo root the ``.in-reach`` project folder lives under. Defaults to the current
+            working directory if ``None``.
+    """
+    path = (root or Path.cwd()) / _README_NAME
+    if not path.exists():
+        path.write_text(_README_CONTENT, encoding="utf-8")

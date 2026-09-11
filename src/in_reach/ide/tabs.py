@@ -153,9 +153,9 @@ class _DragTabBar(QTabBar):
         drag.exec(Qt.DropAction.MoveAction)
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        """Draws every tab exactly as the base implementation would, then re-draws just the dirty
-        ones' own shape+label a second time in italic (PROMPT.md: "if a file has unsaved edits, its
-        tab text should be in italics, and become not italic when saved").
+        """Draws every tab itself (shape, then label) exactly once each, in italic for a dirty tab
+        and upright otherwise (PROMPT.md: "if a file has unsaved edits, its tab text should be in
+        italics, and become not italic when saved").
 
         QTabBar has no per-tab font setter of its own (unlike :meth:`setTabTextColor`); the two
         approaches that look obvious both turned out to be unsafe in practice against this app's
@@ -164,26 +164,25 @@ class _DragTabBar(QTabBar):
         crashes outright, and calling :meth:`QWidget.setFont` on the bar itself from inside
         ``initStyleOption()`` re-enters that same override through ``QStyleSheetStyle``'s own
         style-invalidation machinery, recursing until the stack overflows. Changing the *painter's*
-        font instead (a `QStylePainter`, only for this second, dirty-tabs-only pass) never touches
-        the widget's own styled properties at all, so neither failure mode applies -- redrawing the
-        shape first (not just the label) is what keeps the swapped-in italic text from visibly
-        double-printing over the upright glyphs the first, normal pass already painted underneath
-        it, since italic metrics are rarely pixel-identical to upright ones.
+        font instead never touches the widget's own styled properties at all, so neither failure
+        mode applies.
+
+        This used to let the base implementation paint every tab upright first, then redraw just
+        the dirty ones' own shape+label a second time in italic on top -- which visibly
+        double-printed the label (upright glyphs from the first pass showing through the italic
+        ones from the second, since italic metrics are rarely pixel-identical to upright ones).
+        Painting each tab exactly once, choosing its font up front, avoids that entirely.
         """
-        super().paintEvent(event)
-        painter: QStylePainter | None = None
+        painter = QStylePainter(self)
+        base_font = QFont(painter.font())
+        italic_font = QFont(base_font)
+        italic_font.setItalic(True)
         for index in range(self.count()):
-            if not _is_modified(self._pane.widget(index)):
-                continue
-            if painter is None:
-                painter = QStylePainter(self)
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
             painter.save()
-            font = QFont(painter.font())
-            font.setItalic(True)
-            painter.setFont(font)
+            painter.setFont(italic_font if _is_modified(self._pane.widget(index)) else base_font)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option)
             painter.restore()
 
@@ -804,6 +803,35 @@ class MainPanelArea(QWidget):
         """"Save All" across every pane, not just the active one."""
         for pane in self.panes:
             pane.save_all()
+
+    def _open_tab_locations(self, paths: set[Path]) -> list[tuple[TabPane, int]]:
+        return [
+            (pane, index)
+            for pane in self.panes
+            for index in range(pane.count())
+            if pane._tab_state_for(pane.widget(index)).path in paths
+        ]
+
+    def dirty_tab_names(self, paths: list[Path]) -> list[str]:
+        """The (sorted, deduplicated) file names of any already-open tab for one of ``paths`` that
+        has unsaved edits -- PROMPT.md: RVT resyncing a project's own settings/script_settings/
+        strings.json "with unsaved changes should pop up showing all unsaved changes[.]" Used by
+        :meth:`~in_reach.ide.main_window.MainWindow._on_watched_bin_changed` to decide whether that
+        resync needs confirming first."""
+        names = {
+            pane._tab_state_for(pane.widget(index)).path.name
+            for pane, index in self._open_tab_locations(set(paths))
+            if _is_modified(pane.widget(index))
+        }
+        return sorted(names)
+
+    def reload_open_tabs(self, paths: list[Path]) -> None:
+        """Re-reads every already-open tab for one of ``paths`` from disk in place -- PROMPT.md:
+        RVT resyncing a project's own settings/script_settings/strings.json "without saved changes
+        should immediately update in place." Every occurrence across every pane is reloaded (not
+        just the first), so a duplicate opened via a pane split stays in sync too."""
+        for pane, index in self._open_tab_locations(set(paths)):
+            pane._reload_tab(index)
 
     def _new_pane(self) -> TabPane:
         return TabPane(self)

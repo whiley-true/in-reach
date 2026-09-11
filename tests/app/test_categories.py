@@ -9,6 +9,16 @@ def test_display_name_of_none_category_reads_as_none_forge() -> None:
     assert display_name(EngineCategory.none) == "None (Forge)"
 
 
+def test_display_name_of_unknown_vip_category_reads_as_just_vip() -> None:
+    # PROMPT.md: "one of the categories when creating a new game shows 'Unkown Vip' instead of
+    # 'Vip'" -- a plain title-cased member name would read "Unknown Vip".
+    assert display_name(EngineCategory.unknown_vip) == "Vip"
+
+
+def test_display_name_of_vip_icon_is_unaffected_by_the_category_override() -> None:
+    assert display_name(EngineIcon.vip) == "Vip"
+
+
 def test_default_icon_for_none_category_is_none() -> None:
     assert default_icon_for(EngineCategory.none) is None
 
