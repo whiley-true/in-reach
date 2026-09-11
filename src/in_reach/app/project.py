@@ -93,18 +93,19 @@ def ensure_gitignore(project_dir: Path) -> None:
         path.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
 
 
-def ensure_readme(root: Path | None = None) -> None:
-    """Writes ``<root>/README.md`` (a stub) if it doesn't already exist.
+def ensure_readme(project_dir: Path) -> None:
+    """Writes ``<project_dir>/README.md`` (a stub) if it doesn't already exist.
 
-    Called on every ``in-reach run``, same as :func:`ensure_gitignore` -- ``root`` is the repo
-    root itself (``get_project_dir(root)``'s own ``root``), not the ``.in-reach`` folder, since a
-    README belongs alongside a project's own files, not tucked inside its local config folder. An
-    existing README (the user's own, or a real one that later replaces this stub) is left alone.
+    Called on every ``in-reach run``, same as :func:`ensure_gitignore` -- ``project_dir`` is the
+    ``.in-reach`` project folder itself (PROMPT.md: "please move the generated README.md file to
+    be in generated .in-reach folder"), not the repo root a `.in-reach` folder gets created under.
+    A gametype project's own folder gets its own separate stub README too, see
+    :func:`~in_reach.app.new_project.create_gametype_project`. An existing README here (the user's
+    own, or a real one that later replaces this stub) is left alone.
 
     Args:
-        root: Repo root the ``.in-reach`` project folder lives under. Defaults to the current
-            working directory if ``None``.
+        project_dir: The project's ``.in-reach`` folder, as returned by :func:`get_project_dir`.
     """
-    path = (root or Path.cwd()) / _README_NAME
+    path = project_dir / _README_NAME
     if not path.exists():
         path.write_text(_README_CONTENT, encoding="utf-8")

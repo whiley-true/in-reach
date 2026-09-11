@@ -5,7 +5,10 @@ free text now (any characters, since nothing needs to be a legal Windows name on
 also a folder name), read back from ``settings/settings.json``'s own ``meta.title`` instead (there
 used to be a per-project ``README.md`` carrying a copy of it for display, removed per PROMPT.md:
 "please remove the README.md file completely" -- ``settings.json`` was always the authoritative
-copy anyway, see :func:`read_project_title`). Everything else about the shape is carried over from
+copy anyway, see :func:`read_project_title`). A README.md has since come back as a plain,
+title-free stub (PROMPT.md: "please also add a second stubbed README.md file in the generated
+project folder") -- it carries no project data of its own to keep in sync, so none of the earlier
+reasoning for removing it applies. Everything else about the shape is carried over from
 the v2 prototype's ``inreach init``, restructured per several PROMPT.md passes into:
 
 - ``script/output.txt`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
@@ -62,6 +65,12 @@ INIT_GAMETYPE_DIRNAME = "init_gametype"
 #: PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
 NOTES_FILENAME = "Notes.txt"
 _NOTES_TEMPLATE = "Use this space for free form notes.\n"
+#: PROMPT.md: "please also add a second stubbed README.md file in the generated project folder"
+#: -- distinct from (and, unlike the old one this module's docstring mentions removing, carries no
+#: copy of) the title: a plain stub, same treatment as the .in-reach-level one (see
+#: :func:`~in_reach.app.project.ensure_readme`).
+README_FILENAME = "README.md"
+_README_TEMPLATE = "# Gametype Project\n\nStub README -- more to come.\n"
 
 MAX_TITLE_LENGTH = 32
 MAX_DESCRIPTION_LENGTH = 137
@@ -392,6 +401,7 @@ def create_gametype_project(
     (build_dir / ".gitignore").write_text(_BUILD_GITIGNORE, encoding="utf-8")
 
     (folder / NOTES_FILENAME).write_text(_NOTES_TEMPLATE, encoding="utf-8")
+    (folder / README_FILENAME).write_text(_README_TEMPLATE, encoding="utf-8")
 
     resolved_icon = category_icon if category_icon is not None else (default_icon_for(category) or EngineIcon.capture_the_flag)
     warning = mismatch_warning(category, resolved_icon)

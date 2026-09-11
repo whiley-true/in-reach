@@ -74,3 +74,13 @@ def test_a_dark_base_color_uses_the_dark_palette() -> None:
     key_color, *_ = _DARK_COLORS
 
     assert any(color == key_color for _start, _length, color in ranges)
+
+
+def test_light_palette_colors_are_dark_enough_to_read_against_a_white_background() -> None:
+    # Regression guard: the light palette started as VS Code's own Light+ colors, which read as
+    # too pale against this app's white editor background -- every token color should sit well
+    # below a mid-grey lightness, not just "technically not white".
+    for hex_color in _LIGHT_COLORS:
+        color = QColor(hex_color)
+        luminance = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+        assert luminance < 100

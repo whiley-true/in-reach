@@ -729,6 +729,30 @@ class MainWindow(QWidget):
         if app is not None:
             self.activity_bar.refresh_icon_scale(zoom_module.current_scale(app))
 
+    def _run_compile(self, project_dir: Path, folder: Path):
+        """Runs the real compile step (:func:`~in_reach.app.apply_settings.apply_settings_changes`)
+        with a busy cursor shown for its duration.
+
+        PROMPT.md: "when compiling saved changes we are having to press compile twice" -- this
+        compile is a genuinely slow, fully synchronous/blocking native call for anything but a
+        trivial script, and every one of its three call sites (this button, Launch RVT, Export RVT
+        File) used to leave the button that triggered it fully clickable -- and, for Apply
+        specifically, still showing its "changes pending" icon -- for that entire blocking call,
+        with no feedback that anything was happening at all. An impatient second click during that
+        window either queued a redundant second compile, or (once the first one's own state
+        refresh finally landed) just read as "the first click didn't do anything," even though it
+        had -- there was never actually a data/logic bug in ``settings_have_unapplied_changes()``
+        itself to reproduce. Callers are responsible for disabling their own trigger button before
+        calling this and restoring/refreshing it afterward, in both the success and failure case.
+        """
+        from in_reach.app import apply_settings
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return apply_settings.apply_settings_changes(project_dir, folder)
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def launch_rvt(self) -> None:
         """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
         to a real executable shipped inside the package itself (see
@@ -769,12 +793,15 @@ class MainWindow(QWidget):
             if dirty_names:
                 self._warn_unsaved_settings_before_rvt(dirty_names)
                 return
-            from in_reach.app import apply_settings
-
+            # Disabled for the compile's own duration -- see _run_compile()'s own docstring
+            # (PROMPT.md: "we are having to press compile twice").
+            self.activity_bar.rvt_button.setEnabled(False)
             try:
-                apply_settings.apply_settings_changes(project.get_project_dir(self.root_dir), folder)
+                self._run_compile(project.get_project_dir(self.root_dir), folder)
             except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
                 pass
+            finally:
+                self.activity_bar.set_rvt_enabled(True)  # folder is not None in this branch
             self._refresh_apply_enabled(folder)
             # A compile above may have just created build/dist/*.bin for the very first time (or
             # overwritten it via a delete-then-recreate save, which silently drops an already-
@@ -886,18 +913,22 @@ class MainWindow(QWidget):
         critical message box listing every compiler error/warning/notice, same presentation as
         this window's other blocking failures (e.g. a schema-invalid save, see
         :meth:`~in_reach.ide.tabs.TabPane._save_tab`).
+
+        Disables the button itself the instant it's clicked, before the (blocking) compile even
+        starts -- PROMPT.md: "we are having to press compile twice" -- see :meth:`_run_compile`'s
+        own docstring for why that alone was the actual bug, not the compile result itself.
         """
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import apply_settings
-
         project_dir = project.get_project_dir(self.root_dir)
-        result = apply_settings.apply_settings_changes(project_dir, folder)
+        self.activity_bar.apply_button.setEnabled(False)
+        result = self._run_compile(project_dir, folder)
         if not result.success:
             from in_reach.app.rvt.compile import format_build_result
 
             QMessageBox.critical(self, "in-reach", f"Couldn't apply settings:\n{format_build_result(result)}")
+            self._refresh_apply_enabled(folder)  # re-enable -- the edit is still unapplied
             return
         self._refresh_apply_enabled(folder)
         self._sync_project_title(folder)
@@ -948,7 +979,13 @@ class MainWindow(QWidget):
             return
 
         project_dir = project.get_project_dir(self.root_dir)
-        result = apply_settings.apply_settings_changes(project_dir, folder)
+        # Disabled for the compile's own duration -- see _run_compile()'s own docstring
+        # (PROMPT.md: "we are having to press compile twice").
+        self.explorer_panel.export_button.setEnabled(False)
+        try:
+            result = self._run_compile(project_dir, folder)
+        finally:
+            self.explorer_panel.export_button.setEnabled(True)
         if not result.success:
             from in_reach.app.rvt.compile import format_build_result
 

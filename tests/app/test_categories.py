@@ -9,10 +9,11 @@ def test_display_name_of_none_category_reads_as_none_forge() -> None:
     assert display_name(EngineCategory.none) == "None (Forge)"
 
 
-def test_display_name_of_unknown_vip_category_reads_as_just_vip() -> None:
-    # PROMPT.md: "one of the categories when creating a new game shows 'Unkown Vip' instead of
-    # 'Vip'" -- a plain title-cased member name would read "Unknown Vip".
-    assert display_name(EngineCategory.unknown_vip) == "Vip"
+def test_display_name_of_unknown_vip_category_keeps_the_engines_own_hedge() -> None:
+    # PROMPT.md: an earlier pass simplified this to plain "Vip", but picking it doesn't reliably
+    # show a VIP icon in Halo MCC -- reverted back to the honest, engine-sourced wording (see
+    # in_reach.app.rvt.models.enums.EngineCategory's own "unknown_vip" comment).
+    assert display_name(EngineCategory.unknown_vip) == "Unknown/Blank (VIP?)"
 
 
 def test_display_name_of_vip_icon_is_unaffected_by_the_category_override() -> None:

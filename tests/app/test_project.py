@@ -59,27 +59,23 @@ def test_ensure_gitignore_leaves_an_existing_file_untouched(tmp_path: Path) -> N
     assert gitignore_path.read_text() == "custom content\n"
 
 
-def test_ensure_readme_writes_a_stub_if_missing(tmp_path: Path) -> None:
-    readme_path = tmp_path / "README.md"
+def test_ensure_readme_writes_a_stub_into_the_project_dir_if_missing(tmp_path: Path) -> None:
+    # PROMPT.md: "please move the generated README.md file to be in generated .in-reach folder"
+    # -- ensure_readme() takes the .in-reach project folder itself now, not the repo root.
+    project_dir = project.create_project(tmp_path)
+    readme_path = project_dir / "README.md"
 
-    project.ensure_readme(tmp_path)
+    project.ensure_readme(project_dir)
 
     assert readme_path.is_file()
     assert readme_path.read_text(encoding="utf-8").strip() != ""
 
 
 def test_ensure_readme_leaves_an_existing_file_untouched(tmp_path: Path) -> None:
-    readme_path = tmp_path / "README.md"
+    project_dir = project.create_project(tmp_path)
+    readme_path = project_dir / "README.md"
     readme_path.write_text("custom content\n", encoding="utf-8")
 
-    project.ensure_readme(tmp_path)
+    project.ensure_readme(project_dir)
 
     assert readme_path.read_text(encoding="utf-8") == "custom content\n"
-
-
-def test_ensure_readme_defaults_to_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    project.ensure_readme()
-
-    assert (tmp_path / "README.md").is_file()

@@ -31,7 +31,7 @@ def run() -> None:
     if not project.project_exists():
         project.create_project()
     project.ensure_gitignore(project_dir)
-    project.ensure_readme(project_dir.parent)
+    project.ensure_readme(project_dir)
     verify.verify_project(project_dir)
 
     from in_reach.ide import app as ide_app

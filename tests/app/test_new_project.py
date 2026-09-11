@@ -76,8 +76,12 @@ def test_create_gametype_project_names_the_folder_with_a_generated_id_not_the_ti
     # PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
     notes = (folder / "Notes.txt").read_text(encoding="utf-8")
     assert notes.splitlines()[0] == "Use this space for free form notes."
-    # PROMPT.md: "please remove the README.md file completely".
-    assert not (folder / "README.md").exists()
+    # PROMPT.md: "please also add a second stubbed README.md file in the generated project
+    # folder" -- a plain stub, distinct from the old title-carrying one PROMPT.md previously asked
+    # to remove entirely (test_read_project_title_reads_back_settings_jsons_own_meta_title, below,
+    # is still what actually guards that settings.json stays the title's authoritative copy).
+    readme = (folder / "README.md").read_text(encoding="utf-8")
+    assert readme.strip() != ""
 
 
 def test_create_gametype_project_points_project_dir_at_the_new_folder(project_dir: Path) -> None:

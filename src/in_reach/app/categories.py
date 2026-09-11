@@ -89,11 +89,16 @@ _CATEGORY_TO_ICON_NAME = {
     EngineCategory.race.name: EngineIcon.race_and_rally.name,
 }
 
-#: PROMPT.md: "one of the categories when creating a new game shows 'Unkown Vip' instead of 'Vip'"
-#: -- a plain ``member.name.replace("_", " ").title()`` reads :attr:`EngineCategory.unknown_vip`
-#: as "Unknown Vip"; this member-specific override is what :func:`display_name` checks first.
+#: PROMPT.md: "please revert" the earlier "Unkown Vip" (typo) -> "Vip" override -- confidently
+#: labeling :attr:`EngineCategory.unknown_vip` as plain "Vip" is misleading: picking it doesn't
+#: reliably show a VIP icon in Halo MCC at all, matching how RVT's own source (see
+#: :class:`~in_reach.app.rvt.models.enums.EngineCategory`'s own ``unknown_vip`` comment,
+#: ``"Unknown/Blank (VIP?)"``, transcribed from ``page_multiplayer_metadata.cpp``'s own combobox
+#: setup code) already hedges this exact category with a "?" rather than asserting it. A plain
+#: ``member.name.replace("_", " ").title()`` would read it as "Unknown Vip", losing that hedge
+#: entirely -- this override keeps the honest, engine-sourced wording instead.
 _DISPLAY_NAME_OVERRIDES = {
-    EngineCategory.unknown_vip.name: "Vip",
+    EngineCategory.unknown_vip.name: "Unknown/Blank (VIP?)",
 }
 
 

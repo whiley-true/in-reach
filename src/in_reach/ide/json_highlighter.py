@@ -19,8 +19,11 @@ _KEY_RE = QRegularExpression(r'"(?:[^"\\]|\\.)*"(?=\s*:)')
 _NUMBER_RE = QRegularExpression(r"-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b")
 _LITERAL_RE = QRegularExpression(r"\btrue\b|\bfalse\b|\bnull\b")
 
-# (key, string, number, literal) -- VS Code's own default Light+/Dark+ JSON token colors.
-_LIGHT_COLORS = ("#0451a5", "#a31515", "#098658", "#0000ff")
+# (key, string, number, literal) -- VS Code's own default Dark+ JSON token colors for the dark
+# palette. The light palette started as VS Code's own Light+ colors too, but those read as too
+# pale against this app's white editor background (particularly at the smaller end of this app's
+# own zoom range) -- darkened/more saturated versions of the same four hues instead.
+_LIGHT_COLORS = ("#003c8f", "#8b0000", "#065e3e", "#0000cc")
 _DARK_COLORS = ("#9cdcfe", "#ce9178", "#b5cea8", "#569cd6")
 
 
