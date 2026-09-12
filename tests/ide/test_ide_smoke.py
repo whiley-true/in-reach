@@ -1955,12 +1955,63 @@ def test_launch_rvt_refuses_when_a_settings_json_tab_has_unsaved_edits(
     launch_calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launch_calls.append(target))
     warned = []
-    monkeypatch.setattr(MainWindow, "_warn_unsaved_settings_before_rvt", lambda self, names: warned.append(names))
+    monkeypatch.setattr(
+        MainWindow,
+        "_warn_unsaved_settings_before_rvt",
+        lambda self, names, folder: warned.append(names) or False,
+    )
 
     window.launch_rvt()
 
     assert launch_calls == []
     assert warned == [["settings.json"]]
+
+
+def test_launch_rvt_save_and_continue_saves_the_dirty_tab_and_proceeds(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, new_project, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+    from in_reach.ide import tabs as tabs_module
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    settings_dir = folder / new_project.SETTINGS_DIRNAME
+    settings_dir.mkdir(parents=True)
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"meta": {"title": "Old"}}', encoding="utf-8")
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+    window.main_panel.active_pane.open_file(settings_path)
+    widget = window.main_panel.active_pane.widget(window.main_panel.active_pane.currentIndex())
+    widget.setPlainText('{"meta": {"title": "New"}}')
+    widget.document().setModified(True)  # unsaved -- would otherwise block the launch
+
+    # Schema validation of settings.json's real (large) pydantic model is exercised end to end
+    # elsewhere (test_schema_check.py); this test is only about the "Save and Continue" wiring, so
+    # it's faked here the same way the compile step already is just below.
+    monkeypatch.setattr(tabs_module.schema_check, "validate_before_save", lambda path, text: None)
+    monkeypatch.setattr(apply_settings, "apply_settings_changes", lambda pd, f: BuildResult(success=True))
+    launch_calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launch_calls.append(target))
+    # "Save and Continue" clicked -- MainWindow._warn_unsaved_settings_before_rvt saves the dirty
+    # tab itself and returns True to let the launch proceed.
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: None)
+    monkeypatch.setattr(
+        QMessageBox,
+        "clickedButton",
+        lambda self: next(b for b in self.buttons() if b.text() == "Save and Continue"),
+    )
+
+    window.launch_rvt()
+
+    assert widget.document().isModified() is False
+    assert settings_path.read_text(encoding="utf-8") == '{"meta": {"title": "New"}}'
+    assert launch_calls == [bin_path]
 
 
 def test_launch_rvt_proceeds_once_the_dirty_settings_tab_is_saved(
@@ -3100,7 +3151,61 @@ def test_file_menu_has_every_action_prompt_md_asks_for(project_window: MainWindo
         "Save All",
         "Close Project",
         "Close Editor",
+        "Close Window",
     ]
+
+
+def test_file_menu_shortcuts_match_prompt_md(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.file_menu_button.menu()
+    shortcuts = {action.text(): action.shortcut().toString() for action in menu.actions()}
+
+    assert shortcuts["New Window"] == "Ctrl+Shift+N"
+    assert shortcuts["Open Folder..."] == "Ctrl+K"
+    assert shortcuts["Save"] == "Ctrl+S"
+    assert shortcuts["Close Editor"] == "Ctrl+F4"
+    assert shortcuts["Close Window"] == "Alt+F4"
+    # "Close Project" was left for in-reach to pick its own shortcut -- just assert it got one.
+    assert shortcuts["Close Project"]
+
+
+def test_edit_menu_has_undo_redo_cut_copy_paste_with_shortcuts(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.edit_menu_button.menu()
+    actions = [action for action in menu.actions() if not action.isSeparator()]
+
+    assert [action.text() for action in actions] == ["Undo", "Redo", "Cut", "Copy", "Paste"]
+    shortcuts = {action.text(): action.shortcut().toString() for action in actions}
+    assert shortcuts == {
+        "Undo": "Ctrl+Z",
+        "Redo": "Ctrl+Y",
+        "Cut": "Ctrl+X",
+        "Copy": "Ctrl+C",
+        "Paste": "Ctrl+V",
+    }
+
+
+def test_edit_menu_actions_act_on_the_active_text_editor(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    project_window.open_quick_access_file(path)
+    editor = project_window._active_text_editor()
+    assert editor is not None
+
+    editor.selectAll()
+    project_window.edit_cut()
+    assert editor.toPlainText() == ""
+
+    project_window.edit_paste()
+    assert editor.toPlainText() == "hello"
+
+    project_window.edit_undo()
+    assert editor.toPlainText() == ""
+
+    project_window.edit_redo()
+    assert editor.toPlainText() == "hello"
+
+    editor.selectAll()
+    project_window.edit_copy()
+    assert QApplication.clipboard().text() == "hello"
 
 
 def test_open_welcome_tab_switches_to_the_existing_one(project_window: MainWindow) -> None:

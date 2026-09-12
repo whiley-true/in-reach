@@ -236,7 +236,7 @@ def test_pill_click_opens_search_mode(qtbot, tmp_path: Path) -> None:
     assert bar.overlay.isVisible() is True
 
 
-def test_pill_defaults_to_three_times_its_natural_width(qtbot) -> None:
+def test_pill_defaults_to_twelve_times_its_natural_width(qtbot) -> None:
     bar = QuickAccessBar(
         get_project_folder=lambda: None,
         open_file=lambda p: None,
@@ -244,7 +244,44 @@ def test_pill_defaults_to_three_times_its_natural_width(qtbot) -> None:
     )
     qtbot.addWidget(bar)
 
-    assert bar.button.width() == bar.button.sizeHint().width() * 3
+    assert bar.button.width() == bar.button.sizeHint().width() * 12
+
+
+def test_opening_the_overlay_hides_the_pill_so_only_one_box_shows_at_once(qtbot, tmp_path: Path) -> None:
+    # PROMPT.md: "when clicking on the search bar behaviour is unexpected, we are seeing a drop
+    # down is spawned containing a text entry box (underneath the search box) ... we want them to
+    # be able to type in the search box" -- the overlay should replace the pill in place, not
+    # appear as a second box underneath a still-visible one.
+    project = _project(tmp_path)
+    bar = QuickAccessBar(
+        get_project_folder=lambda: project,
+        open_file=lambda p: None,
+        build_root_commands=lambda: [],
+    )
+    qtbot.addWidget(bar)
+    bar.show()
+
+    bar.button.click()
+
+    assert bar.button.isVisible() is False
+    assert bar.overlay.isVisible() is True
+
+    bar.overlay.hide()
+
+    assert bar.button.isVisible() is True
+
+
+def test_overlay_is_never_narrower_than_the_pill_it_replaces(qtbot) -> None:
+    bar = QuickAccessBar(
+        get_project_folder=lambda: None,
+        open_file=lambda p: None,
+        build_root_commands=lambda: [],
+    )
+    qtbot.addWidget(bar)
+
+    bar.open_search()
+
+    assert bar.overlay.width() >= bar.width()
 
 
 def test_open_command_palette_builds_from_the_injected_root_commands(qtbot) -> None:
@@ -301,10 +338,24 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
     commands = project_window.build_command_palette_commands()
 
     labels = [c.label for c in commands]
-    assert labels == ["Set Theme", "Set UI Scale"]
-    theme_command = commands[0]
+    assert labels == [
+        "New Window",
+        "Open Folder",
+        "Save",
+        "Close Project",
+        "Close Editor",
+        "Close Window",
+        "Undo",
+        "Redo",
+        "Cut",
+        "Copy",
+        "Paste",
+        "Set Theme",
+        "Set UI Scale",
+    ]
+    theme_command = next(c for c in commands if c.label == "Set Theme")
     assert [c.label for c in theme_command.children] == ["Light", "Dark", "Whiley"]
-    scale_command = commands[1]
+    scale_command = next(c for c in commands if c.label == "Set UI Scale")
     assert [c.label for c in scale_command.children] == ["Increase", "Decrease"]
 
 
@@ -312,7 +363,8 @@ def test_running_a_set_theme_command_applies_and_persists_the_theme(project_wind
     from PyQt6.QtGui import QPalette
 
     commands = project_window.build_command_palette_commands()
-    whiley = next(c for c in commands[0].children if c.label == "Whiley")
+    theme_command = next(c for c in commands if c.label == "Set Theme")
+    whiley = next(c for c in theme_command.children if c.label == "Whiley")
 
     whiley.action()
 
@@ -326,7 +378,8 @@ def test_running_a_set_ui_scale_command_zooms(project_window: MainWindow) -> Non
     from in_reach.ide import zoom as zoom_module
 
     commands = project_window.build_command_palette_commands()
-    increase = next(c for c in commands[1].children if c.label == "Increase")
+    scale_command = next(c for c in commands if c.label == "Set UI Scale")
+    increase = next(c for c in scale_command.children if c.label == "Increase")
     env_path = project_window.root_dir / ".in-reach" / ".env"
     before = zoom_module.get_zoom(env_path)
 

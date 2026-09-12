@@ -20,12 +20,13 @@ from PyQt6.QtWidgets import QApplication
 from in_reach.app import env_file
 
 ZOOM_KEY = "UI_ZOOM"
-# 122% of the plain (100%) app font -- PROMPT.md asks for this as the out-of-the-box size rather
+# 134% of the plain (100%) app font -- PROMPT.md asks for this as the out-of-the-box size rather
 # than true 100%, so a fresh project already opens at the size that scaling was actually tuned
-# against. Originally 150%, reduced 10% twice since (1.5 -> 1.35 -> 1.22, each time rounded to 2
-# places same as _clamp() itself does). MAX_ZOOM is widened to match -- otherwise this default
-# would sit one step from the ceiling, leaving almost no room to zoom in any further.
-DEFAULT_ZOOM = 1.22
+# against. Originally 150%, reduced 10% twice (1.5 -> 1.35 -> 1.22) then increased 10% once more
+# (1.22 -> 1.34, each time rounded to 2 places same as _clamp() itself does). MAX_ZOOM is widened
+# to match -- otherwise this default would sit one step from the ceiling, leaving almost no room
+# to zoom in any further.
+DEFAULT_ZOOM = 1.34
 MIN_ZOOM = 0.7
 MAX_ZOOM = 2.0
 ZOOM_STEP = 0.1

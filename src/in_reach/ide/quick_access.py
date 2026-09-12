@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QHideEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -36,11 +36,12 @@ from in_reach.app import quick_open
 _COMMAND_PREFIX = ">"
 _OVERLAY_WIDTH = 480
 _OVERLAY_MAX_RESULTS = 200
-#: The always-visible pill defaults to 3x its own natural (text+padding) width, so it reads as an
-#: actual search bar rather than a small button -- the pill's *own* sizeHint() still drives this
-#: (rather than a hardcoded pixel count), so it scales with whatever font the "Search" label is
+#: The always-visible pill defaults to 12x its own natural (text+padding) width -- originally 3x,
+#: widened another 4x (PROMPT.md: "make the search bar *4 wider, it looks way too small") -- so it
+#: reads as an actual search bar rather than a small button. The pill's *own* sizeHint() still
+#: drives this (rather than a hardcoded pixel count), so it scales with whatever font the label is
 #: rendered in.
-_PILL_WIDTH_MULTIPLIER = 3
+_PILL_WIDTH_MULTIPLIER = 12
 _PILL_STYLE = (
     "QPushButton { background-color: palette(base); color: palette(placeholder-text);"
     " border: 1px solid palette(mid); border-radius: 4px; padding: 2px 12px; text-align: left; }"
@@ -96,7 +97,16 @@ class _QuickAccessLineEdit(QLineEdit):
 
 
 class QuickAccessOverlay(QWidget):
-    """The popup itself -- one line edit plus one result list, reused across every mode."""
+    """The popup itself -- one line edit plus one result list, reused across every mode.
+
+    PROMPT.md: "when clicking on the search bar behaviour is unexpected, we are seeing a drop down
+    is spawned containing a text entry box (underneath the search box) -- we want them to be able
+    to type in the search box", matching a single VSCode-style box-with-a-list-below-it rather than
+    a static pill sitting on top of a second, separate input. :class:`QuickAccessBar` hides its own
+    always-visible pill for as long as this overlay is open (see :attr:`on_hidden`, fired from
+    :meth:`hideEvent`) and positions this overlay exactly where that pill was, so only ever one box
+    is visible at a time -- this one, playing both roles.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
@@ -104,6 +114,10 @@ class QuickAccessOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(_OVERLAY_STYLE)
         self.setFixedWidth(_OVERLAY_WIDTH)
+        #: Called (if set) whenever this overlay is hidden, by any means -- Escape, picking a
+        #: result, or Qt's own Popup auto-close on losing focus -- so the pill it stood in for can
+        #: reappear. See :meth:`hideEvent`.
+        self.on_hidden: Callable[[], None] | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -137,6 +151,11 @@ class QuickAccessOverlay(QWidget):
         self._open_file: Callable[[Path], None] | None = None
         self._on_goto_line: Callable[[int], None] | None = None
         self._max_line = 0
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        super().hideEvent(event)
+        if self.on_hidden is not None:
+            self.on_hidden()
 
     # -- opening ----------------------------------------------------------------------------------
 
@@ -328,11 +347,19 @@ class QuickAccessBar(QWidget):
         layout.addWidget(self.button)
 
         self.overlay = QuickAccessOverlay(self)
+        self.overlay.on_hidden = self.button.show
 
     def _position_overlay(self) -> None:
-        global_pos = self.mapToGlobal(self.rect().bottomLeft())
-        x = global_pos.x() - (self.overlay.width() - self.width()) // 2
-        self.overlay.move(x, global_pos.y() + 4)
+        """Hides the pill and drops the overlay in exactly the screen space it just vacated --
+        PROMPT.md: only ever one box should be visible/typable at a time (see
+        :class:`QuickAccessOverlay`'s own docstring), rather than the overlay reappearing as a
+        second box below the still-visible pill. Widened to at least the pill's own width so the
+        box-plus-list-below never renders narrower than the bar it replaced."""
+        self.button.hide()
+        self.overlay.setFixedWidth(max(_OVERLAY_WIDTH, self.width()))
+        top_left = self.mapToGlobal(self.rect().topLeft())
+        x = top_left.x() - (self.overlay.width() - self.width()) // 2
+        self.overlay.move(x, top_left.y())
 
     def open_search(self) -> None:
         folder = self._get_project_folder()

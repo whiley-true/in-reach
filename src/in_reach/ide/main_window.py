@@ -73,14 +73,33 @@ _HALO_STATUS_POLL_MS = 500
 #: narrow window has to shrink something else before this text does -- and once more to 300
 #: (PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
 #: display on the same line") for the Dashboard's Stats box, whose "Triggers: N   Conditions: N
-#: Actions: N" line is wider than any section header ever was (see test_ide_smoke.py's own
+#: Actions: N" line is wider than any section header ever was, and bumped once more to 340 when
+#: DEFAULT_ZOOM went from 122% to 134% (PROMPT.md: "increase the default ui scale by 10%") widened
+#: that same line's own sizeHint() past the old 300 floor (see test_ide_smoke.py's own
 #: width-vs-sizeHint regression guard for the margin these were picked against).
-_SIDEBAR_MIN_WIDTH = 300
+_SIDEBAR_MIN_WIDTH = 340
 
 #: PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width" --
 #: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
 #: primaryScreen() read, taken once at construction) as the window's own minimum-size floor below.
 _SIDEBAR_MAX_WIDTH_FRACTION = 4
+
+#: File/Edit top bar menu shortcuts (PROMPT.md) -- named here so the menu's own QAction shortcuts
+#: and the command palette's "detail" column (see build_command_palette_commands) can't drift
+#: apart. "Close Project" has no shortcut of its own convention to follow (PROMPT.md left it as
+#: "please fill") -- picked to sit alongside Close Editor/Close Window's own Ctrl+F4/Alt+F4 pattern
+#: without colliding with either.
+_SHORTCUT_NEW_WINDOW = "Ctrl+Shift+N"
+_SHORTCUT_OPEN_FOLDER = "Ctrl+K"
+_SHORTCUT_SAVE = "Ctrl+S"
+_SHORTCUT_CLOSE_PROJECT = "Ctrl+Shift+F4"
+_SHORTCUT_CLOSE_EDITOR = "Ctrl+F4"
+_SHORTCUT_CLOSE_WINDOW = "Alt+F4"
+_SHORTCUT_UNDO = "Ctrl+Z"
+_SHORTCUT_REDO = "Ctrl+Y"
+_SHORTCUT_CUT = "Ctrl+X"
+_SHORTCUT_COPY = "Ctrl+C"
+_SHORTCUT_PASTE = "Ctrl+V"
 
 #: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
 #: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
@@ -125,18 +144,27 @@ class _NoProjectSidebarPage(QWidget):
         self._label.setText(f"Open a Project to use {_VIEW_DISPLAY_NAMES.get(view, view)}")
 
 
+def _add_action(
+    menu: QMenu, text: str, slot: Callable[[], None], shortcut: str | None = None
+) -> QMenu:
+    """``menu.addAction()`` plus an optional shortcut in one call -- every top bar menu action
+    below goes through this so a shortcut typed here always shows up as the accelerator text next
+    to that same action in the dropdown, rather than the two being set (or missed) separately."""
+    action = menu.addAction(text, slot)
+    if shortcut:
+        action.setShortcut(QKeySequence(shortcut))
+    return menu
+
+
 class _DropdownButton(QToolButton):
-    """A "text1"/"text2"-style topbar dropdown -- placeholder items only, per PROMPT.md."""
+    """An empty topbar dropdown -- no items yet, to be filled in later (PROMPT.md)."""
 
     def __init__(self, label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setText(label)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setAutoRaise(True)
-        menu = QMenu(self)
-        menu.addAction(f"{label} item 1")
-        menu.addAction(f"{label} item 2")
-        self.setMenu(menu)
+        self.setMenu(QMenu(self))
 
 
 class _FileMenuButton(QToolButton):
@@ -151,17 +179,18 @@ class _FileMenuButton(QToolButton):
         self.setAutoRaise(True)
 
         menu = QMenu(self)
-        menu.addAction("New Window", window.open_new_window)
+        _add_action(menu, "New Window", window.open_new_window, _SHORTCUT_NEW_WINDOW)
         menu.addAction("Load Welcome Tab", window.open_welcome_tab)
-        menu.addAction("Open Folder...", window.open_folder)
+        _add_action(menu, "Open Folder...", window.open_folder, _SHORTCUT_OPEN_FOLDER)
         self.open_recent_menu = menu.addMenu("Open Recent")
         self.open_recent_menu.aboutToShow.connect(self._populate_open_recent)
         menu.addSeparator()
-        menu.addAction("Save", window.save_current)
+        _add_action(menu, "Save", window.save_current, _SHORTCUT_SAVE)
         menu.addAction("Save All", window.save_all)
         menu.addSeparator()
-        menu.addAction("Close Project", window.close_project)
-        menu.addAction("Close Editor", window.close_editor)
+        _add_action(menu, "Close Project", window.close_project, _SHORTCUT_CLOSE_PROJECT)
+        _add_action(menu, "Close Editor", window.close_editor, _SHORTCUT_CLOSE_EDITOR)
+        _add_action(menu, "Close Window", window.close, _SHORTCUT_CLOSE_WINDOW)
         self.setMenu(menu)
 
     def _populate_open_recent(self) -> None:
@@ -177,6 +206,27 @@ class _FileMenuButton(QToolButton):
             self.open_recent_menu.addAction(
                 label, lambda _checked=False, f=folder: self._window.open_recent_project(f)
             )
+
+
+class _EditMenuButton(QToolButton):
+    """The top bar's "Edit" dropdown (PROMPT.md) -- Undo/Redo/Cut/Copy/Paste against whichever text
+    editor is active (see ``MainWindow._active_text_editor``). Searching is deliberately left for a
+    later pass (PROMPT.md: "we will implement/refine searching later")."""
+
+    def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText("Edit")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        _add_action(menu, "Undo", window.edit_undo, _SHORTCUT_UNDO)
+        _add_action(menu, "Redo", window.edit_redo, _SHORTCUT_REDO)
+        menu.addSeparator()
+        _add_action(menu, "Cut", window.edit_cut, _SHORTCUT_CUT)
+        _add_action(menu, "Copy", window.edit_copy, _SHORTCUT_COPY)
+        _add_action(menu, "Paste", window.edit_paste, _SHORTCUT_PASTE)
+        self.setMenu(menu)
 
 
 class _TopBar(QWidget):
@@ -211,13 +261,17 @@ class _TopBar(QWidget):
 
         self.file_menu_button = _FileMenuButton(window)
         layout.addWidget(self.file_menu_button)
-        layout.addWidget(_DropdownButton("text2"))
+        self.edit_menu_button = _EditMenuButton(window)
+        layout.addWidget(self.edit_menu_button)
+        # Empty placeholders (PROMPT.md) -- no items yet, to be filled in later.
+        layout.addWidget(_DropdownButton("Selection"))
+        layout.addWidget(_DropdownButton("View"))
         layout.addStretch(1)
 
         # Two equal stretches around the pill center it in the gap between the left content
-        # (mark/File/text2) and the right-side toggle/window-control cluster, rather than in the
-        # dead center of the whole bar (which would drift off-center against those unequal-width
-        # neighbors) -- the standard QBoxLayout "center between two stretches" trick.
+        # (mark/File/Edit/Selection/View) and the right-side toggle/window-control cluster, rather
+        # than in the dead center of the whole bar (which would drift off-center against those
+        # unequal-width neighbors) -- the standard QBoxLayout "center between two stretches" trick.
         self.quick_access = QuickAccessBar(
             self,
             get_project_folder=lambda: self._window.explorer_panel.current_folder,
@@ -717,10 +771,23 @@ class MainWindow(QWidget):
         self.main_panel.active_pane.open_file(path)
 
     def build_command_palette_commands(self) -> list[Command]:
-        """The root ``>`` palette's own commands -- "Set Theme" and "Set UI Scale", each a two-level
-        pick (PROMPT.md). Rebuilt on every open rather than cached, since "Set Theme"'s own children
-        are cheap to construct and this keeps them from ever going stale."""
+        """The root ``>`` palette's own commands: the File and Edit top bar menus' own actions
+        (PROMPT.md: "add corresponding command palette entries"), each showing its keyboard
+        shortcut as its ``detail``, followed by "Set Theme" and "Set UI Scale", each a two-level
+        pick. Rebuilt on every open rather than cached, since none of this is expensive to
+        construct and this keeps it all from ever going stale."""
         return [
+            Command(label="New Window", action=self.open_new_window, detail=_SHORTCUT_NEW_WINDOW),
+            Command(label="Open Folder", action=self.open_folder, detail=_SHORTCUT_OPEN_FOLDER),
+            Command(label="Save", action=self.save_current, detail=_SHORTCUT_SAVE),
+            Command(label="Close Project", action=self.close_project, detail=_SHORTCUT_CLOSE_PROJECT),
+            Command(label="Close Editor", action=self.close_editor, detail=_SHORTCUT_CLOSE_EDITOR),
+            Command(label="Close Window", action=self.close, detail=_SHORTCUT_CLOSE_WINDOW),
+            Command(label="Undo", action=self.edit_undo, detail=_SHORTCUT_UNDO),
+            Command(label="Redo", action=self.edit_redo, detail=_SHORTCUT_REDO),
+            Command(label="Cut", action=self.edit_cut, detail=_SHORTCUT_CUT),
+            Command(label="Copy", action=self.edit_copy, detail=_SHORTCUT_COPY),
+            Command(label="Paste", action=self.edit_paste, detail=_SHORTCUT_PASTE),
             Command(
                 label="Set Theme",
                 children=[
@@ -933,6 +1000,33 @@ class MainWindow(QWidget):
     def close_editor(self) -> None:
         self.main_panel.active_pane.close_current()
 
+    # -- Edit menu --------------------------------------------------------------------------------
+
+    def edit_undo(self) -> None:
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.undo()
+
+    def edit_redo(self) -> None:
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.redo()
+
+    def edit_cut(self) -> None:
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.cut()
+
+    def edit_copy(self) -> None:
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.copy()
+
+    def edit_paste(self) -> None:
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.paste()
+
     def toggle_maximize(self) -> None:
         if self.isMaximized():
             screen = self.screen() or QApplication.primaryScreen()
@@ -1090,13 +1184,14 @@ class MainWindow(QWidget):
         to already compile cleanly" treatment above -- if any of the active project's own
         settings.json/script_settings.json/strings.json tabs are open with unsaved edits: RVT would
         otherwise open against whatever those files last held *on disk*, silently ignoring changes
-        the user can still see sitting unsaved in an open tab.
+        the user can still see sitting unsaved in an open tab. PROMPT.md: that warning offers a
+        "Save and Continue" button (see :meth:`_warn_unsaved_settings_before_rvt`) that saves
+        exactly those dirty tabs and lets the launch proceed, rather than only ever refusing.
         """
         folder = self.explorer_panel.current_folder
         if folder is not None:
             dirty_names = self.main_panel.dirty_tab_names(self._rvt_synced_json_paths(folder))
-            if dirty_names:
-                self._warn_unsaved_settings_before_rvt(dirty_names)
+            if dirty_names and not self._warn_unsaved_settings_before_rvt(dirty_names, folder):
                 return
             # Disabled for the compile's own duration -- see _run_compile()'s own docstring
             # (PROMPT.md: "we are having to press compile twice").
@@ -1128,17 +1223,32 @@ class MainWindow(QWidget):
         settings_dir = folder / new_project.SETTINGS_DIRNAME
         return [settings_dir / name for name in _RVT_SYNCED_JSON_FILENAMES]
 
-    def _warn_unsaved_settings_before_rvt(self, dirty_names: list[str]) -> None:
+    def _warn_unsaved_settings_before_rvt(self, dirty_names: list[str], folder: Path) -> bool:
         """"RVT should not be openable if a user has unsaved changes to any of the settings jsons"
         -- kept as its own method purely as a test seam, same reasoning as
-        :meth:`_confirm_overwrite_rvt_changes`."""
+        :meth:`_confirm_overwrite_rvt_changes`. PROMPT.md: "please update to include a Save and
+        Continue" -- saves exactly ``folder``'s own dirty settings/script_settings/strings.json
+        tabs (not any other unrelated dirty tab) rather than only ever refusing to launch.
+
+        Returns:
+            ``True`` for "Save and Continue" (the launch should proceed), ``False`` for "Cancel".
+        """
         joined = "\n".join(dirty_names)
-        QMessageBox.warning(
-            self,
-            "in-reach",
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
             "Save your changes to the following files before launching ReachVariantTool:\n\n"
-            f"{joined}",
+            f"{joined}"
         )
+        save_button = box.addButton("Save and Continue", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_button)
+        box.exec()
+        if box.clickedButton() is not save_button:
+            return False
+        self.main_panel.save_paths(self._rvt_synced_json_paths(folder))
+        return True
 
     def _close_rvt_for_project(self, folder: Path) -> None:
         """PROMPT.md: "if project is closed in ide, if Reach Variant tool is open for that project

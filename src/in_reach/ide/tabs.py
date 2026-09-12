@@ -830,6 +830,15 @@ class MainPanelArea(QWidget):
             if pane._tab_state_for(pane.widget(index)).path in paths
         ]
 
+    def save_paths(self, paths: list[Path]) -> None:
+        """Saves every already-open tab for one of ``paths`` that has unsaved edits -- used by
+        :meth:`~in_reach.ide.main_window.MainWindow._warn_unsaved_settings_before_rvt`'s own "Save
+        and Continue" button (PROMPT.md) to clear exactly the dirty settings/script_settings/
+        strings.json tabs blocking an RVT launch, without touching unrelated dirty tabs elsewhere."""
+        for pane, index in self._open_tab_locations(set(paths)):
+            if _is_modified(pane.widget(index)):
+                pane._save_tab(index)
+
     def dirty_tab_names(self, paths: list[Path]) -> list[str]:
         """The (sorted, deduplicated) file names of any already-open tab for one of ``paths`` that
         has unsaved edits -- PROMPT.md: RVT resyncing a project's own settings/script_settings/
