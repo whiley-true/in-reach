@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt
+from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QMouseEvent, QPaintEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -95,11 +95,23 @@ def _on_editor_save_requested(widget: TextEditorWidget) -> None:
         pane._save_tab(index)
 
 
+def _on_editor_cursor_changed(widget: TextEditorWidget) -> None:
+    # Looked up dynamically via _owner_pane, same reasoning as _on_editor_modified above -- and
+    # only re-emitted while widget is actually the pane's own visible tab, so a background tab's
+    # cursor (e.g. one just reloaded off disk) never overwrites the status bar for whatever tab
+    # the user is actually looking at.
+    pane = getattr(widget, "_owner_pane", None)
+    if pane is not None and widget is pane.currentWidget():
+        pane.cursor_info_changed.emit()
+
+
 def _connect_editor_signals(editor: TextEditorWidget) -> None:
     editor.document().modificationChanged.connect(
         lambda modified, w=editor: _on_editor_modified(w, modified)
     )
     editor.save_requested.connect(lambda w=editor: _on_editor_save_requested(w))
+    editor.cursorPositionChanged.connect(lambda w=editor: _on_editor_cursor_changed(w))
+    editor.selectionChanged.connect(lambda w=editor: _on_editor_cursor_changed(w))
 
 
 class _DragTabBar(QTabBar):
@@ -192,12 +204,18 @@ class TabPane(QTabWidget):
     dragged in from a sibling pane, with a corner widget offering both a horizontal and a vertical
     split button."""
 
+    #: Emitted whenever the *currently visible* tab's own cursor position/selection changes, or the
+    #: current tab itself switches -- what the bottom status bar's Ln/Col/Spaces segments (PROMPT.md:
+    #: Quick Access Bar work) key off of. Never fired for a background tab.
+    cursor_info_changed = pyqtSignal()
+
     def __init__(self, area: "MainPanelArea", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._area = area
         self.group: "_PaneGroup | None" = None  # set by _PaneGroup.add_pane()
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
         self._tab_state: dict[QWidget, _TabState] = {}
+        self.currentChanged.connect(lambda _index: self.cursor_info_changed.emit())
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
         self.setTabsClosable(True)

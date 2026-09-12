@@ -39,10 +39,12 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QTextCharFormat,
     QTextCursor,
+    QTextFormat,
 )
 from PyQt6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QTextEdit, QToolTip, QWidget
 
-from in_reach.ide import schema_check
+from in_reach.app import indent_settings
+from in_reach.ide import indent_state, schema_check
 from in_reach.ide.code_folding import compute_fold_ranges
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
@@ -62,6 +64,10 @@ _ERROR_COLOR = "#f14c4c"
 #: Spaces per indent level for the vertical guide lines -- matches this project's own generated
 #: ``.json`` files (``json.dump(..., indent=2)``) and ``vs_sample.png`` itself.
 _INDENT_SIZE = 2
+#: Alpha applied to the theme's own Highlight color for the "Go to Line" target-line background --
+#: same technique (and alpha, for visual consistency) as the minimap's own visible-viewport band in
+#: :meth:`_Minimap.paintEvent`, just applied to a single document line instead of a page range.
+_GOTO_LINE_HIGHLIGHT_ALPHA = 70
 
 #: PROMPT.md: "please increase the font size of the 3 setting json files by 10%" -- the project's
 #: own hand-relevant settings files (see :mod:`in_reach.app.new_project`'s own module docstring:
@@ -163,6 +169,9 @@ class _Minimap(QWidget):
         #: 0-based block numbers the live schema check currently flags -- see
         #: :meth:`set_error_lines`.
         self.error_lines: set[int] = set()
+        #: 0-based block number the main editor's own "Go to Line" jumped to, if any (mirrors
+        #: :attr:`TextEditorWidget._goto_highlight_block`) -- see :meth:`set_highlight_line`.
+        self.highlight_line: int | None = None
         #: Set for the duration of a press-drag -- ``(press_y, scrollbar_value_at_press)``, so a
         #: drag's own scroll delta is measured from where the mouse went down, not from wherever it
         #: last was (which would compound movement rather than track the pointer 1:1).
@@ -178,6 +187,14 @@ class _Minimap(QWidget):
         errors (the overwhelming common case) never triggers a paint over this alone."""
         if lines != self.error_lines:
             self.error_lines = lines
+            self.update()
+
+    def set_highlight_line(self, line: int | None) -> None:
+        """Mirrors the main editor's own "Go to Line" target-line highlight (PROMPT.md: the side
+        preview should highlight the selected line too) -- ``line`` is a 0-based block number, or
+        ``None`` once the cursor has moved off of it."""
+        if line != self.highlight_line:
+            self.highlight_line = line
             self.update()
 
     def _visible_block_count(self) -> int:
@@ -232,6 +249,15 @@ class _Minimap(QWidget):
 
         max_lines = int(self.height() / _MINI_LINE_HEIGHT) + 1
         first_line = self._first_line()
+
+        if self.highlight_line is not None:
+            offset = self.highlight_line - first_line
+            if 0 <= offset < max_lines:
+                highlight_color = palette.color(QPalette.ColorRole.Highlight)
+                highlight_color.setAlpha(_GOTO_LINE_HIGHLIGHT_ALPHA)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(highlight_color)
+                painter.drawRect(QRectF(0, offset * _MINI_LINE_HEIGHT, self.width(), _MINI_LINE_HEIGHT))
 
         if self.error_lines:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -302,6 +328,12 @@ class TextEditorWidget(QPlainTextEdit):
         #: :meth:`_error_message_at` hovers against to show the red-underline tooltip (PROMPT.md:
         #: "it should be a window that appears when hovering on the red underlined text").
         self._error_spans: list[tuple[int, int, str]] = []
+        #: 0-based block number "Go to Line" last jumped to, if any -- cleared the moment the
+        #: cursor moves to a *different* line (see :meth:`_maybe_clear_goto_highlight`), so it
+        #: behaves like a one-shot "you are here" marker rather than a permanent current-line
+        #: highlight (PROMPT.md: "when going to line number, the editor should highlight the
+        #: selected line").
+        self._goto_highlight_block: int | None = None
 
         self._line_number_area = _LineNumberArea(self)
         self._breadcrumb = _BreadcrumbBar(self)
@@ -320,6 +352,7 @@ class TextEditorWidget(QPlainTextEdit):
         self.updateRequest.connect(self._update_gutter_on_scroll)
         self.textChanged.connect(self._on_text_changed)
         self.cursorPositionChanged.connect(self._update_breadcrumb)
+        self.cursorPositionChanged.connect(self._maybe_clear_goto_highlight)
 
         self._update_gutter_width()
         self.set_path(path)
@@ -424,6 +457,15 @@ class TextEditorWidget(QPlainTextEdit):
         if event.matches(QKeySequence.StandardKey.Save):
             self.save_requested.emit()
             return
+        # PROMPT.md (Quick Access Bar work): "Indent using spaces" -- a plain Tab (no modifiers, so
+        # Shift+Tab's own default Qt focus-navigation behavior is untouched) inserts the project's
+        # configured indent width in spaces instead of QPlainTextEdit's own literal-tab-character
+        # default, whenever that's the live setting (see in_reach.ide.indent_state).
+        if event.key() == Qt.Key.Key_Tab and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            style, width = indent_state.get_indent()
+            if style == indent_settings.STYLE_SPACES:
+                self.insertPlainText(" " * width)
+                return
         super().keyPressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -605,13 +647,12 @@ class TextEditorWidget(QPlainTextEdit):
         :meth:`~in_reach.ide.tabs.TabPane._save_tab`."""
         errors = schema_check.find_errors(self.path, self.toPlainText()) if self.path is not None else None
         if not errors:
-            self.setExtraSelections([])
             self._error_spans = []
             self._minimap.set_error_lines(set())
+            self._apply_extra_selections([])
             return
 
         doc = self.document()
-        selections = []
         spans: list[tuple[int, int, str]] = []
         error_lines: set[int] = set()
         for error in errors:
@@ -620,6 +661,44 @@ class TextEditorWidget(QPlainTextEdit):
                 # still blocks the save (validate_before_save doesn't need a span at all).
                 continue
             start, end = error.span
+            spans.append((start, end, error.message))
+            error_lines.add(doc.findBlock(start).blockNumber())
+        self._error_spans = spans
+        self._minimap.set_error_lines(error_lines)
+        self._apply_extra_selections(self._error_selections())
+
+    # -- "Go to Line" highlight -----------------------------------------------------------------
+
+    def highlight_line(self, block_number: int) -> None:
+        """Highlights ``block_number`` (0-based) with a full-width background in both this editor
+        and its own minimap, until the cursor moves to a different line -- PROMPT.md: "when going
+        to line number, the editor should highlight the selected line (in both the main window and
+        in the side preview)". Called by ``MainWindow``'s own "Go to Line" handler right after it
+        moves the cursor there."""
+        self._goto_highlight_block = block_number
+        self._minimap.set_highlight_line(block_number)
+        self._apply_extra_selections(self._error_selections())
+
+    def _maybe_clear_goto_highlight(self) -> None:
+        """Drops the "Go to Line" highlight the moment the cursor lands on a different line --
+        e.g. the user starts typing or clicks elsewhere. A no-op while the cursor is still sitting
+        on the just-jumped-to line, including the very ``cursorPositionChanged`` the jump itself
+        fires."""
+        if self._goto_highlight_block is None:
+            return
+        if self.textCursor().blockNumber() == self._goto_highlight_block:
+            return
+        self._goto_highlight_block = None
+        self._minimap.set_highlight_line(None)
+        self._apply_extra_selections(self._error_selections())
+
+    def _error_selections(self) -> list[QTextEdit.ExtraSelection]:
+        """Rebuilds just the schema-error underline selections (cheap: :attr:`_error_spans` is
+        already computed) -- used to redraw them alongside a freshly changed "Go to Line" highlight
+        without re-running the schema check itself."""
+        doc = self.document()
+        selections = []
+        for start, end, _message in self._error_spans:
             cursor = QTextCursor(doc)
             cursor.setPosition(start)
             cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -630,11 +709,28 @@ class TextEditorWidget(QPlainTextEdit):
             selection.cursor = cursor
             selection.format = fmt
             selections.append(selection)
-            spans.append((start, end, error.message))
-            error_lines.add(doc.findBlock(start).blockNumber())
+        return selections
+
+    def _apply_extra_selections(self, base_selections: list[QTextEdit.ExtraSelection]) -> None:
+        """``setExtraSelections()`` only ever accepts one combined list, so every source of extra
+        selections (schema-error underlines, the "Go to Line" highlight) has to be merged here
+        rather than each calling ``setExtraSelections()`` on its own, which would just clobber
+        whichever one ran last."""
+        selections = list(base_selections)
+        if self._goto_highlight_block is not None:
+            block = self.document().findBlockByNumber(self._goto_highlight_block)
+            if block.isValid():
+                cursor = QTextCursor(block)
+                fmt = QTextCharFormat()
+                highlight_color = self.palette().color(QPalette.ColorRole.Highlight)
+                highlight_color.setAlpha(_GOTO_LINE_HIGHLIGHT_ALPHA)
+                fmt.setBackground(highlight_color)
+                fmt.setProperty(QTextFormat.Property.FullWidthSelection, True)
+                selection = QTextEdit.ExtraSelection()
+                selection.cursor = cursor
+                selection.format = fmt
+                selections.append(selection)
         self.setExtraSelections(selections)
-        self._error_spans = spans
-        self._minimap.set_error_lines(error_lines)
 
     # -- breadcrumb ---------------------------------------------------------------------------------
 

@@ -50,12 +50,12 @@ def test_open_project_shows_the_settings_box_rooted_at_it(
     assert Path(panel._settings_model.rootPath()) == folder / "settings"
 
 
-def test_close_all_projects_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_close_active_project_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
     panel.open_project(folder)
 
-    panel.close_all_projects()
+    panel.close_active_project()
 
     assert panel._no_project_label.isVisible() is True
     assert panel.settings_section.isVisible() is False
@@ -66,7 +66,7 @@ def test_opening_a_nonexistent_project_folder_is_a_no_op(panel: ExplorerPanel, t
 
     assert panel._no_project_label.isVisible() is True
     assert panel.settings_section.isVisible() is False
-    assert panel.open_projects == []
+    assert panel.current_folder is None
 
 
 # -- Settings box (PROMPT.md: "boxes like Personal Game Variants for Script and Settings")
@@ -95,7 +95,7 @@ def test_closing_the_last_project_hides_the_settings_section_again(
     folder.mkdir()
     panel.open_project(folder)
 
-    panel.close_all_projects()
+    panel.close_active_project()
 
     assert panel.settings_section.isVisible() is False
 
@@ -440,17 +440,10 @@ def test_settings_tree_font_tracks_a_later_app_font_change(panel: ExplorerPanel)
         app.setFont(original)
 
 
-# -- multi-project tabs ------------------------------------------------------------------------
+# -- one project per window (PROMPT.md: "we now want it to be 1 per window") --------------------
 
 
-def test_project_tabs_are_hidden_with_no_project(panel: ExplorerPanel) -> None:
-    assert panel.project_tabs.isVisible() is False
-    assert panel.project_tabs.count() == 0
-
-
-def test_open_project_adds_a_tab_labeled_with_the_projects_own_title(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+def test_open_project_becomes_the_current_folder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "abcd1234"
     (folder / "settings").mkdir(parents=True)
     (folder / "settings" / "settings.json").write_text(
@@ -459,44 +452,10 @@ def test_open_project_adds_a_tab_labeled_with_the_projects_own_title(
 
     panel.open_project(folder)
 
-    assert panel.project_tabs.isVisible() is True
-    assert panel.project_tabs.count() == 1
-    assert panel.project_tabs.tabText(0) == "Slayer Plus"
-    assert panel.open_projects == [folder]
     assert panel.current_folder == folder
 
 
-def test_open_project_tab_falls_back_to_the_folder_name_without_a_settings_json(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-
-    panel.open_project(folder)
-
-    assert panel.project_tabs.tabText(0) == "abcd1234"
-
-
-def test_opening_an_already_open_project_switches_instead_of_duplicating(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
-
-    panel.open_project(first)
-
-    assert panel.project_tabs.count() == 2
-    assert panel.open_projects == [first, second]
-    assert panel.current_folder == first
-
-
-def test_opening_a_second_project_adds_a_tab_without_closing_the_first(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+def test_opening_a_second_project_replaces_the_first(panel: ExplorerPanel, tmp_path: Path) -> None:
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
@@ -505,124 +464,63 @@ def test_opening_a_second_project_adds_a_tab_without_closing_the_first(
     panel.open_project(first)
     panel.open_project(second)
 
-    assert panel.project_tabs.count() == 2
-    assert panel.open_projects == [first, second]
     assert panel.current_folder == second
     assert Path(panel._settings_model.rootPath()) == second / "settings"
 
 
-def test_close_project_switches_to_a_remaining_tab(panel: ExplorerPanel, tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
+def test_opening_the_same_project_again_is_a_no_op(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    panel.open_project(folder)
+    seen: list[Path | None] = []
+    panel.active_project_changed.connect(seen.append)
 
-    panel.close_project(second)
+    panel.open_project(folder)
 
-    assert panel.open_projects == [first]
-    assert panel.current_folder == first
-    assert panel.project_tabs.isVisible() is True
+    assert seen == []  # no redundant re-activate
 
 
-def test_close_project_of_the_last_tab_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_close_project_of_a_folder_that_is_not_open_is_a_no_op(panel: ExplorerPanel, tmp_path: Path) -> None:
+    open_folder = tmp_path / "open"
+    open_folder.mkdir()
+    other_folder = tmp_path / "other"
+    other_folder.mkdir()
+    panel.open_project(open_folder)
+
+    panel.close_project(other_folder)
+
+    assert panel.current_folder == open_folder
+
+
+def test_close_project_of_the_open_project_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "abcd1234"
     folder.mkdir()
     panel.open_project(folder)
 
     panel.close_project(folder)
 
-    assert panel.open_projects == []
     assert panel.current_folder is None
     assert panel._no_project_label.isVisible() is True
     assert panel.settings_section.isVisible() is False
-    assert panel.project_tabs.isVisible() is False
 
 
-def test_close_active_project_closes_whichever_tab_is_current(panel: ExplorerPanel, tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
+def test_close_active_project_closes_the_open_project(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    panel.open_project(folder)
 
     panel.close_active_project()
 
-    assert panel.open_projects == [first]
-    assert panel.current_folder == first
+    assert panel.current_folder is None
 
 
 def test_close_active_project_with_no_project_open_is_a_no_op(panel: ExplorerPanel) -> None:
     panel.close_active_project()  # should not raise
 
-    assert panel.open_projects == []
+    assert panel.current_folder is None
 
 
-def test_closing_a_background_tab_does_not_change_the_active_project(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
-
-    panel.close_project(first)
-
-    assert panel.open_projects == [second]
-    assert panel.current_folder == second
-
-
-def test_tab_close_button_closes_that_projects_tab(panel: ExplorerPanel, tmp_path: Path) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-    panel.open_project(folder)
-
-    # Drives the tab bar's own close-request signal, not close_project() directly -- confirms the
-    # close (X) button is actually wired up.
-    panel.project_tabs.tabCloseRequested.emit(0)
-
-    assert panel.open_projects == []
-
-
-# -- project tabs styled/functioning like the primary panel tabs (PROMPT.md: "please make the
-# project tabs function and look like the primary panel tabs") -----------------------------------
-
-
-def test_project_tabs_are_movable_and_styled_like_the_primary_panel_tabs(panel: ExplorerPanel) -> None:
-    from in_reach.ide import style
-
-    assert panel.project_tabs.isMovable() is True
-    assert panel.project_tabs.styleSheet() == style.MAIN_TAB_STYLE
-    assert panel.project_tabs.documentMode() is True
-    assert panel.project_tabs.drawBase() is False
-
-
-def test_moving_a_project_tab_notifies_open_projects_changed(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    # Real drag-and-drop reordering isn't something a test can drive directly -- this confirms the
-    # tab bar's own tabMoved signal (which Qt's built-in movable-tab handling emits after a real
-    # drag reorders it) is actually wired to keep MainWindow's persisted tab order in sync, the
-    # same way tabCloseRequested above is confirmed to be wired to close_project().
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
-    seen: list[list[Path]] = []
-    panel.open_projects_changed.connect(seen.append)
-
-    panel.project_tabs.tabMoved.emit(1, 0)
-
-    assert seen == [panel.open_projects]
-
-
-def test_active_project_changed_fires_on_open_switch_and_close(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_active_project_changed_fires_on_open_and_close(panel: ExplorerPanel, tmp_path: Path) -> None:
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
@@ -631,30 +529,41 @@ def test_active_project_changed_fires_on_open_switch_and_close(panel: ExplorerPa
     panel.active_project_changed.connect(seen.append)
 
     panel.open_project(first)
-    panel.open_project(second)
-    panel.open_project(first)  # switch back -- "first" is active again
-    panel.close_project(first)  # closing the *active* tab -- "second" becomes active
-    panel.close_project(second)  # last one -- back to no project
+    panel.open_project(second)  # replaces "first", still fires
+    panel.close_project(second)
 
-    assert seen == [first, second, first, second, None]
+    assert seen == [first, second, None]
 
 
-def test_open_projects_changed_fires_on_open_and_close_but_not_on_switch(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+def test_opening_a_second_project_closes_the_first(panel: ExplorerPanel, tmp_path: Path) -> None:
+    # With only one project open at a time, replacing it *is* closing it -- MainWindow relies on
+    # project_closed firing here to terminate the outgoing project's own RVT process.
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
     second.mkdir()
-    seen: list[list[Path]] = []
-    panel.open_projects_changed.connect(seen.append)
-
     panel.open_project(first)
-    panel.open_project(second)
-    panel.open_project(first)  # already open -- just switches, no set change
-    panel.close_project(second)
+    seen: list[Path] = []
+    panel.project_closed.connect(seen.append)
 
-    assert seen == [[first], [first, second], [first]]
+    panel.open_project(second)
+
+    assert seen == [first]
+
+
+def test_project_closed_fires_only_for_the_currently_open_project(panel: ExplorerPanel, tmp_path: Path) -> None:
+    open_folder = tmp_path / "open"
+    open_folder.mkdir()
+    other_folder = tmp_path / "other"
+    other_folder.mkdir()
+    panel.open_project(open_folder)
+    seen: list[Path] = []
+    panel.project_closed.connect(seen.append)
+
+    panel.close_project(other_folder)  # not open -- no-op, no signal
+    panel.close_project(open_folder)
+
+    assert seen == [open_folder]
 
 
 # -- no-project spacer -----------------------------------------------------------------------

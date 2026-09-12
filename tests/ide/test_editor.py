@@ -2,11 +2,22 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPalette
+from PyQt6.QtGui import QPalette, QTextFormat
 from PyQt6.QtWidgets import QApplication
 
+from in_reach.app import indent_settings
+from in_reach.ide import indent_state
 from in_reach.ide.editor import TextEditorWidget, _indent_level
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
+
+
+@pytest.fixture(autouse=True)
+def _reset_indent_state():
+    # indent_state is process-global (see its own module docstring) -- reset it around every test
+    # here so one test's Tab-key setting can't leak into the next.
+    saved = indent_state.get_indent()
+    yield
+    indent_state.set_indent(*saved)
 
 
 def _has_opaque_pixel(image) -> bool:
@@ -699,3 +710,94 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(qtbot, tmp_path) -> N
         assert editor.font().pointSizeF() == pytest.approx(bigger.pointSizeF() * 1.1)
     finally:
         app.setFont(original)
+
+
+# -- Tab key indentation (PROMPT.md: Quick Access Bar work -- "Indent using spaces") -------------
+
+
+def test_tab_inserts_spaces_when_the_indent_style_is_spaces(qtbot) -> None:
+    indent_state.set_indent(indent_settings.STYLE_SPACES, 3)
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+
+    assert editor.toPlainText() == "   "
+
+
+def test_tab_inserts_a_literal_tab_when_the_indent_style_is_tabs(qtbot) -> None:
+    indent_state.set_indent(indent_settings.STYLE_TABS, 4)
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+
+    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+
+    assert editor.toPlainText() == "\t"
+
+
+# -- "Go to Line" highlight (PROMPT.md: "when going to line number, the editor should highlight
+# the selected line (in both the main window and in the side preview)") ------------------------
+
+
+def test_highlight_line_shows_a_full_width_extra_selection_on_that_block(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText("a\nb\nc\nd")
+
+    editor.highlight_line(2)
+
+    selections = editor.extraSelections()
+    assert len(selections) == 1
+    assert selections[0].cursor.blockNumber() == 2
+    assert selections[0].format.property(QTextFormat.Property.FullWidthSelection) is True
+
+
+def test_highlight_line_also_marks_the_minimap(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText("a\nb\nc\nd")
+
+    editor.highlight_line(2)
+
+    assert editor._minimap.highlight_line == 2
+
+
+def test_highlight_line_persists_while_the_cursor_stays_on_that_line(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText("a\nb\nc\nd")
+
+    editor.highlight_line(2)
+    cursor = editor.textCursor()
+    block = editor.document().findBlockByNumber(2)
+    cursor.setPosition(block.position() + 1)  # still line 2, just a different column
+    editor.setTextCursor(cursor)
+
+    assert len(editor.extraSelections()) == 1
+    assert editor._minimap.highlight_line == 2
+
+
+def test_highlight_line_clears_once_the_cursor_moves_to_a_different_line(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.setPlainText("a\nb\nc\nd")
+
+    editor.highlight_line(2)
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().findBlockByNumber(3).position())
+    editor.setTextCursor(cursor)
+
+    assert editor.extraSelections() == []
+    assert editor._minimap.highlight_line is None
+
+
+def test_highlight_line_and_schema_error_underlines_coexist(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{"meta": {"category": "not_a_real_category"}}')
+    assert len(editor.extraSelections()) == 1  # the error underline, before any goto-highlight
+
+    editor.highlight_line(0)
+
+    assert len(editor.extraSelections()) == 2

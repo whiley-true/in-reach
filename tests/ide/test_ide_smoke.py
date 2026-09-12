@@ -535,22 +535,21 @@ def test_closing_the_last_project_collapses_the_sidebar_but_leaves_the_views_cli
     assert project_window.top_bar.sidebar_toggle.isEnabled() is True
 
 
-def test_switching_between_two_open_projects_does_not_force_the_sidebar_back_open(
+def test_replacing_the_open_project_does_not_force_the_sidebar_back_open(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
-    # The has-project/no-project transition is what unlocks/reveals the sidebar -- switching
-    # between two already-open projects (neither transition is "no project") must not re-open a
-    # sidebar the user deliberately collapsed.
+    # The has-project/no-project transition is what unlocks/reveals the sidebar -- replacing the
+    # open project with another one (PROMPT.md: "1 per window") is neither transition, so it must
+    # not re-open a sidebar the user deliberately collapsed.
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
     second.mkdir()
-    project_window._on_project_opened(first)
-    project_window._on_project_opened(second)
+    project_window.explorer_panel.open_project(first)
     project_window.activity_bar.explorer_button.click()  # user collapses it
     assert project_window.primary_sidebar.isVisible() is False
 
-    project_window.explorer_panel.open_project(first)  # switch back to the first tab
+    project_window.explorer_panel.open_project(second)
 
     assert project_window.primary_sidebar.isVisible() is False
 
@@ -1165,9 +1164,13 @@ def test_closing_a_project_does_not_terminate_an_already_exited_rvt_process(
     assert process.terminated is True
 
 
-def test_closing_a_different_project_does_not_terminate_this_ones_rvt_process(
+def test_opening_a_different_project_terminates_the_previous_ones_rvt_process(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # PROMPT.md: "1 per window" -- with only one project open at a time, opening a second one
+    # while the first is open *replaces* it, which is closing it (see
+    # ExplorerPanel.open_project's own docstring), so its RVT process gets terminated too, same as
+    # an explicit Close Project would.
     from in_reach.app import rvt_launcher
 
     folder_a = tmp_path / "project-a"
@@ -1178,12 +1181,11 @@ def test_closing_a_different_project_does_not_terminate_this_ones_rvt_process(
     process = _FakeRvtProcess()
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
     project_window.launch_rvt()
-    project_window._on_project_opened(folder_b)
 
-    project_window.explorer_panel.close_project(folder_b)
+    project_window.explorer_panel.open_project(folder_b)
 
-    assert process.terminated is False
-    assert project_window._rvt_processes[folder_a] is process
+    assert process.terminated is True
+    assert folder_a not in project_window._rvt_processes
 
 
 # -- Apply --------------------------------------------------------------------------------------
@@ -1350,11 +1352,12 @@ def test_rvt_and_export_buttons_are_disabled_for_the_compile_call_too(
     assert project_window.explorer_panel.export_button.isEnabled() is True  # restored after
 
 
-def test_clicking_apply_syncs_a_hand_edited_title_to_the_explorer_tab(
+def test_clicking_apply_syncs_a_hand_edited_title_to_the_status_bar(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # PROMPT.md: "when a project name is changed [via rvt or] via apply settings.json change - the
-    # project title should change in the tabs and in the breadcrumb".
+    # project title should change in the tabs and in the breadcrumb" (now the centered status bar
+    # label, since "1 per window" removed the project tab strip).
     from in_reach.app import apply_settings
     from in_reach.app.rvt.compile import BuildResult
 
@@ -1371,8 +1374,7 @@ def test_clicking_apply_syncs_a_hand_edited_title_to_the_explorer_tab(
     from in_reach.app import new_project
 
     assert new_project.read_project_title(folder) == "Hand-Edited Title"
-    tab_index = project_window.explorer_panel.project_tabs.currentIndex()
-    assert project_window.explorer_panel.project_tabs.tabText(tab_index) == "Hand-Edited Title"
+    assert project_window.status_bar._project_label.text() == f"Hand-Edited Title ({folder.name})"
 
 
 def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
@@ -2167,7 +2169,7 @@ def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     assert "description" not in calls[0][2]
 
 
-def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_explorer_tab(
+def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_status_bar(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import new_project, project
@@ -2194,8 +2196,7 @@ def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_explorer_tab(
     window._on_watched_bin_changed(str(bin_path))
 
     assert new_project.read_project_title(folder) == "RVT Renamed"
-    tab_index = window.explorer_panel.project_tabs.currentIndex()
-    assert window.explorer_panel.project_tabs.tabText(tab_index) == "RVT Renamed"
+    assert window.status_bar._project_label.text() == f"RVT Renamed ({folder.name})"
 
 
 def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
@@ -2612,6 +2613,265 @@ def test_status_bar_set_project_label_updates_and_clears_the_centered_text(windo
     assert status_bar._project_label.text() == ""
 
 
+# -- bottom status bar: Ln/Col/Spaces (PROMPT.md: Quick Access Bar work) -------------------------
+
+
+def test_status_bar_set_cursor_info_shows_ln_col_and_spaces(window: MainWindow) -> None:
+    from in_reach.app import indent_settings
+
+    status_bar = window.status_bar
+    on_cursor = []
+    on_spaces = []
+
+    status_bar.set_cursor_info(
+        9,
+        5,
+        63,
+        indent_settings.STYLE_SPACES,
+        4,
+        on_cursor_click=lambda: on_cursor.append(True),
+        on_spaces_click=lambda: on_spaces.append(True),
+    )
+
+    assert status_bar.cursor_label.isVisible() is True
+    assert status_bar.cursor_label.text() == "Ln 9, Col 5 (63 selected)"
+    assert status_bar.spaces_label.isVisible() is True
+    assert status_bar.spaces_label.text() == "Spaces: 4"
+
+    status_bar.cursor_label._on_click()
+    status_bar.spaces_label._on_click()
+    assert on_cursor == [True]
+    assert on_spaces == [True]
+
+
+def test_status_bar_set_cursor_info_shows_tabs_when_that_is_the_live_style(window: MainWindow) -> None:
+    """PROMPT.md: the bottom bar's indentation segment should represent what is live in the
+    document right now -- it used to read "Spaces: N" unconditionally, even with Tabs active."""
+    from in_reach.app import indent_settings
+
+    window.status_bar.set_cursor_info(
+        1, 1, 0, indent_settings.STYLE_TABS, 4, on_cursor_click=lambda: None, on_spaces_click=lambda: None
+    )
+
+    assert window.status_bar.spaces_label.text() == "Tabs: 4"
+
+
+def test_status_bar_set_cursor_info_omits_selected_count_with_no_selection(window: MainWindow) -> None:
+    from in_reach.app import indent_settings
+
+    window.status_bar.set_cursor_info(
+        1, 1, 0, indent_settings.STYLE_SPACES, 4, on_cursor_click=lambda: None, on_spaces_click=lambda: None
+    )
+
+    assert window.status_bar.cursor_label.text() == "Ln 1, Col 1"
+
+
+def test_status_bar_clear_cursor_info_hides_both_segments(window: MainWindow) -> None:
+    from in_reach.app import indent_settings
+
+    window.status_bar.set_cursor_info(
+        1, 1, 0, indent_settings.STYLE_SPACES, 4, on_cursor_click=lambda: None, on_spaces_click=lambda: None
+    )
+
+    window.status_bar.clear_cursor_info()
+
+    assert window.status_bar.cursor_label.isVisible() is False
+    assert window.status_bar.spaces_label.isVisible() is False
+
+
+def test_opening_a_txt_file_shows_the_cursor_segments(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello\nworld", encoding="utf-8")
+
+    project_window.main_panel.active_pane.open_file(path)
+
+    assert project_window.status_bar.cursor_label.isVisible() is True
+    assert project_window.status_bar.cursor_label.text() == "Ln 1, Col 1"
+
+
+def test_opening_a_json_file_shows_the_cursor_segments(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "data.json"
+    path.write_text("{}", encoding="utf-8")
+
+    project_window.main_panel.active_pane.open_file(path)
+
+    assert project_window.status_bar.cursor_label.isVisible() is True
+
+
+def test_the_welcome_tab_hides_the_cursor_segments(project_window: MainWindow) -> None:
+    project_window.open_welcome_tab()
+
+    assert project_window.status_bar.cursor_label.isVisible() is False
+    assert project_window.status_bar.spaces_label.isVisible() is False
+
+
+def test_moving_the_cursor_updates_the_ln_col_segment(project_window: MainWindow, tmp_path: Path) -> None:
+    from PyQt6.QtGui import QTextCursor
+
+    path = tmp_path / "notes.txt"
+    path.write_text("hello\nworld", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+    editor = project_window.main_panel.active_pane.currentWidget()
+
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+    cursor.movePosition(QTextCursor.MoveOperation.Right, n=3)
+    editor.setTextCursor(cursor)
+
+    assert project_window.status_bar.cursor_label.text() == "Ln 2, Col 4"
+
+
+def test_selecting_text_shows_the_selected_count(project_window: MainWindow, tmp_path: Path) -> None:
+    from PyQt6.QtGui import QTextCursor
+
+    path = tmp_path / "notes.txt"
+    path.write_text("hello world", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+    editor = project_window.main_panel.active_pane.currentWidget()
+
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, n=5)
+    editor.setTextCursor(cursor)
+
+    assert "(5 selected)" in project_window.status_bar.cursor_label.text()
+
+
+def test_clicking_ln_col_opens_the_quick_access_bar_in_goto_line_mode(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("a\nb\nc\nd\ne", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+    editor = project_window.main_panel.active_pane.currentWidget()
+
+    project_window._open_goto_line(editor)
+
+    assert project_window.quick_access.overlay._mode == "goto_line"
+    assert project_window.quick_access.overlay.isVisible() is True
+
+    project_window.quick_access.overlay.line_edit.setText("3")
+
+    assert editor.textCursor().blockNumber() == 2  # 0-based -- line 3
+    # PROMPT.md: "when going to line number, the editor should highlight the selected line (in
+    # both the main window and in the side preview)".
+    assert len(editor.extraSelections()) == 1
+    assert editor.extraSelections()[0].cursor.blockNumber() == 2
+    assert editor._minimap.highlight_line == 2
+
+
+def test_clicking_spaces_opens_the_action_list_with_four_commands(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+
+    project_window._open_indent_action_list()
+
+    overlay = project_window.quick_access.overlay
+    assert overlay.heading_label.text() == "Select Action"
+    labels = [overlay.list_widget.item(i).text() for i in range(overlay.list_widget.count())]
+    assert labels == [
+        "Detect Indentation from Content",
+        "Convert indentation to spaces",
+        "Convert indentation to tabs",
+        "Trim trailing whitespace",
+    ]
+
+
+def test_trim_trailing_whitespace_action_rewrites_the_active_editor(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("foo   \nbar\t", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+
+    project_window._trim_active_trailing_whitespace()
+
+    editor = project_window.main_panel.active_pane.currentWidget()
+    assert editor.toPlainText() == "foo\nbar"
+
+
+def test_trim_trailing_whitespace_with_a_selection_only_touches_the_selected_lines(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    """PROMPT.md: "indent using tabs or spaces should apply to selection" -- covers the
+    identically-scoped "Trim trailing whitespace" action too, not just Convert indentation."""
+    from PyQt6.QtGui import QTextCursor
+
+    path = tmp_path / "notes.txt"
+    path.write_text("foo   \nbar   \nbaz   \n", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+    editor = project_window.main_panel.active_pane.currentWidget()
+
+    # Select only the middle line ("bar   ").
+    cursor = editor.textCursor()
+    middle_block = editor.document().findBlockByNumber(1)
+    cursor.setPosition(middle_block.position())
+    cursor.setPosition(middle_block.position() + middle_block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    project_window._trim_active_trailing_whitespace()
+
+    assert editor.toPlainText() == "foo   \nbar\nbaz   \n"
+
+
+def test_convert_indentation_with_a_selection_only_touches_the_selected_lines(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from PyQt6.QtGui import QTextCursor
+    from in_reach.app import indent_settings
+    from in_reach.ide import indent_state
+
+    indent_state.set_indent(indent_settings.STYLE_SPACES, 4)
+    path = tmp_path / "notes.txt"
+    path.write_text("\tfoo\n\tbar\n\tbaz\n", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+    editor = project_window.main_panel.active_pane.currentWidget()
+
+    # Select only the middle line ("\tbar").
+    cursor = editor.textCursor()
+    middle_block = editor.document().findBlockByNumber(1)
+    cursor.setPosition(middle_block.position())
+    cursor.setPosition(middle_block.position() + middle_block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    project_window._convert_active_indentation(to_spaces=True)
+
+    assert editor.toPlainText() == "\tfoo\n    bar\n\tbaz\n"
+
+
+def test_detect_indentation_action_updates_the_live_state_and_persists_it(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    """PROMPT.md: replaces the old manual "Indent using spaces"/"Indent using tabs" commands with
+    "Detect Indentation from Content" -- exercised here end to end through the active editor's own
+    (tab-indented) text, same as the manual commands used to be tested."""
+    from in_reach.app import indent_settings
+    from in_reach.ide import indent_state
+
+    path = tmp_path / "notes.txt"
+    path.write_text("\tfoo\n\tbar\n", encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(path)
+
+    try:
+        project_window._detect_active_indentation()
+
+        assert indent_state.get_indent()[0] == indent_settings.STYLE_TABS
+        assert indent_settings.get_indent(project_window._indent_env_path())[0] == indent_settings.STYLE_TABS
+    finally:
+        indent_state.set_indent(indent_settings.DEFAULT_INDENT_STYLE, indent_settings.DEFAULT_INDENT_WIDTH)
+
+
+def test_detect_indentation_action_is_a_no_op_with_no_active_editor(project_window: MainWindow) -> None:
+    from in_reach.app import indent_settings
+    from in_reach.ide import indent_state
+
+    indent_state.set_indent(indent_settings.DEFAULT_INDENT_STYLE, indent_settings.DEFAULT_INDENT_WIDTH)
+
+    project_window._detect_active_indentation()  # the Welcome tab is active -- not a TextEditorWidget
+
+    assert indent_state.get_indent() == (indent_settings.DEFAULT_INDENT_STYLE, indent_settings.DEFAULT_INDENT_WIDTH)
+
+
 def test_wrap_tab_widget_builds_a_named_bordered_card(qtbot) -> None:
     tab_widget = QTabWidget()
     qtbot.addWidget(tab_widget)
@@ -2907,6 +3167,79 @@ def test_open_folder_adopts_it_as_the_current_project(
     assert Path(project_window.explorer_panel._settings_model.rootPath()) == folder / "settings"
     env_project_dir = project.get_project_dir(project_window.root_dir)
     assert recent_module.list_recent(env_project_dir) == [folder]
+
+
+# -- "1 per window" popup (PROMPT.md: "opening (or loading) a new project when one is already
+# open should trigger a popup: Open in this window, Open in new window, cancel") ------------------
+
+
+def test_opening_a_project_with_none_open_skips_the_popup(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    asked = []
+    project_window.ask_open_in_new_window = lambda f: asked.append(f) or "cancel"
+
+    project_window._on_project_opened(folder)
+
+    assert asked == []
+    assert project_window.explorer_panel.current_folder == folder
+
+
+def test_reopening_the_already_open_project_skips_the_popup(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    asked = []
+    project_window.ask_open_in_new_window = lambda f: asked.append(f) or "cancel"
+
+    project_window._on_project_opened(folder)
+
+    assert asked == []
+
+
+def test_popup_open_in_this_window_replaces_the_active_project(project_window: MainWindow, tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    project_window._on_project_opened(first)
+    project_window.ask_open_in_new_window = lambda f: "this_window"
+
+    project_window._on_project_opened(second)
+
+    assert project_window.explorer_panel.current_folder == second
+
+
+def test_popup_cancel_leaves_the_active_project_alone(project_window: MainWindow, tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    project_window._on_project_opened(first)
+    project_window.ask_open_in_new_window = lambda f: "cancel"
+
+    project_window._on_project_opened(second)
+
+    assert project_window.explorer_panel.current_folder == first
+
+
+def test_popup_open_in_new_window_opens_a_second_window_leaving_this_one_alone(
+    project_window: MainWindow, tmp_path: Path, qtbot
+) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    project_window._on_project_opened(first)
+    project_window.ask_open_in_new_window = lambda f: "new_window"
+
+    project_window._on_project_opened(second)
+
+    assert project_window.explorer_panel.current_folder == first
+    assert len(project_window._child_windows) == 1
+    new_window = project_window._child_windows[0]
+    qtbot.addWidget(new_window)
+    assert new_window.explorer_panel.current_folder == second
 
 
 def test_open_recent_project_menu_shows_a_placeholder_when_empty(project_window: MainWindow) -> None:

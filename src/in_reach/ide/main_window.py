@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut
+from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -27,8 +28,19 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import env_file, halo_status, new_project, open_projects, project, recent, rvt_launcher, system_verify
+from in_reach.app import (
+    env_file,
+    halo_status,
+    indent_settings,
+    new_project,
+    project,
+    recent,
+    rvt_launcher,
+    system_verify,
+)
 from in_reach.ide import icons, style
+from in_reach.ide import indent_state
+from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
@@ -36,6 +48,7 @@ from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
 from in_reach.ide.locations_panel import LocationsPanel
+from in_reach.ide.quick_access import Command, QuickAccessBar
 from in_reach.ide.scripts_panel import ScriptsPanel
 from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.settings_dialog import SettingsDialog
@@ -201,6 +214,20 @@ class _TopBar(QWidget):
         layout.addWidget(_DropdownButton("text2"))
         layout.addStretch(1)
 
+        # Two equal stretches around the pill center it in the gap between the left content
+        # (mark/File/text2) and the right-side toggle/window-control cluster, rather than in the
+        # dead center of the whole bar (which would drift off-center against those unequal-width
+        # neighbors) -- the standard QBoxLayout "center between two stretches" trick.
+        self.quick_access = QuickAccessBar(
+            self,
+            get_project_folder=lambda: self._window.explorer_panel.current_folder,
+            open_file=self._window.open_quick_access_file,
+            build_root_commands=self._window.build_command_palette_commands,
+            label=self._window.root_dir.name,
+        )
+        layout.addWidget(self.quick_access)
+        layout.addStretch(1)
+
         self.sidebar_toggle = self._toolbutton(
             "sidebar", "Toggle Primary Sidebar", checkable=True, checked=True
         )
@@ -324,9 +351,19 @@ class _ResizableBody(QWidget):
 
 
 class MainWindow(QWidget):
-    def __init__(self, root_dir: Path | None = None) -> None:
+    def __init__(self, root_dir: Path | None = None, *, initial_project: Path | None = None) -> None:
+        """
+        Args:
+            root_dir: The repo root this window's own ``.in-reach`` project folder lives under.
+            initial_project: Opens this exact gametype project folder instead of restoring whatever
+                the shared ``.env`` last had open -- used only by :meth:`_open_project_with_popup`'s
+                own "Open in New Window" choice (PROMPT.md: "1 per window"), so a project already
+                open in *this* window can be handed to a fresh one without disturbing what's
+                persisted for ordinary restarts.
+        """
         super().__init__()
         self.root_dir = root_dir or Path.cwd()
+        self._initial_project = initial_project
         self._active_sidebar_view = DEFAULT_VIEW
         # Tracks only the has-project/no-project transition (not which project) -- see
         # _sync_project_dependent_views()'s own docstring for why.
@@ -356,6 +393,7 @@ class MainWindow(QWidget):
 
         self.top_bar = _TopBar(self)
         outer.addWidget(self.top_bar)
+        self.quick_access = self.top_bar.quick_access
 
         body = _ResizableBody(self)
         body_layout = QHBoxLayout(body)
@@ -405,23 +443,23 @@ class MainWindow(QWidget):
         self._bin_watcher.fileChanged.connect(self._on_watched_bin_changed)
 
         env_project_dir = project.get_project_dir(self.root_dir)
-        # PROMPT.md: multi-project tabs -- re-open every tab still on disk from last launch;
-        # PROJECT_DIR_KEY (the single most-recently-created project) is only a fallback for a
-        # .env from before OPEN_PROJECTS existed, so upgrading doesn't silently lose the one
-        # project that .env already knew about.
         self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
         self.explorer_panel.active_project_changed.connect(self._rewatch_project_bin)
         self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
         self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
-        self.explorer_panel.open_projects_changed.connect(self._on_open_projects_changed)
+        self.explorer_panel.active_project_changed.connect(self._persist_active_project)
         self.explorer_panel.project_closed.connect(self._close_rvt_for_project)
-        restored = open_projects.list_open(env_project_dir)
-        if not restored:
+        # PROMPT.md: "1 per window" -- initial_project (see __init__'s own docstring) wins over
+        # whatever's persisted; otherwise restore the one project PROJECT_DIR_KEY last had open,
+        # the same key every gametype-project creation already writes (see
+        # in_reach.app.new_project.create_gametype_project).
+        if self._initial_project is not None:
+            to_open = self._initial_project if self._initial_project.is_dir() else None
+        else:
             already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
-            if already_open and Path(already_open).is_dir():
-                restored = [Path(already_open)]
-        for folder in restored:
-            self.explorer_panel.open_project(folder)
+            to_open = Path(already_open) if already_open and Path(already_open).is_dir() else None
+        if to_open is not None:
+            self.explorer_panel.open_project(to_open)
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
         self.explorer_panel.export_requested.connect(self.export_rvt_file)
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
@@ -447,6 +485,14 @@ class MainWindow(QWidget):
         # Same priming reasoning as the status label just above -- a restored project (or the lack
         # of one) already fired active_project_changed before this method's own connection existed.
         self._sync_project_dependent_views(self.explorer_panel.current_folder)
+
+        # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- active_pane is
+        # always panes[0] for now (see MainPanelArea.active_pane's own docstring), so a single
+        # connection here (rather than threading this through every pane) is enough.
+        indent_env_path = project.get_project_dir(self.root_dir) / ".env"
+        indent_state.set_indent(*indent_settings.get_indent(indent_env_path))
+        self.main_panel.active_pane.cursor_info_changed.connect(self._update_status_cursor_info)
+        self._update_status_cursor_info()
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
@@ -474,6 +520,12 @@ class MainWindow(QWidget):
         self._zoom_out_shortcut = QShortcut(self)
         self._zoom_out_shortcut.setKeys([QKeySequence("Ctrl+-")])
         self._zoom_out_shortcut.activated.connect(self._zoom_out)
+
+        # Quick Access Bar (PROMPT.md): Ctrl+P search, Ctrl+Shift+P command palette.
+        self._quick_open_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
+        self._quick_open_shortcut.activated.connect(self.quick_access.open_search)
+        self._command_palette_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        self._command_palette_shortcut.activated.connect(self.quick_access.open_command_palette)
 
         self.refresh_icon_colors()
         # The activity bar's own buttons are fixed pixel sizes, not derived from app.font() the
@@ -581,16 +633,60 @@ class MainWindow(QWidget):
         self.activity_bar.set_active_view("explorer")
 
     def _on_project_opened(self, folder: Path) -> None:
-        """Opens a newly created/loaded gametype project as an Explorer tab (PROMPT.md:
-        multi-project tabs), switching to it -- alongside whatever other projects are already
-        open, not replacing them. The Search panel follows along via
-        ``explorer_panel.active_project_changed`` (see ``__init__``), not called directly here."""
-        self.explorer_panel.open_project(folder)
+        """A project just created/loaded (the Welcome tab's own "New .../Load Project" actions) --
+        routed through :meth:`_open_project_with_popup` (PROMPT.md: "1 per window"), same as
+        :meth:`open_folder`/:meth:`open_recent_project`."""
+        self._open_project_with_popup(folder)
 
-    def _on_open_projects_changed(self, folders: list[Path]) -> None:
-        """Persists the Explorer's current tab set so it comes back on the next launch (PROMPT.md:
-        multi-project tabs)."""
-        open_projects.set_open(project.get_project_dir(self.root_dir), folders)
+    def _open_project_with_popup(self, folder: Path) -> None:
+        """The one entry point every "open/load a project" action in this window funnels through
+        (the Welcome tab, File > Open Folder, File > Open Recent) -- PROMPT.md: "we now want it to
+        be 1 per window ... opening (or loading) a new project when one is already open should
+        trigger a popup: Open in this window, Open in new window, cancel." Opens directly, no
+        popup, when nothing's open yet or ``folder`` is already the active project.
+        """
+        current = self.explorer_panel.current_folder
+        if current is None or current == folder:
+            self.explorer_panel.open_project(folder)
+            return
+        choice = self.ask_open_in_new_window(folder)
+        if choice == "this_window":
+            self.explorer_panel.open_project(folder)
+        elif choice == "new_window":
+            window = MainWindow(root_dir=self.root_dir, initial_project=folder)
+            window.showMaximized()
+            self._child_windows.append(window)
+        # "cancel" (or anything else) -- leave the currently open project alone.
+
+    def ask_open_in_new_window(self, folder: Path) -> str:
+        """Kept as its own method purely as a test seam, same convention as
+        :meth:`_confirm_overwrite_rvt_changes`. Returns ``"this_window"``, ``"new_window"``, or
+        ``"cancel"``."""
+        box = QMessageBox(self)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            f"A project is already open in this window. Open \"{new_project.read_project_title(folder)}\""
+            " in this window (replacing it), or in a new window?"
+        )
+        this_window_button = box.addButton("Open in This Window", QMessageBox.ButtonRole.AcceptRole)
+        new_window_button = box.addButton("Open in New Window", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(this_window_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is this_window_button:
+            return "this_window"
+        if clicked is new_window_button:
+            return "new_window"
+        return "cancel"
+
+    def _persist_active_project(self, folder: Path | None) -> None:
+        """Persists the single active project so it's restored on the next launch (PROMPT.md: "1
+        per window") -- the same ``PROJECT_DIR_KEY`` a gametype project's own creation already
+        writes (see :func:`~in_reach.app.new_project.create_gametype_project`)."""
+        env_file.update_env_value(
+            project.get_project_dir(self.root_dir) / ".env", new_project.PROJECT_DIR_KEY, str(folder) if folder else ""
+        )
 
     def _update_status_project_label(self, folder: Path | None) -> None:
         """Shows the active project as "<title> (<folder id>)" centered in the bottom status bar
@@ -612,6 +708,169 @@ class MainWindow(QWidget):
     def _on_search_file_activated(self, path: Path, line_number: int) -> None:
         """Opens a search result -- into the active pane, jumping straight to the matched line."""
         self.main_panel.active_pane.open_file_at_line(path, line_number)
+
+    # -- Quick Access Bar -------------------------------------------------------------------------
+
+    def open_quick_access_file(self, path: Path) -> None:
+        """A file picked from the Quick Access Bar's search mode -- opens into the active pane,
+        same as any other "open this file" entry point."""
+        self.main_panel.active_pane.open_file(path)
+
+    def build_command_palette_commands(self) -> list[Command]:
+        """The root ``>`` palette's own commands -- "Set Theme" and "Set UI Scale", each a two-level
+        pick (PROMPT.md). Rebuilt on every open rather than cached, since "Set Theme"'s own children
+        are cheap to construct and this keeps them from ever going stale."""
+        return [
+            Command(
+                label="Set Theme",
+                children=[
+                    Command(label=name, action=lambda n=name: self._set_theme(n))
+                    for name in theme_module.list_themes()
+                ],
+            ),
+            Command(
+                label="Set UI Scale",
+                children=[
+                    Command(label="Increase", action=self._zoom_in),
+                    Command(label="Decrease", action=self._zoom_out),
+                ],
+            ),
+        ]
+
+    def _set_theme(self, name: str) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        self.on_theme_applied(theme_module.apply_theme(app, name))
+
+    # -- bottom status bar: Ln/Col/Spaces -----------------------------------------------------------
+
+    def _update_status_cursor_info(self) -> None:
+        """Refreshes (or hides) the bottom-right Ln/Col/Spaces segments to match the active pane's
+        own current tab -- called on every cursor move/selection change and tab switch (see
+        ``TabPane.cursor_info_changed``), and once at startup.
+
+        PROMPT.md: only shown "if viewing either a .txt file or .json file" -- every other open tab
+        kind (Welcome, a Markdown preview, a ``.mvar``/``.bin`` this app doesn't even open as text)
+        clears the segments instead.
+        """
+        widget = self.main_panel.active_pane.currentWidget()
+        if (
+            not isinstance(widget, TextEditorWidget)
+            or widget.path is None
+            or widget.path.suffix.lower() not in (".txt", ".json")
+        ):
+            self.status_bar.clear_cursor_info()
+            return
+        cursor = widget.textCursor()
+        style, width = indent_state.get_indent()
+        self.status_bar.set_cursor_info(
+            cursor.blockNumber() + 1,
+            cursor.positionInBlock() + 1,
+            abs(cursor.selectionEnd() - cursor.selectionStart()),
+            style,
+            width,
+            on_cursor_click=lambda: self._open_goto_line(widget),
+            on_spaces_click=self._open_indent_action_list,
+        )
+
+    def _open_goto_line(self, editor: TextEditorWidget) -> None:
+        """The Ln/Col segment's own click -- opens the Quick Access Bar pre-armed to jump to a
+        typed line number live (PROMPT.md: "snap the file to that line number as it is typed")."""
+
+        def _goto(line: int) -> None:
+            cursor = editor.textCursor()
+            block = editor.document().findBlockByNumber(line - 1)
+            cursor.setPosition(block.position())
+            editor.setTextCursor(cursor)
+            editor.centerCursor()
+            # PROMPT.md: "when going to line number, the editor should highlight the selected
+            # line (in both the main window and in the side preview)".
+            editor.highlight_line(line - 1)
+
+        self.quick_access.open_goto_line(editor.blockCount(), _goto)
+
+    def _open_indent_action_list(self) -> None:
+        """The Spaces segment's own click -- the fixed 4-item "Select Action" indentation menu
+        (PROMPT.md), reachable only from here, not the root ``>`` palette."""
+        self.quick_access.open_action_list(self._build_indent_action_commands(), heading="Select Action")
+
+    def _build_indent_action_commands(self) -> list[Command]:
+        return [
+            Command(label="Detect Indentation from Content", action=self._detect_active_indentation),
+            Command(label="Convert indentation to spaces", action=lambda: self._convert_active_indentation(to_spaces=True)),
+            Command(label="Convert indentation to tabs", action=lambda: self._convert_active_indentation(to_spaces=False)),
+            Command(label="Trim trailing whitespace", action=self._trim_active_trailing_whitespace),
+        ]
+
+    def _indent_env_path(self) -> Path:
+        return project.get_project_dir(self.root_dir) / ".env"
+
+    def _detect_active_indentation(self) -> None:
+        """"Detect Indentation from Content" -- replaces the old manual "Indent using spaces"/
+        "Indent using tabs" commands (PROMPT.md) with VSCode's own auto-detected equivalent (see
+        :func:`~in_reach.app.indent_settings.detect_indent`), persisted/applied the same way a
+        manual style pick used to be."""
+        editor = self._active_text_editor()
+        if editor is None:
+            return
+        current = indent_state.get_indent()
+        style, width = indent_settings.detect_indent(editor.toPlainText(), current)
+        style, width = indent_settings.set_indent(self._indent_env_path(), style, width)
+        indent_state.set_indent(style, width)
+        self._update_status_cursor_info()
+
+    def _active_text_editor(self) -> TextEditorWidget | None:
+        widget = self.main_panel.active_pane.currentWidget()
+        return widget if isinstance(widget, TextEditorWidget) else None
+
+    def _convert_active_indentation(self, *, to_spaces: bool) -> None:
+        editor = self._active_text_editor()
+        if editor is None:
+            return
+        _style, width = indent_state.get_indent()
+        converter = indent_settings.convert_to_spaces if to_spaces else indent_settings.convert_to_tabs
+        self._rewrite_active_lines(editor, lambda text: converter(text, width))
+
+    def _trim_active_trailing_whitespace(self) -> None:
+        editor = self._active_text_editor()
+        if editor is None:
+            return
+        self._rewrite_active_lines(editor, indent_settings.trim_trailing_whitespace)
+
+    def _rewrite_active_lines(self, editor: TextEditorWidget, transform: Callable[[str], str]) -> None:
+        """Applies a whole-text-in, whole-text-out ``transform`` (one of
+        :mod:`in_reach.app.indent_settings`'s own rewrites) to just the current selection's own
+        full lines if there is one, otherwise to the entire document -- PROMPT.md: "indent using
+        tabs or spaces should apply to selection". Edits through a single ``QTextCursor`` scoped to
+        only the affected character range (rather than ``selectAll()`` + ``insertPlainText()``),
+        so a selection-scoped rewrite doesn't touch, or move the cursor away from, the rest of the
+        document.
+        """
+        cursor = editor.textCursor()
+        if not cursor.hasSelection():
+            text = editor.toPlainText()
+            transformed = transform(text)
+            if transformed != text:
+                editor.selectAll()
+                editor.insertPlainText(transformed)
+            return
+
+        doc = editor.document()
+        start_cursor = QTextCursor(doc)
+        start_cursor.setPosition(cursor.selectionStart())
+        start_cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        end_cursor = QTextCursor(doc)
+        end_cursor.setPosition(cursor.selectionEnd())
+        end_cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+
+        edit_cursor = QTextCursor(doc)
+        edit_cursor.setPosition(start_cursor.position())
+        edit_cursor.setPosition(end_cursor.position(), QTextCursor.MoveMode.KeepAnchor)
+        original = edit_cursor.selectedText().replace(" ", "\n")
+        transformed = transform(original)
+        if transformed != original:
+            edit_cursor.insertText(transformed)
 
     # -- File menu ------------------------------------------------------------------------------
 
@@ -666,9 +925,9 @@ class MainWindow(QWidget):
         self.main_panel.save_all()
 
     def close_project(self) -> None:
-        """"Close Project" -- closes whichever project tab is currently active (PROMPT.md:
-        multi-project tabs; any other open tabs stay open). Doesn't touch any files, and doesn't
-        close this window (that's the title bar's own close button)."""
+        """"Close Project" -- closes the one project open in this window (PROMPT.md: "1 per
+        window"). Doesn't touch any files, and doesn't close this window (that's the title bar's
+        own close button)."""
         self.explorer_panel.close_active_project()
 
     def close_editor(self) -> None:
@@ -722,9 +981,18 @@ class MainWindow(QWidget):
 
     def on_theme_applied(self, theme: Theme) -> None:
         """Refreshes every bit of chrome that a live theme switch doesn't drive automatically via
-        QPalette alone: the top bar's icon colors and the status bar's accent color."""
+        QPalette alone: the top bar's icon colors and the status bar's accent color.
+
+        Also persists the choice -- same shared-``.env`` mechanism as :mod:`in_reach.ide.zoom`'s
+        own ``UI_ZOOM`` -- so it survives a relaunch. Every live theme switch in the app (the
+        Settings dialog's Theme tab, the first-run dialog, and the Quick Access Bar's "Set Theme"
+        command) already funnels through here, so this is the one place that needs to do it.
+        """
         self.status_bar.set_color(theme.status_bar_color)
         self.refresh_icon_colors(theme.palette_colors.get("window_text"))
+        env_file.update_env_value(
+            project.get_project_dir(self.root_dir) / ".env", theme_module.THEME_KEY, theme.name
+        )
 
     def _zoom_in(self) -> None:
         self._adjust_zoom(zoom_module.ZOOM_STEP)
@@ -904,9 +1172,10 @@ class MainWindow(QWidget):
         and the top bar's own sidebar toggle are never disabled for this, unlike before.
 
         Only reacts to the *has-a-project/has-none* transition, not to which project is active --
-        switching between two already-open project tabs re-fires ``active_project_changed`` too
-        (``folder`` going from one real path to another), which should leave the sidebar's current
-        open/collapsed state alone rather than force it back open on every tab switch. The one
+        replacing the open project with another one (PROMPT.md: "1 per window") re-fires
+        ``active_project_changed`` too (``folder`` going from one real path to another), which
+        should leave the sidebar's current open/collapsed state alone rather than force it back
+        open on every switch. The one
         exception is the moment a project first becomes available with none open before it (at
         startup, or opening/creating the very first one) -- the panels were just unlocked, so this
         reveals the Dashboard automatically rather than leaving the user to notice the
@@ -980,7 +1249,7 @@ class MainWindow(QWidget):
         self.explorer_panel.refresh_stats()
 
     def view_output_txt(self) -> None:
-        """"View Output.txt" (PROMPT.md, under the Dashboard's own project tabs) -- opens a
+        """"View Output.txt" (PROMPT.md, under the Dashboard's own button row) -- opens a
         read-only, always-freshly-regenerated view of the active project's ``script/output.txt``
         (see :func:`~in_reach.app.output_view.write_output_view`'s own docstring for why it's
         regenerated on every click rather than kept continuously in sync). A no-op with no project
@@ -994,7 +1263,7 @@ class MainWindow(QWidget):
         self.main_panel.active_pane.open_file(path, force_reload=True)
 
     def export_rvt_file(self) -> None:
-        """"Export RVT File" (PROMPT.md, under the Dashboard's own project tabs) -- compiles the
+        """"Export RVT File" (PROMPT.md, under the Dashboard's own button row) -- compiles the
         active project the same way :meth:`apply_settings_changes` does, then a standard Save As
         dialog lets the user save the result as either a full ``.bin`` (a plain copy of the
         freshly-compiled variant) or RVT's own bare/script-only ``.mglo`` (PROMPT.md: "please check
@@ -1066,12 +1335,12 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", f"Couldn't export {dest.name}:\n{exc}")
 
     def _sync_project_title(self, folder: Path) -> None:
-        """Brings every cached display of ``folder``'s own title -- the Explorer's own project
-        tab, any already-open editor's breadcrumb, the Welcome tab's Recent list -- back in sync
-        with ``settings/settings.json``'s own ``meta.title`` (PROMPT.md: "when a project name is
-        changed [via rvt or via apply settings.json change] - the project title should change in
-        the tabs and in the breadcrumb"; later: "it needs to be renamed in recents in dropdown and
-        in the welcome window").
+        """Brings every cached display of ``folder``'s own title -- any already-open editor's
+        breadcrumb, the Welcome tab's Recent list, the bottom status bar's own centered label --
+        back in sync with ``settings/settings.json``'s own ``meta.title`` (PROMPT.md: "when a
+        project name is changed [via rvt or via apply settings.json change] - the project title
+        should change in the tabs and in the breadcrumb"; later: "it needs to be renamed in
+        recents in dropdown and in the welcome window").
 
         There used to be a separate README.md carrying its own copy of the title that this had to
         rewrite to match; now that :func:`~in_reach.app.new_project.read_project_title` reads
@@ -1084,7 +1353,6 @@ class MainWindow(QWidget):
         :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring); harmless to call when
         nothing actually changed.
         """
-        self.explorer_panel.refresh_project_title(folder)
         self.main_panel.refresh_project_titles()
         self._update_status_project_label(folder)
 

@@ -27,6 +27,11 @@ THEMES_PATH = Path(__file__).resolve().parent / "themes" / "themes.json"
 DEFAULT_THEME_NAME = "Light"
 DEFAULT_STATUS_BAR_COLOR = "#007acc"
 
+#: Persisted the same way :mod:`in_reach.ide.zoom` persists ``UI_ZOOM`` -- one shared key in the
+#: project-root ``.in-reach/.env``, read back by ``ide/app.py`` at startup so a theme picked from
+#: the Quick Access Bar's "Set Theme" command (or the Settings dialog) survives a relaunch.
+THEME_KEY = "THEME"
+
 _PALETTE_ROLES = {
     "window": QPalette.ColorRole.Window,
     "window_text": QPalette.ColorRole.WindowText,

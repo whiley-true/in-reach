@@ -57,7 +57,8 @@ def run(project_dir: Path) -> int:
     _set_windows_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(icons.app_icon())
-    theme = theme_module.apply_theme(app, theme_module.DEFAULT_THEME_NAME)
+    saved_theme_name = env_file.get_env_values(env_path).get(theme_module.THEME_KEY, theme_module.DEFAULT_THEME_NAME)
+    theme = theme_module.apply_theme(app, saved_theme_name)
     # Applied before MainWindow is built, same as the theme above, so every widget it constructs
     # is polished against the saved zoom level from the start rather than jumping once on first use.
     zoom_module.apply_zoom(app, zoom_module.get_zoom(env_path))

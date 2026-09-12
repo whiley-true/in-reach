@@ -1,7 +1,9 @@
-"""The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): a
-tab per currently open gametype project (PROMPT.md: "multiple projects can be loaded ... have tabs
-for the different projects that then changes the project explorer below"), a row of Export/View
-Output buttons right underneath those tabs, then two boxes for the active project -- "Settings"
+"""The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): one
+project open at a time per window (PROMPT.md: "we now want it to be 1 per window" -- this panel
+used to hold a tab strip for several open projects at once; opening a second one while one's
+already open is now MainWindow's own "Open in this window / Open in new window" popup instead, see
+:meth:`~in_reach.ide.main_window.MainWindow._open_project_with_popup`), a row of Export/View
+Output buttons, then two boxes for the active project -- "Settings"
 pointed at its own ``settings/`` subfolder, and "Stats" summarizing its build's own space usage and
 string count (see :func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.
 strings_io.count_script_strings`). There used to be a sixth, generic "browse the whole project
@@ -33,7 +35,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QProgressBar,
     QSizePolicy,
-    QTabBar,
     QToolButton,
     QTreeView,
     QVBoxLayout,
@@ -42,7 +43,6 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app import new_project
 from in_reach.app.rvt import settings_io, strings_io
-from in_reach.ide import style
 from in_reach.ide.file_icons import ExplorerIconProvider
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
@@ -194,20 +194,13 @@ class ExplorerPanel(QWidget):
     #: directory (clicking one just expands/collapses it, QTreeView's own default behavior).
     file_activated = pyqtSignal(Path)
 
-    #: Emitted with the newly active project's folder (or ``None`` once the last tab closes) --
-    #: whenever the tab switches, a new one opens, or the current one closes.
+    #: Emitted with the newly active project's folder (or ``None`` once it closes) -- whenever a
+    #: project opens or the current one closes.
     active_project_changed = pyqtSignal(object)
 
-    #: Emitted with every currently open project's folder, in tab order, whenever that set changes
-    #: (a tab opens, closes, or the whole list is cleared) -- distinct from
-    #: :attr:`active_project_changed` since a tab closing in the background changes this without
-    #: changing which one is active.
-    open_projects_changed = pyqtSignal(list)
-
-    #: Emitted with a project's folder right after its own tab actually closes (PROMPT.md: "if
-    #: project is closed in ide, if Reach Variant tool is open for that project it should be
-    #: closed") -- unlike :attr:`open_projects_changed`, this names exactly which folder just
-    #: closed, which is what MainWindow needs to know which (if any) RVT process to terminate.
+    #: Emitted with a project's folder right after it actually closes (PROMPT.md: "if project is
+    #: closed in ide, if Reach Variant tool is open for that project it should be closed") -- what
+    #: MainWindow needs to know which (if any) RVT process to terminate.
     project_closed = pyqtSignal(Path)
 
     #: PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File (on
@@ -240,33 +233,6 @@ class ExplorerPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-
-        #: One tab per currently open project (PROMPT.md), labeled with its own title -- read back
-        #: from its own settings.json (see :func:`~in_reach.app.new_project.read_project_title`),
-        #: same as the Welcome tab's Recent list -- via :meth:`open_project`/:meth:`close_project`,
-        #: not touched directly. Hidden whenever no project is open.
-        #:
-        #: PROMPT.md: "please make the project tabs function and look like the primary panel
-        #: tabs" -- the same editor-style QSS (:data:`~in_reach.ide.style.MAIN_TAB_STYLE`) the main
-        #: panel's own tab strips use, plus the same document-mode/no-base-line chrome suppression
-        #: (see :class:`~in_reach.ide.tabs.TabPane`'s own comment on why those two calls are needed
-        #: alongside the QSS, not just the QSS alone) and real drag-to-reorder.
-        self.project_tabs = QTabBar()
-        self.project_tabs.setTabsClosable(True)
-        self.project_tabs.setExpanding(False)
-        self.project_tabs.setUsesScrollButtons(True)
-        self.project_tabs.setMovable(True)
-        self.project_tabs.setDocumentMode(True)
-        self.project_tabs.setDrawBase(False)
-        self.project_tabs.setStyleSheet(style.MAIN_TAB_STYLE)
-        self.project_tabs.hide()
-        self.project_tabs.currentChanged.connect(self._on_tab_changed)
-        self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        # A drag-reorder doesn't go through open_project()/close_project(), so it needs its own
-        # explicit ping to keep MainWindow's own persisted tab order (open_projects_changed ->
-        # open_projects.set_open()) in sync with what the user just dragged.
-        self.project_tabs.tabMoved.connect(lambda *_args: self.open_projects_changed.emit(self.open_projects))
-        layout.addWidget(self.project_tabs)
 
         # PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File
         # (on the left) and on the right: View Output.txt" -- hidden along with the rest of the
@@ -403,78 +369,36 @@ class ExplorerPanel(QWidget):
 
     # -- the main project tree -------------------------------------------------------------------
 
-    @property
-    def open_projects(self) -> list[Path]:
-        """Every currently open project, in tab order -- the tab bar itself is the source of
-        truth, so this can never drift out of sync with what's actually shown."""
-        return [Path(self.project_tabs.tabData(index)) for index in range(self.project_tabs.count())]
-
     def open_project(self, folder: Path) -> None:
-        """Opens ``folder`` as a tab, switching to it -- or, if it's already open, just switches to
-        its existing tab rather than adding a duplicate. A no-op (nothing added, nothing switched)
-        for a folder that doesn't actually exist, so a bad path can't clobber whatever's already
-        open with a dead tab.
+        """Points this panel at ``folder`` as the one open project (PROMPT.md: "1 per window") --
+        replacing whatever was open before, if anything. A no-op for a folder that doesn't actually
+        exist, so a bad path can't clobber whatever's already open. Also a no-op (skips the
+        redundant re-``_activate``) if ``folder`` is already the active project.
 
-        Signals are blocked around the actual tab-bar calls and :meth:`_activate` is called
-        directly instead -- ``addTab()`` fires ``currentChanged`` for a brand new *first* tab
-        synchronously, before ``setTabData()`` below it has a chance to run, which would otherwise
-        have :meth:`_on_tab_changed` read back ``None`` instead of the folder just added.
+        Emits :attr:`project_closed` for the *previous* project first when it's being replaced --
+        with only one project open at a time, replacing it is closing it, and MainWindow relies on
+        that signal to terminate its own RVT process (PROMPT.md: "if project is closed in ide, if
+        Reach Variant tool is open for that project it should be closed").
         """
-        if not folder.is_dir():
+        if not folder.is_dir() or folder == self.current_folder:
             return
-        self.project_tabs.blockSignals(True)
-        try:
-            for index in range(self.project_tabs.count()):
-                if Path(self.project_tabs.tabData(index)) == folder:
-                    self.project_tabs.setCurrentIndex(index)
-                    self._activate(folder)
-                    return
-            index = self.project_tabs.addTab(new_project.read_project_title(folder))
-            self.project_tabs.setTabData(index, str(folder))
-            self.project_tabs.setCurrentIndex(index)
-        finally:
-            self.project_tabs.blockSignals(False)
+        if self.current_folder is not None:
+            self.project_closed.emit(self.current_folder)
         self._activate(folder)
-        self.open_projects_changed.emit(self.open_projects)
-
-    def refresh_project_title(self, folder: Path) -> None:
-        """Re-reads ``folder``'s own title (its ``settings.json`` -- see
-        :func:`~in_reach.app.new_project.read_project_title`) and relabels its tab to match --
-        called after a rename (PROMPT.md: "when a project name is changed [via rvt or via apply
-        settings.json change] - the project title should change in the tabs and in the
-        breadcrumb"). A no-op if ``folder`` isn't currently open as a tab."""
-        for index in range(self.project_tabs.count()):
-            if Path(self.project_tabs.tabData(index)) == folder:
-                self.project_tabs.setTabText(index, new_project.read_project_title(folder))
-                return
 
     def close_project(self, folder: Path) -> None:
-        """Closes ``folder``'s own tab, if it's open -- Qt's own ``QTabBar`` picks a neighboring
-        tab to switch to (or, if this was the last one, falls back to the "no project"
-        placeholder; see :meth:`_on_tab_changed`)."""
-        for index in range(self.project_tabs.count()):
-            if Path(self.project_tabs.tabData(index)) == folder:
-                self.project_tabs.removeTab(index)
-                self.project_closed.emit(folder)
-                self.open_projects_changed.emit(self.open_projects)
-                return
+        """Closes ``folder`` if it's the currently active project -- a no-op otherwise (there's
+        nothing else open to close, PROMPT.md: "1 per window")."""
+        if folder != self.current_folder:
+            return
+        self.project_closed.emit(folder)
+        self._activate(None)
 
     def close_active_project(self) -> None:
-        """Closes whichever tab is currently active -- "Close Project" (File menu). A no-op with
+        """Closes whichever project is currently open -- "Close Project" (File menu). A no-op with
         no project open."""
         if self.current_folder is not None:
             self.close_project(self.current_folder)
-
-    def close_all_projects(self) -> None:
-        """Closes every open tab at once, back to the "no project" placeholder."""
-        for folder in list(self.open_projects):
-            self.close_project(folder)
-
-    def _on_tab_close_requested(self, index: int) -> None:
-        self.close_project(Path(self.project_tabs.tabData(index)))
-
-    def _on_tab_changed(self, index: int) -> None:
-        self._activate(Path(self.project_tabs.tabData(index)) if index >= 0 else None)
 
     def _activate(self, folder: Path | None) -> None:
         """Points the main tree (and the Script/Settings/Stats boxes) at ``folder`` (the newly
@@ -482,7 +406,6 @@ class ExplorerPanel(QWidget):
         ``None``."""
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
-        self.project_tabs.setVisible(self.project_tabs.count() > 0)
         self.button_row.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
