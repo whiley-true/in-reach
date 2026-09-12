@@ -344,14 +344,17 @@ STATUS_RUNNING = "running"
 
 
 def _firewood_path(size: float) -> tuple[QPainterPath, float]:
-    """Two crossed logs sitting near the bottom of the icon box (and the stroke width to draw them
-    at) -- present in every :func:`status_icon` state, per PROMPT.md's own "just firewood" starting
-    point."""
+    """Two logs leaning together in a peak, confined to the icon's own bottom quarter (and the
+    stroke width to draw them at) -- present in every :func:`status_icon` state, per PROMPT.md's
+    own "just firewood" starting point. Kept well clear of :func:`_flame_path`'s own vertical span
+    -- PROMPT.md: "make the different icon statuses a little more obvious" -- so the two never
+    visually merge into one blob the way an earlier, taller/overlapping pass did.
+    """
     path = QPainterPath()
-    log_width = size * 0.16
+    log_width = size * 0.13
     for start, end in (
-        (QPointF(size * 0.16, size * 0.88), QPointF(size * 0.56, size * 0.64)),
-        (QPointF(size * 0.44, size * 0.88), QPointF(size * 0.84, size * 0.64)),
+        (QPointF(size * 0.18, size * 0.96), QPointF(size * 0.82, size * 0.74)),
+        (QPointF(size * 0.82, size * 0.96), QPointF(size * 0.18, size * 0.74)),
     ):
         segment = QPainterPath()
         segment.moveTo(start)
@@ -361,14 +364,19 @@ def _firewood_path(size: float) -> tuple[QPainterPath, float]:
 
 
 def _flame_path(size: float) -> QPainterPath:
-    """A simple asymmetric teardrop above the firewood -- deliberately simple geometry (just two
-    curves, no inner "flicker" notch -- that self-intersected, which left a hole in the middle
-    when filled), same reasoning as this module's other hand-drawn glyphs (compass/dashboard/
-    help/apply_icon), not traced from any icon set."""
+    """A large, simple teardrop confined to the icon's own top ~60% -- deliberately simple
+    geometry (just two curves, no inner "flicker" notch -- that self-intersected, which left a
+    hole in the middle when filled), same reasoning as this module's other hand-drawn glyphs
+    (compass/dashboard/help/apply_icon), not traced from any icon set. Sized to read clearly at
+    the activity bar's own small icon sizes -- PROMPT.md: "make the different icon statuses a
+    little more obvious" -- rather than a smaller, more delicate shape easily lost next to the
+    firewood.
+    """
     path = QPainterPath()
-    path.moveTo(size * 0.52, size * 0.06)
-    path.cubicTo(size * 0.92, size * 0.38, size * 0.80, size * 0.70, size * 0.50, size * 0.94)
-    path.cubicTo(size * 0.20, size * 0.70, size * 0.10, size * 0.38, size * 0.52, size * 0.06)
+    path.moveTo(size * 0.50, size * 0.03)
+    path.cubicTo(size * 0.90, size * 0.32, size * 0.78, size * 0.58, size * 0.68, size * 0.68)
+    path.quadTo(size * 0.50, size * 0.78, size * 0.32, size * 0.68)
+    path.cubicTo(size * 0.22, size * 0.58, size * 0.10, size * 0.32, size * 0.50, size * 0.03)
     path.closeSubpath()
     return path
 
@@ -401,7 +409,7 @@ def status_icon(state: str, color: str = DEFAULT_COLOR, size: int = 24) -> QIcon
             painter.fillPath(flame_path, QColor(color))
         else:
             outline_pen = QPen(QColor(color))
-            outline_pen.setWidthF(max(1.0, size * 0.045))
+            outline_pen.setWidthF(max(1.4, size * 0.09))
             painter.strokePath(flame_path, outline_pen)
 
     painter.end()
