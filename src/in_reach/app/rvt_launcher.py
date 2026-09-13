@@ -36,7 +36,7 @@ def resolve_rvt_exe() -> Path:
         return exe_path
 
 
-def launch_rvt(target: Path | None = None, *, exe_path: Path | None = None, popen=subprocess.Popen) -> None:
+def launch_rvt(target: Path | None = None, *, exe_path: Path | None = None, popen=subprocess.Popen):
     """Launches RVT, optionally passing ``target`` (a ``.bin``) as its one positional argument, and
     returns immediately -- RVT is a separate GUI application, not something this process waits on.
 
@@ -44,9 +44,16 @@ def launch_rvt(target: Path | None = None, *, exe_path: Path | None = None, pope
         target: A game variant to open it against, if any.
         exe_path: Injectable override of :func:`resolve_rvt_exe`'s own result, for testing.
         popen: Injectable :class:`subprocess.Popen`-alike, for testing.
+
+    Returns:
+        Whatever ``popen`` returns -- a real :class:`subprocess.Popen` handle to the launched
+        process by default, so a caller (see :meth:`~in_reach.ide.main_window.MainWindow.
+        launch_rvt`) can later check whether it's still running and terminate it (PROMPT.md: "if
+        project is closed in ide, if Reach Variant tool is open for that project it should be
+        closed").
     """
     resolved = exe_path if exe_path is not None else resolve_rvt_exe()
     args = [str(resolved)]
     if target is not None:
         args.append(str(target))
-    popen(args)
+    return popen(args)

@@ -24,3 +24,21 @@ class MarkdownPreviewWidget(QTextBrowser):
         self.path = path
         self.setReadOnly(True)
         self.setOpenExternalLinks(True)
+        self._editor = None
+
+    def follow_live(self, editor: "QWidget") -> None:
+        """Keeps this preview's rendered content in sync with ``editor``'s own live text --
+        PROMPT.md (Notes-as-Markdown): "when se[l]ected editor should split to show live .md
+        preview on the right hand side". ``self._on_editor_changed`` is a genuine bound method of
+        this widget (not a lambda), so Qt's own connection bookkeeping ties it to *this* preview's
+        lifetime -- closing this preview tab tears the connection down automatically rather than
+        leaving a stray slot that would otherwise try to update a deleted widget the next time
+        ``editor`` changes.
+        """
+        self._editor = editor
+        editor.document().contentsChanged.connect(self._on_editor_changed)
+        self._on_editor_changed()
+
+    def _on_editor_changed(self) -> None:
+        if self._editor is not None:
+            self.setMarkdown(self._editor.toPlainText())

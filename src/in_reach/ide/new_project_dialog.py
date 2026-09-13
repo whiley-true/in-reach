@@ -17,7 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QCompleter,
     QDialog,
@@ -33,6 +35,14 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app import blank_variant, new_project
 from in_reach.app.categories import EngineCategory, display_name
+
+#: dark_dark_text.png: on the Dark/Whiley themes, the "Title"/"Description" field labels read as a
+#: dim, low-contrast tone rather than the near-white palette(window-text) every other label in this
+#: dialog already gets -- pinned to plain white explicitly on a dark theme rather than trusting the
+#: inherited role. Never applied on Light (its own window-text is already black-on-white; forcing
+#: white here would make the labels unreadable there instead).
+_FIELD_LABEL_OBJECT_NAME = "newProjectFieldLabel"
+_DARK_FIELD_LABEL_STYLE = f"QLabel#{_FIELD_LABEL_OBJECT_NAME} {{ color: #ffffff; }}"
 
 _TITLE_HELP = f"1-{new_project.MAX_TITLE_LENGTH} characters."
 
@@ -79,18 +89,22 @@ class NewProjectDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(8)
 
+        self.title_label = QLabel("Title")
+        self.title_label.setObjectName(_FIELD_LABEL_OBJECT_NAME)
         self.title_edit = QLineEdit()
         self.title_edit.setMaxLength(new_project.MAX_TITLE_LENGTH)
         self.title_edit.setPlaceholderText("My Gametype")
         self.title_edit.textChanged.connect(self._on_title_changed)
-        form.addRow("Title", self.title_edit)
+        form.addRow(self.title_label, self.title_edit)
 
+        self.description_label = QLabel("Description")
+        self.description_label.setObjectName(_FIELD_LABEL_OBJECT_NAME)
         self.description_edit = QLineEdit()
         self.description_edit.setMaxLength(new_project.MAX_DESCRIPTION_LENGTH)
         self.description_edit.setPlaceholderText("Optional")
         self.description_edit.textChanged.connect(self._on_description_changed)
         self.description_edit.installEventFilter(self)
-        form.addRow("Description", self.description_edit)
+        form.addRow(self.description_label, self.description_edit)
 
         if self._ask_game_type:
             self.multiplayer_radio = QRadioButton("Multiplayer")
@@ -147,6 +161,9 @@ class NewProjectDialog(QDialog):
         layout.addWidget(self.buttons)
 
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        app = QApplication.instance()
+        if app is not None and app.palette().color(QPalette.ColorRole.Window).lightness() < 128:
+            self.setStyleSheet(_DARK_FIELD_LABEL_STYLE)
         self._on_title_changed(self.title_edit.text())
         self._on_description_changed(self.description_edit.text())
         if self._ask_game_type:

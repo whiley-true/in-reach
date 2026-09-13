@@ -1,19 +1,25 @@
-"""The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): a
-tab per currently open gametype project (PROMPT.md: "multiple projects can be loaded ... have tabs
-for the different projects that then changes the project explorer below"), showing exactly five
-boxes for it (PROMPT.md: "we should only see Script, Settings, Stats, Personal Game Variants,
-Personal Map Variants") -- "Script"/"Settings" pointed at that project's own ``script/``/
-``settings/`` subfolders, "Stats" summarizing its build's own space usage and string count (see
-:func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.strings_io.
-count_script_strings`), and -- collapsed by default, since they're secondary to all of that -- two
-more folder trees for the personal game/map variant folders :mod:`in_reach.app.system_verify`
-resolves (shared across every open project, since they don't depend on which one is active). There
-used to be a sixth, generic "browse the whole project folder" tree too; PROMPT.md asked for it to
-go now that Script/Settings cover the two subfolders actually worth browsing by hand.
+"""The primary sidebar's Dashboard view (PROMPT.md: "file explorer is renamed to dashboard"): one
+project open at a time per window (PROMPT.md: "we now want it to be 1 per window" -- this panel
+used to hold a tab strip for several open projects at once; opening a second one while one's
+already open is now MainWindow's own "Open in this window / Open in new window" popup instead, see
+:meth:`~in_reach.ide.main_window.MainWindow._open_project_with_popup`), a row of Export/View
+Output buttons, then two boxes for the active project -- "Settings"
+pointed at its own ``settings/`` subfolder, and "Stats" summarizing its build's own space usage and
+string count (see :func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.
+strings_io.count_script_strings`). There used to be a sixth, generic "browse the whole project
+folder" tree too; PROMPT.md asked for it to go now that Script/Settings cover the two subfolders
+actually worth browsing by hand -- and later, a "Script" quick-access box exactly like Settings'
+own, pointed at ``script/`` (whose only ever entry was ``output.txt``); PROMPT.md ("please also
+remove output from script") asked for that to go too, now that the button row's own "View
+Output.txt" is the supported way to look at it (see :meth:`ExplorerPanel.view_output_requested`).
+The personal game/map variant folder trees that used to live here too (PROMPT.md: "remove the
+Personal Map and Game Variants sections for now, they will later go in their own sidepanel") are
+gone for now -- :mod:`in_reach.app.system_verify` still resolves those folders for the Welcome
+tab's own Verify System Settings flow, this panel just doesn't display them anymore.
 
-Each tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk changes for
-free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the platform's
-own generic file icons.
+The Settings tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk
+changes for free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the
+platform's own generic file icons.
 """
 
 from __future__ import annotations
@@ -25,22 +31,21 @@ from PyQt6.QtGui import QFileSystemModel, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QProgressBar,
     QSizePolicy,
-    QTabBar,
     QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
-from in_reach.app import env_file, new_project, system_verify
+from in_reach.app import new_project
 from in_reach.app.rvt import settings_io, strings_io
 from in_reach.ide.file_icons import ExplorerIconProvider
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
-_NOT_RESOLVED_TEXT = "Not verified yet -- see Verify System Settings on the Welcome tab."
 _NO_STATS_TEXT = "No build stats yet -- Apply (or launch RVT) once this gametype compiles."
 
 
@@ -53,6 +58,11 @@ def _new_tree() -> tuple[QTreeView, QFileSystemModel]:
     for column in (1, 2, 3):  # Size, Type, Date Modified -- a flat file list doesn't need these
         tree.hideColumn(column)
     tree.setUniformRowHeights(True)
+    # PROMPT.md: "please remove the bubble outline around ... settings, and output.txt" --
+    # QTreeView (like every QAbstractScrollArea) defaults to a sunken StyledPanel frame around
+    # itself, which read as a bordered "bubble" boxing in the Settings/Script trees' own handful of
+    # rows. Same fix already applied to the Welcome tab's own QScrollArea, see welcome.py.
+    tree.setFrameShape(QFrame.Shape.NoFrame)
     return tree, model
 
 
@@ -62,9 +72,7 @@ def _cap_tree_rows(tree: QTreeView, rows: int) -> None:
     ``settings/*.json`` files, 1 ``script/output.txt``), so there's no reason either should reserve
     a QTreeView's own generic, content-independent size hint worth of extra blank space below its
     last real row (PROMPT.md: "there is still too much empty space under settings. it only needs
-    to be 3 files vertical"). Not used for the two personal-folder trees at the bottom of the
-    panel, which hold an arbitrary, unbounded number of real game/map variants and should keep
-    expanding to show as many as fit.
+    to be 3 files vertical").
 
     Recomputed from the tree's *current* font on every call rather than cached once, so a zoom
     change (:meth:`ExplorerPanel.refresh_font_scale`) resizes this along with everything else
@@ -94,10 +102,47 @@ def _point_tree_at(tree: QTreeView, model: QFileSystemModel, folder: Path | None
     tree.setRootIndex(model.index(str(folder)))
 
 
+#: PROMPT.md: "instead of using bubbles around sections, maybe just have the section header and a
+#: line break/divider with a collapsing arrow ... to try and stop the ui being too cluttered" --
+#: strips the checkable QToolButton's own default raised/"pill" background (shown whenever a
+#: section is expanded, since it's ``checked`` then -- see _CollapsibleSection.__init__) so the
+#: header reads as plain text-plus-arrow, not a button.
+_SECTION_HEADER_STYLE = "QToolButton { border: none; background-color: transparent; }"
+
+#: PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge lables
+#: and strings" -- Fusion's own default QProgressBar is a rounded, bordered pill; this flattens it
+#: to a plain rectangle so it stops reading as a bordered "bubble" over the Stats box's own text.
+_FLAT_PROGRESS_BAR_STYLE = (
+    "QProgressBar { border: none; border-radius: 0px; background-color: palette(alternate-base);"
+    " text-align: center; }"
+    "QProgressBar::chunk { background-color: palette(highlight); }"
+)
+
+#: PROMPT.md: "please remove the bubble connecting the project dashboard buttons so they do not
+#: appear connected, and give them a background colour to make it clear they are buttons" -- the
+#: Export RVT File/View Output.txt row (see ExplorerPanel.__init__). Each button gets its own
+#: independent, clearly bounded box (never a shared border with its neighbor) with a real
+#: background fill, rather than the flat/borderless look a plain QToolButton reads as against this
+#: panel's own palette(base) background.
+_DASHBOARD_BUTTON_STYLE = (
+    "QToolButton { background-color: palette(button); border: 1px solid palette(mid);"
+    " border-radius: 4px; padding: 4px 10px; }"
+    # Was `palette(light)` -- none of the dark/Whiley themes' own JSON ever sets that QPalette role
+    # (theme.py's build_palette() only assigns the roles it's explicitly given, so "light" is left
+    # at Qt's own unrelated default, which reads as plain white) -- a hover turned the whole button
+    # white, and with it white/near-white button text, unreadable. Highlighting with the theme's
+    # own accent color instead is themed by construction, and matches how every other hover/select
+    # state in this app already reads (menus, tabs, the activity bar's checked border).
+    "QToolButton:hover { background-color: palette(highlight); color: palette(highlighted-text); }"
+    "QToolButton:pressed { background-color: palette(mid); }"
+)
+
+
 class _CollapsibleSection(QWidget):
-    """A header (an arrow + title, click to toggle) above a body widget that hides/shows with it
-    -- VS Code's own sidebar section headers, applied here to the two personal-folder trees so
-    they read as secondary to the main project tree above them rather than competing for space."""
+    """A header (an arrow + title, click to toggle) above a divider line and a body widget that
+    hides/shows with it -- VS Code's own sidebar section headers, applied to every box in this
+    panel so each reads as its own labeled region without needing a bordered/bubble frame around
+    it (PROMPT.md, see :data:`_SECTION_HEADER_STYLE`)."""
 
     def __init__(self, title: str, body: QWidget, *, collapsed: bool = True) -> None:
         super().__init__()
@@ -112,10 +157,16 @@ class _CollapsibleSection(QWidget):
         self._toggle.setArrowType(Qt.ArrowType.DownArrow if not collapsed else Qt.ArrowType.RightArrow)
         self._toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._toggle.setAutoRaise(True)
+        self._toggle.setStyleSheet(_SECTION_HEADER_STYLE)
         self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._toggle.toggled.connect(self._on_toggled)
         layout.addWidget(self._toggle)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFrameShadow(QFrame.Shadow.Plain)
+        layout.addWidget(divider)
 
         self.body = body
         self.body.setVisible(not collapsed)
@@ -140,32 +191,46 @@ class _CollapsibleSection(QWidget):
 
 class ExplorerPanel(QWidget):
     #: Emitted with a file's path when it's clicked in the Script or Settings box -- never for a
-    #: directory (clicking one just expands/collapses it, QTreeView's own default behavior), and
-    #: not from either personal-folder tree (see their own click wiring, below, for why).
+    #: directory (clicking one just expands/collapses it, QTreeView's own default behavior).
     file_activated = pyqtSignal(Path)
 
-    #: Emitted with the newly active project's folder (or ``None`` once the last tab closes) --
-    #: whenever the tab switches, a new one opens, or the current one closes.
+    #: Emitted with the newly active project's folder (or ``None`` once it closes) -- whenever a
+    #: project opens or the current one closes.
     active_project_changed = pyqtSignal(object)
 
-    #: Emitted with every currently open project's folder, in tab order, whenever that set changes
-    #: (a tab opens, closes, or the whole list is cleared) -- distinct from
-    #: :attr:`active_project_changed` since a tab closing in the background changes this without
-    #: changing which one is active.
-    open_projects_changed = pyqtSignal(list)
+    #: Emitted with a project's folder right after it actually closes (PROMPT.md: "if project is
+    #: closed in ide, if Reach Variant tool is open for that project it should be closed") -- what
+    #: MainWindow needs to know which (if any) RVT process to terminate.
+    project_closed = pyqtSignal(Path)
+
+    #: PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File (on
+    #: the left) and on the right: View Output.txt" -- MainWindow owns what each button actually
+    #: does (compiling + a save-as dialog; regenerating and opening the locked output view).
+    export_requested = pyqtSignal()
+    view_output_requested = pyqtSignal()
+
+    #: The Documentation section's "Notes" button (PROMPT.md) -- MainWindow owns opening the
+    #: right file (``Notes.txt`` or ``Notes.md``, per :mod:`in_reach.app.notes_settings`) into the
+    #: active pane, same division of labor as export_requested/view_output_requested above.
+    notes_requested = pyqtSignal()
 
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
     TEXT_SCALE = 1.1
 
-    #: "make Personal Game Variant and Personal Map Variant text 10% smaller" -- relative to the
-    #: rest of this panel's own (already +10%'d) text, not the app font directly, so it reads as
-    #: "10% smaller than its neighbors" rather than landing back near the app's own plain size.
+    #: Section headers (Stats/Settings/Script) read 10% smaller than the rest of this panel's own
+    #: (already +10%'d) text, so they read as "10% smaller than its neighbors" rather than landing
+    #: back near the app's own plain size.
     HEADER_TEXT_SCALE = 0.9
+
+    #: PROMPT.md: "in the dashboard panel please make the font for the settings jsons 10% bigger,
+    #: they look too small in the sidebar" -- on top of :data:`TEXT_SCALE`, applied only to
+    #: :attr:`settings_tree`'s own three rows (settings.json/script_settings.json/strings.json),
+    #: not the rest of this panel.
+    SETTINGS_TREE_TEXT_SCALE = 1.1
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._env_project_dir: Path | None = None
         #: The gametype project folder the main tree currently points at, or ``None`` -- read by
         #: MainWindow.launch_rvt() to know which project's .bin to open RVT against.
         self.current_folder: Path | None = None
@@ -174,39 +239,43 @@ class ExplorerPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        #: One tab per currently open project (PROMPT.md), labeled with its own title -- read back
-        #: from its own settings.json (see :func:`~in_reach.app.new_project.read_project_title`),
-        #: same as the Welcome tab's Recent list -- via :meth:`open_project`/:meth:`close_project`,
-        #: not touched directly. Hidden whenever no project is open.
-        self.project_tabs = QTabBar()
-        self.project_tabs.setTabsClosable(True)
-        self.project_tabs.setExpanding(False)
-        self.project_tabs.setUsesScrollButtons(True)
-        self.project_tabs.hide()
-        self.project_tabs.currentChanged.connect(self._on_tab_changed)
-        self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        layout.addWidget(self.project_tabs)
-
-        #: The active project's own *folder* name (the generated id, e.g. "abcd1234") -- distinct
-        #: from its tab's own title text -- shown as a subheading underneath the tabs (PROMPT.md:
-        #: "include the name of the folder as subheading on the explorer page (underneath project
-        #: tabs)"). Hidden along with everything else project-related when nothing is open.
-        self.folder_subheading = QLabel()
-        self.folder_subheading.setEnabled(False)
-        self.folder_subheading.hide()
-        layout.addWidget(self.folder_subheading)
+        # PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File
+        # (on the left) and on the right: View Output.txt" -- hidden along with the rest of the
+        # active-project chrome whenever no project is open, see _activate().
+        button_row = QWidget()
+        button_row_layout = QHBoxLayout(button_row)
+        button_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.export_button = QToolButton()
+        self.export_button.setText("Export RVT File")
+        self.export_button.setToolTip("Compile and save this gametype as a .bin or .mglo file")
+        self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_button.setAutoRaise(False)
+        self.export_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.export_button.clicked.connect(self.export_requested.emit)
+        button_row_layout.addWidget(self.export_button)
+        button_row_layout.addStretch(1)
+        self.view_output_button = QToolButton()
+        self.view_output_button.setText("View Compiled.txt")
+        self.view_output_button.setToolTip("Open a read-only view of this project's compiled Megalo script")
+        self.view_output_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_output_button.setAutoRaise(False)
+        self.view_output_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.view_output_button.clicked.connect(self.view_output_requested.emit)
+        button_row_layout.addWidget(self.view_output_button)
+        self.button_row = button_row
+        self.button_row.hide()
+        layout.addWidget(self.button_row)
 
         self._no_project_label = QLabel(_NO_PROJECT_TEXT)
         self._no_project_label.setWordWrap(True)
         self._no_project_label.setEnabled(False)
         layout.addWidget(self._no_project_label)
 
-        # PROMPT.md: "when no project is open, the Personal Game Variants and Personal Map
-        # Variants should appear at the bottom of the file explorer panel" -- the Script/Settings
-        # boxes below claim stretch=1 each (so they expand to fill available space once a project's
-        # open), but a hidden widget in a QVBoxLayout doesn't claim its stretch share, so this
-        # stands in for that whenever there's no project open, and collapses back to nothing the
-        # moment one is (see _activate()).
+        # A hidden widget in a QVBoxLayout doesn't claim its own stretch share, so with the
+        # Script/Settings/Stats boxes below all hidden (no project open), this stands in for that
+        # -- keeping the "no project" label pinned to the top instead of the layout centering it in
+        # whatever space is left -- and collapses back to nothing the moment a project opens (see
+        # _activate()).
         self._no_project_spacer = QWidget()
         layout.addWidget(self._no_project_spacer, 1)
 
@@ -217,12 +286,30 @@ class ExplorerPanel(QWidget):
         # blank/Firefight project that's never compiled, hence the placeholder. Placed first
         # (PROMPT.md: "put the stats at the top, then settings underneath ... then Script") --
         # stats/settings/script all take stretch=0 so they sit close together rather than each
-        # claiming a share of any extra vertical space; the single addStretch() below (before the
-        # two personal-folder sections) is what pushes those down to the bottom of the panel
-        # instead.
+        # claiming a share of any extra vertical space; the trailing addStretch() below is what
+        # absorbs that space instead, keeping the three boxes anchored to the top of the panel.
+        #
+        # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%)
+        # (and with the progress bar background)" -- the byte-usage figure is the progress bar's
+        # own displayed text (QProgressBar.setFormat(), in refresh_stats()) rather than a separate
+        # label line, so it reads directly over the bar's own fill instead of next to it.
         self.stats_progress = QProgressBar()
         self.stats_progress.setRange(0, 100)
         self.stats_progress.setTextVisible(True)
+        # PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge
+        # lables and strings" -- Fusion's own default QProgressBar chrome is a rounded, bordered
+        # pill sitting directly above those two lines; flattening it to a plain rectangle removes
+        # the one bordered/"bubble" element left in the Stats box.
+        self.stats_progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
+        # PROMPT.md: "fix the panel icon width so that trigger conditions and actions should
+        # always display on the same line" -- its own label, word-wrap off, rather than folded
+        # into stats_label's general (deliberately wrapping) prose/counts text: a wrapping QLabel
+        # word-wraps *within* each of its own "\n"-joined lines too if the panel's too narrow for
+        # one of them, which is exactly what was splitting this one over two lines. Kept from ever
+        # actually needing to overflow by _SIDEBAR_MIN_WIDTH (see main_window.py), sized against
+        # this line's own worst-case (triple-digit counts) width.
+        self.stats_counts_label = QLabel()
+        self.stats_counts_label.setWordWrap(False)
         self.stats_label = QLabel(_NO_STATS_TEXT)
         self.stats_label.setWordWrap(True)
         stats_body = QFrame()
@@ -230,57 +317,52 @@ class ExplorerPanel(QWidget):
         stats_layout.setContentsMargins(0, 4, 0, 0)
         stats_layout.setSpacing(4)
         stats_layout.addWidget(self.stats_progress)
+        stats_layout.addWidget(self.stats_counts_label)
         stats_layout.addWidget(self.stats_label)
         self.stats_section = _CollapsibleSection("Stats", stats_body, collapsed=False)
         self.stats_section.hide()
         layout.addWidget(self.stats_section)
 
-        # PROMPT.md: "we then want boxes like Personal Game Variants for Script and Settings" --
-        # dedicated quick-access boxes for the active project's own script/settings subfolders,
-        # open by default (unlike the personal-folder sections below) since they're central to the
-        # active project rather than secondary to it. Hidden entirely with no project open (see
-        # _activate()).
+        # PROMPT.md: "in the dashboard please add a section above Settings for Documentation --
+        # its dropdown should have 2 buttons" -- "Notes" (a freeform scratch pad, opens
+        # Notes.txt/Notes.md per in_reach.app.notes_settings) and a second, stubbed "Documentation"
+        # button (PROMPT.md: "later we will implement better doc practice and articles here"),
+        # disabled until that lands.
+        doc_body = QWidget()
+        doc_layout = QHBoxLayout(doc_body)
+        doc_layout.setContentsMargins(0, 4, 0, 0)
+        self.notes_button = QToolButton()
+        self.notes_button.setText("Notes")
+        self.notes_button.setToolTip("Open this project's own freeform notes file")
+        self.notes_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.notes_button.setAutoRaise(False)
+        self.notes_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.notes_button.clicked.connect(self.notes_requested.emit)
+        doc_layout.addWidget(self.notes_button)
+        self.documentation_button = QToolButton()
+        self.documentation_button.setText("Documentation")
+        self.documentation_button.setToolTip("Coming soon")
+        self.documentation_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.documentation_button.setEnabled(False)
+        doc_layout.addWidget(self.documentation_button)
+        doc_layout.addStretch(1)
+        self.documentation_section = _CollapsibleSection("Documentation", doc_body, collapsed=False)
+        self.documentation_section.hide()
+        layout.addWidget(self.documentation_section)
+
+        # Dedicated quick-access boxes for the active project's own script/settings subfolders,
+        # open by default since they're central to the active project. Hidden entirely with no
+        # project open (see _activate()).
         self.settings_tree, self._settings_model = _new_tree()
         self.settings_section = _CollapsibleSection("Settings", self.settings_tree, collapsed=False)
         self.settings_section.hide()
         layout.addWidget(self.settings_section)
 
-        self.script_tree, self._script_model = _new_tree()
-        self.script_section = _CollapsibleSection("Script", self.script_tree, collapsed=False)
-        self.script_section.hide()
-        layout.addWidget(self.script_section)
-
-        # PROMPT.md: "at the bottom of the panel, the Personal Game and Map Variant[s]" -- this is
-        # the one stretch factor in the whole panel, so it's what absorbs all the extra vertical
-        # space and pushes the two sections below all the way down, rather than that space getting
-        # split across stats/settings/script above (which used to read as "so much empty space
-        # between" them).
         layout.addStretch(1)
 
-        self.personal_variants_tree, self._personal_variants_model = _new_tree()
-        self.personal_variants_placeholder = self._placeholder_label()
-        self.personal_variants_section = _CollapsibleSection(
-            "Personal Game Variants", self._folder_body(self.personal_variants_tree, self.personal_variants_placeholder)
+        self.settings_tree.clicked.connect(
+            lambda index: self._on_tree_clicked(self._settings_model, index)
         )
-        layout.addWidget(self.personal_variants_section)
-
-        self.personal_maps_tree, self._personal_maps_model = _new_tree()
-        self.personal_maps_placeholder = self._placeholder_label()
-        self.personal_maps_section = _CollapsibleSection(
-            "Personal Map Variants", self._folder_body(self.personal_maps_tree, self.personal_maps_placeholder)
-        )
-        layout.addWidget(self.personal_maps_section)
-
-        # The Script/Settings quick-access boxes open files on click -- the two personal-folder
-        # trees below don't: they hold raw .bin/.mvar game/map variants, which the plain text
-        # editor can't do anything useful with yet (PROMPT.md: opening one currently "raises an
-        # error as trying to open them as if they were text"). Once those file types are actually
-        # processed, this can open up too.
-        for tree, model in (
-            (self.script_tree, self._script_model),
-            (self.settings_tree, self._settings_model),
-        ):
-            tree.clicked.connect(lambda index, m=model: self._on_tree_clicked(m, index))
 
         self.refresh_font_scale()
 
@@ -303,107 +385,53 @@ class ExplorerPanel(QWidget):
 
         header_font = QFont(font)
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
-        self.personal_variants_section.set_header_font(header_font)
-        self.personal_maps_section.set_header_font(header_font)
-        self.script_section.set_header_font(header_font)
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
+        self.documentation_section.set_header_font(header_font)
+
+        settings_tree_font = QFont(font)
+        settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
+        self.settings_tree.setFont(settings_tree_font)
 
         _cap_tree_rows(self.settings_tree, 3)  # settings/settings.json, script_settings.json, strings.json
-        _cap_tree_rows(self.script_tree, 1)  # script/output.txt
 
     def _on_tree_clicked(self, model: QFileSystemModel, index: QModelIndex) -> None:
         if not index.isValid() or model.isDir(index):
             return
         self.file_activated.emit(Path(model.filePath(index)))
 
-    def _placeholder_label(self) -> QLabel:
-        label = QLabel(_NOT_RESOLVED_TEXT)
-        label.setWordWrap(True)
-        label.setEnabled(False)
-        return label
-
-    def _folder_body(self, tree: QTreeView, placeholder: QLabel) -> QWidget:
-        body = QFrame()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 4, 0, 0)
-        body_layout.addWidget(tree)
-        body_layout.addWidget(placeholder)
-        return body
-
     # -- the main project tree -------------------------------------------------------------------
 
-    @property
-    def open_projects(self) -> list[Path]:
-        """Every currently open project, in tab order -- the tab bar itself is the source of
-        truth, so this can never drift out of sync with what's actually shown."""
-        return [Path(self.project_tabs.tabData(index)) for index in range(self.project_tabs.count())]
-
     def open_project(self, folder: Path) -> None:
-        """Opens ``folder`` as a tab, switching to it -- or, if it's already open, just switches to
-        its existing tab rather than adding a duplicate. A no-op (nothing added, nothing switched)
-        for a folder that doesn't actually exist, so a bad path can't clobber whatever's already
-        open with a dead tab.
+        """Points this panel at ``folder`` as the one open project (PROMPT.md: "1 per window") --
+        replacing whatever was open before, if anything. A no-op for a folder that doesn't actually
+        exist, so a bad path can't clobber whatever's already open. Also a no-op (skips the
+        redundant re-``_activate``) if ``folder`` is already the active project.
 
-        Signals are blocked around the actual tab-bar calls and :meth:`_activate` is called
-        directly instead -- ``addTab()`` fires ``currentChanged`` for a brand new *first* tab
-        synchronously, before ``setTabData()`` below it has a chance to run, which would otherwise
-        have :meth:`_on_tab_changed` read back ``None`` instead of the folder just added.
+        Emits :attr:`project_closed` for the *previous* project first when it's being replaced --
+        with only one project open at a time, replacing it is closing it, and MainWindow relies on
+        that signal to terminate its own RVT process (PROMPT.md: "if project is closed in ide, if
+        Reach Variant tool is open for that project it should be closed").
         """
-        if not folder.is_dir():
+        if not folder.is_dir() or folder == self.current_folder:
             return
-        self.project_tabs.blockSignals(True)
-        try:
-            for index in range(self.project_tabs.count()):
-                if Path(self.project_tabs.tabData(index)) == folder:
-                    self.project_tabs.setCurrentIndex(index)
-                    self._activate(folder)
-                    return
-            index = self.project_tabs.addTab(new_project.read_project_title(folder))
-            self.project_tabs.setTabData(index, str(folder))
-            self.project_tabs.setCurrentIndex(index)
-        finally:
-            self.project_tabs.blockSignals(False)
+        if self.current_folder is not None:
+            self.project_closed.emit(self.current_folder)
         self._activate(folder)
-        self.open_projects_changed.emit(self.open_projects)
-
-    def refresh_project_title(self, folder: Path) -> None:
-        """Re-reads ``folder``'s own title (its ``settings.json`` -- see
-        :func:`~in_reach.app.new_project.read_project_title`) and relabels its tab to match --
-        called after a rename (PROMPT.md: "when a project name is changed [via rvt or via apply
-        settings.json change] - the project title should change in the tabs and in the
-        breadcrumb"). A no-op if ``folder`` isn't currently open as a tab."""
-        for index in range(self.project_tabs.count()):
-            if Path(self.project_tabs.tabData(index)) == folder:
-                self.project_tabs.setTabText(index, new_project.read_project_title(folder))
-                return
 
     def close_project(self, folder: Path) -> None:
-        """Closes ``folder``'s own tab, if it's open -- Qt's own ``QTabBar`` picks a neighboring
-        tab to switch to (or, if this was the last one, falls back to the "no project"
-        placeholder; see :meth:`_on_tab_changed`)."""
-        for index in range(self.project_tabs.count()):
-            if Path(self.project_tabs.tabData(index)) == folder:
-                self.project_tabs.removeTab(index)
-                self.open_projects_changed.emit(self.open_projects)
-                return
+        """Closes ``folder`` if it's the currently active project -- a no-op otherwise (there's
+        nothing else open to close, PROMPT.md: "1 per window")."""
+        if folder != self.current_folder:
+            return
+        self.project_closed.emit(folder)
+        self._activate(None)
 
     def close_active_project(self) -> None:
-        """Closes whichever tab is currently active -- "Close Project" (File menu). A no-op with
+        """Closes whichever project is currently open -- "Close Project" (File menu). A no-op with
         no project open."""
         if self.current_folder is not None:
             self.close_project(self.current_folder)
-
-    def close_all_projects(self) -> None:
-        """Closes every open tab at once, back to the "no project" placeholder."""
-        for folder in list(self.open_projects):
-            self.close_project(folder)
-
-    def _on_tab_close_requested(self, index: int) -> None:
-        self.close_project(Path(self.project_tabs.tabData(index)))
-
-    def _on_tab_changed(self, index: int) -> None:
-        self._activate(Path(self.project_tabs.tabData(index)) if index >= 0 else None)
 
     def _activate(self, folder: Path | None) -> None:
         """Points the main tree (and the Script/Settings/Stats boxes) at ``folder`` (the newly
@@ -411,14 +439,11 @@ class ExplorerPanel(QWidget):
         ``None``."""
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
-        self.project_tabs.setVisible(self.project_tabs.count() > 0)
-        self.folder_subheading.setText(folder.name if has_project else "")
-        self.folder_subheading.setVisible(has_project)
+        self.button_row.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
-        self.script_section.setVisible(has_project)
         self.settings_section.setVisible(has_project)
-        _point_tree_at(self.script_tree, self._script_model, self._ensure_subdir(folder, new_project.SCRIPT_DIRNAME))
+        self.documentation_section.setVisible(has_project)
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
         )
@@ -464,60 +489,23 @@ class ExplorerPanel(QWidget):
             strings_count = strings_io.count_script_strings(strings_path)
 
         self.stats_progress.setVisible(stats is not None)
+        self.stats_counts_label.setVisible(stats is not None)
         lines: list[str] = []
         if stats is not None:
             self.stats_progress.setValue(round(stats.space.percent))
+            # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 Bytes used
+            # (53%) (and with the progress bar background)" -- shown as the bar's own text over its
+            # fill, rather than a separate label line.
+            self.stats_progress.setFormat(
+                f"{stats.space.bytes_used:,} / {stats.space.bytes_max:,} Bytes used ({stats.space.percent:.0f}%)"
+            )
             counts = stats.counts
-            lines.append(f"{stats.space.bytes_used:,} / {stats.space.bytes_max:,} bytes used ({stats.space.percent:.1f}%)")
-            lines.append(f"Triggers: {counts.triggers}   Conditions: {counts.conditions}   Actions: {counts.actions}")
-            lines.append(f"Forge Labels: {counts.forge_labels}")
-        if strings_count is not None:
+            self.stats_counts_label.setText(
+                f"Triggers: {counts.triggers}   Conditions: {counts.conditions}   Actions: {counts.actions}"
+            )
+            # PROMPT.md: "Forge labels and Strings should be on the same line"
+            forge_line = f"Forge Labels: {counts.forge_labels}"
+            lines.append(f"{forge_line}   Strings: {strings_count}" if strings_count is not None else forge_line)
+        elif strings_count is not None:
             lines.append(f"Strings: {strings_count}")
         self.stats_label.setText("\n".join(lines) if lines else _NO_STATS_TEXT)
-
-    # -- the two personal-folder sections ----------------------------------------------------------
-
-    def set_env_project_dir(self, project_dir: Path | None) -> None:
-        """Points the two personal-folder sections at whatever
-        :data:`~in_reach.app.system_verify.PERSONAL_VARIANTS_KEY`/
-        :data:`~in_reach.app.system_verify.PERSONAL_MAPS_KEY` currently resolve to in
-        ``project_dir``'s own ``.env`` -- the project's ``.in-reach`` folder, not any gametype
-        project folder :meth:`open_project` opens as a tab.
-
-        Args:
-            project_dir: The project's ``.in-reach`` folder, or ``None`` to clear both sections.
-        """
-        self._env_project_dir = project_dir
-        self.refresh_personal_folders()
-
-    def refresh_personal_folders(self) -> None:
-        """Re-resolves both personal-folder sections against the ``.env`` -- called after a verify
-        run or "Clear Entries" might have changed either one."""
-        values = self._env_values()
-
-        self._apply_personal_folder(
-            self.personal_variants_tree,
-            self._personal_variants_model,
-            self.personal_variants_placeholder,
-            values.get(system_verify.PERSONAL_VARIANTS_KEY),
-        )
-        self._apply_personal_folder(
-            self.personal_maps_tree,
-            self._personal_maps_model,
-            self.personal_maps_placeholder,
-            values.get(system_verify.PERSONAL_MAPS_KEY),
-        )
-
-    def _env_values(self) -> dict[str, str]:
-        if self._env_project_dir is None:
-            return {}
-        return env_file.get_env_values(system_verify.env_path_for(self._env_project_dir))
-
-    def _apply_personal_folder(
-        self, tree: QTreeView, model: QFileSystemModel, placeholder: QLabel, raw: str | None
-    ) -> None:
-        folder = Path(raw) if raw else None
-        resolved = folder is not None and folder.is_dir()
-        tree.setVisible(resolved)
-        placeholder.setVisible(not resolved)
-        _point_tree_at(tree, model, folder if resolved else None)

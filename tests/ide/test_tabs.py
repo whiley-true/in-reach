@@ -435,7 +435,16 @@ def test_reveal_in_os_explorer_is_a_noop_without_a_path(
     assert calls == []
 
 
-def test_reveal_in_explorer_view_opens_and_switches_the_sidebar(window: MainWindow) -> None:
+def test_reveal_in_explorer_view_opens_and_switches_the_sidebar(qtbot, tmp_path: Path) -> None:
+    # A real, isolated root_dir (not the shared `window` fixture's) -- the sidebar's own
+    # view-toggle buttons are disabled with no project open (PROMPT.md: "if no project is loaded
+    # the panels cannot be expanded"), so this needs one open first to switch to Search at all.
+    window = MainWindow(root_dir=tmp_path)
+    qtbot.addWidget(window)
+    window.show()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    window._on_project_opened(folder)
     pane = window.main_panel.panes[0]
     window.activity_bar.search_button.click()
     assert window._sidebar_stack.currentWidget() is window._sidebar_pages["search"]
@@ -792,6 +801,101 @@ def test_splitting_a_pane_with_a_markdown_preview_duplicates_it(window: MainWind
     assert new_pane._tab_state_for(duplicate).path == source
 
 
+# -- editable Markdown + live preview split (PROMPT.md, Notes-as-Markdown) ----------------------
+
+
+def test_open_file_editable_markdown_opens_a_real_text_editor(window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.editor import TextEditorWidget
+
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+
+    pane.open_file(source, editable_markdown=True)
+
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, TextEditorWidget)
+    assert widget.isReadOnly() is False
+    assert widget.toPlainText() == "# Heading\n"
+
+
+def test_preview_button_only_shows_for_the_active_editable_markdown_tab(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    txt_source = tmp_path / "notes.txt"
+    txt_source.write_text("hi\n", encoding="utf-8")
+    md_source = tmp_path / "Notes.md"
+    md_source.write_text("hi\n", encoding="utf-8")
+
+    pane.open_file(txt_source)
+    assert pane.preview_button.isVisible() is False
+
+    pane.open_file(md_source, editable_markdown=True)
+    assert pane.preview_button.isVisible() is True
+
+    pane.setCurrentIndex(0)  # back to the .txt tab
+    assert pane.preview_button.isVisible() is False
+
+
+def test_preview_button_does_not_show_for_the_read_only_markdown_preview(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "README.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+
+    pane.open_file(source)  # editable_markdown defaults to False
+
+    assert pane.preview_button.isVisible() is False
+
+
+def test_preview_split_from_shows_a_live_markdown_preview_beside_the_editor(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.markdown_preview import MarkdownPreviewWidget
+
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane.open_file(source, editable_markdown=True)
+
+    pane.preview_button.click()
+
+    new_pane = window.main_panel.panes[-1]
+    preview = new_pane.widget(new_pane.currentIndex())
+    assert isinstance(preview, MarkdownPreviewWidget)
+    assert "Heading" in preview.toPlainText()
+
+
+def test_preview_split_from_stays_live_as_the_editor_changes(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane.open_file(source, editable_markdown=True)
+    editor = pane.widget(pane.currentIndex())
+
+    pane.preview_button.click()
+    new_pane = window.main_panel.panes[-1]
+    preview = new_pane.widget(new_pane.currentIndex())
+
+    editor.setPlainText("# Updated Heading\n")
+
+    assert "Updated Heading" in preview.toPlainText()
+
+
+def test_preview_split_from_is_a_no_op_for_a_non_markdown_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "notes.txt"
+    source.write_text("hi\n", encoding="utf-8")
+    pane.open_file(source)
+
+    before = window.main_panel.split_count
+    window.main_panel.preview_split_from(pane)
+
+    assert window.main_panel.split_count == before
+
+
 def test_splitting_a_pane_carries_the_read_only_state_and_padlock_icon_over(
     window: MainWindow, tmp_path: Path
 ) -> None:
@@ -900,6 +1004,117 @@ def test_open_file_switches_to_the_existing_tab_instead_of_duplicating_it(
     assert pane.currentIndex() == first_index
 
 
+# -- anti-tab-sprawl reuse (PROMPT.md: "clicking on a file that is not open should only open a
+# new tab if the present tab has unsaved changes[;] otherwise the present tab should change to
+# the selected file") -----------------------------------------------------------------------------
+
+
+def test_open_file_replaces_the_current_clean_unpinned_tab_instead_of_adding_one(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    first_index = pane.currentIndex()
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before  # no new tab -- the current one was replaced in place
+    assert pane.currentIndex() == first_index
+    assert pane.tabText(first_index) == "second.txt"
+    assert pane.widget(first_index).toPlainText() == "second"
+    assert pane._tab_state_for(pane.widget(first_index)).path == second
+
+
+def test_open_file_does_not_replace_a_dirty_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    pane.widget(pane.currentIndex()).document().setModified(True)
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_does_not_replace_a_pinned_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(first)
+    pane._toggle_pin(pane.currentIndex())
+    before = pane.count()
+
+    pane.open_file(second)
+
+    assert pane.count() == before + 1
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_does_not_replace_the_welcome_tab_even_when_its_not_the_only_tab(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    welcome_index = pane.currentIndex()  # the Welcome tab -- the pane's only tab so far
+    first = tmp_path / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    pane.open_file(first)  # [Welcome, first.txt], current -> first.txt
+
+    pane.setCurrentIndex(welcome_index)
+    second = tmp_path / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    pane.open_file(second)
+
+    assert pane.count() == 3
+    assert pane.tabText(0) == "Welcome"
+    assert pane.tabText(1) == "first.txt"
+    assert pane.tabText(pane.currentIndex()) == "second.txt"
+
+
+def test_open_file_force_reload_rereads_an_already_open_files_content(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "output.txt"
+    source.write_text("v1", encoding="utf-8")
+    pane.open_file(source)
+    index = pane.currentIndex()
+    before = pane.count()
+
+    source.write_text("v2", encoding="utf-8")
+    pane.open_file(source, force_reload=True)
+
+    assert pane.count() == before  # switched to the existing tab, not duplicated
+    assert pane.currentIndex() == index
+    assert pane.widget(index).toPlainText() == "v2"
+
+
+def test_open_file_without_force_reload_leaves_an_already_open_tabs_content_stale(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "output.txt"
+    source.write_text("v1", encoding="utf-8")
+    pane.open_file(source)
+    index = pane.currentIndex()
+
+    source.write_text("v2", encoding="utf-8")
+    pane.open_file(source)
+
+    assert pane.widget(index).toPlainText() == "v1"
+
+
 def test_open_file_reports_an_unreadable_file_rather_than_raising(
     window: MainWindow, monkeypatch, tmp_path: Path
 ) -> None:
@@ -965,3 +1180,66 @@ def test_main_panel_save_all_covers_every_pane_not_just_the_first(
 
     assert path1.read_text(encoding="utf-8") == "one"
     assert path2.read_text(encoding="utf-8") == "two"
+
+
+# -- dirty_tab_names / reload_open_tabs (PROMPT.md: RVT resync should update clean settings/
+# script_settings/strings.json tabs in place, and ask before overwriting a dirty one) -----------
+
+
+def test_dirty_tab_names_is_empty_when_no_matching_tab_has_unsaved_edits(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+
+    assert main_panel.dirty_tab_names([settings_path]) == []
+
+
+def test_dirty_tab_names_reports_a_dirty_matching_tab_by_file_name(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+    main_panel.active_pane.widget(main_panel.active_pane.currentIndex()).document().setModified(True)
+
+    assert main_panel.dirty_tab_names([settings_path]) == ["settings.json"]
+
+
+def test_dirty_tab_names_ignores_a_dirty_tab_not_in_the_given_paths(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    other_path = tmp_path / "notes.txt"
+    other_path.write_text("hi", encoding="utf-8")
+    main_panel.active_pane.open_file(other_path)
+    main_panel.active_pane.widget(main_panel.active_pane.currentIndex()).document().setModified(True)
+
+    assert main_panel.dirty_tab_names([tmp_path / "settings.json"]) == []
+
+
+def test_reload_open_tabs_rereads_matching_tabs_from_disk_in_place(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("v1", encoding="utf-8")
+    main_panel.active_pane.open_file(settings_path)
+    index = main_panel.active_pane.currentIndex()
+
+    settings_path.write_text("v2", encoding="utf-8")
+    main_panel.reload_open_tabs([settings_path])
+
+    assert main_panel.active_pane.widget(index).toPlainText() == "v2"
+    assert main_panel.active_pane.widget(index).document().isModified() is False
+
+
+def test_reload_open_tabs_is_a_no_op_for_a_path_that_is_not_open(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    main_panel = window.main_panel
+
+    main_panel.reload_open_tabs([tmp_path / "settings.json"])  # should not raise

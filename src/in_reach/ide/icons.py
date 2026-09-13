@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtSvg import QSvgRenderer
 
 DEFAULT_COLOR = "#cccccc"
@@ -69,11 +69,17 @@ _ICON_SOURCES = {
         "0 0 24 24",
         '<path d="M7.5 22.5H17.595C17.07 23.4 16.11 24 15 24H7.5C4.185 24 1.5 21.315 1.5 18V6C1.5 4.89 2.1 3.93 3 3.405V18C3 20.475 5.025 22.5 7.5 22.5ZM21 8.121V18C21 19.6545 19.6545 21 18 21H7.5C5.8455 21 4.5 19.6545 4.5 18V3C4.5 1.3455 5.8455 0 7.5 0H12.879C13.4715 0 14.0505 0.24 14.4705 0.6585L20.3415 6.5295C20.766 6.954 21 7.5195 21 8.121ZM13.5 6.75C13.5 7.164 13.8375 7.5 14.25 7.5H19.1895L13.5 1.8105V6.75ZM19.5 18V9H14.25C13.0095 9 12 7.9905 12 6.75V1.5H7.5C6.672 1.5 6 2.1735 6 3V18C6 18.8265 6.672 19.5 7.5 19.5H18C18.828 19.5 19.5 18.8265 19.5 18Z"/>',
     ),
-    "dashboard": (  # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed
-        # to be a svg of a dashboard)" -- a plain 2x2 grid of panels, deliberately simple rather
-        # than traced from any icon set (same reasoning as "split"/"split_vertical" above).
+    "dashboard": (  # PROMPT.md: "please update the icon/svg for dashboards to be something else
+        # instead -- maybe use a speedometer design instead" -- a simple gauge dial, needle, and
+        # pivot dot, deliberately simple rather than traced from any icon set (same reasoning as
+        # "split"/"split_vertical" above). fill="none"/explicit stroke on the dial and needle
+        # override the outer <svg>'s own fill="{color}" (see icon()'s own docstring), so those
+        # draw as strokes rather than solid-filled wedges.
         "0 0 16 16",
-        '<path d="M1 2.5C1 1.67157 1.67157 1 2.5 1H6.5C7.32843 1 8 1.67157 8 2.5V6.5C8 7.32843 7.32843 8 6.5 8H2.5C1.67157 8 1 7.32843 1 6.5V2.5ZM2.5 2C2.22386 2 2 2.22386 2 2.5V6.5C2 6.77614 2.22386 7 2.5 7H6.5C6.77614 7 7 6.77614 7 6.5V2.5C7 2.22386 6.77614 2 6.5 2H2.5ZM9.5 1H13.5C14.3284 1 15 1.67157 15 2.5V4.5C15 5.32843 14.3284 6 13.5 6H9.5C8.67157 6 8 5.32843 8 4.5V2.5C8 1.67157 8.67157 1 9.5 1ZM9 2.5V4.5C9 4.77614 9.22386 5 9.5 5H13.5C13.7761 5 14 4.77614 14 4.5V2.5C14 2.22386 13.7761 2 13.5 2H9.5C9.22386 2 9 2.22386 9 2.5ZM9.5 8H13.5C14.3284 8 15 8.67157 15 9.5V13.5C15 14.3284 14.3284 15 13.5 15H9.5C8.67157 15 8 14.3284 8 13.5V9.5C8 8.67157 8.67157 8 9.5 8ZM9 9.5V13.5C9 13.7761 9.22386 14 9.5 14H13.5C13.7761 14 14 13.7761 14 13.5V9.5C14 9.22386 13.7761 9 13.5 9H9.5C9.22386 9 9 9.22386 9 9.5ZM1 9.5C1 8.67157 1.67157 8 2.5 8H6.5C7.32843 8 8 8.67157 8 9.5V13.5C8 14.3284 7.32843 15 6.5 15H2.5C1.67157 15 1 14.3284 1 13.5V9.5ZM2.5 9C2.22386 9 2 9.22386 2 9.5V13.5C2 13.7761 2.22386 14 2.5 14H6.5C6.77614 14 7 13.7761 7 13.5V9.5C7 9.22386 6.77614 9 6.5 9H2.5Z"/>',
+        '<path d="M2.25 12.5A5.75 5.75 0 0 1 13.75 12.5" fill="none" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>'
+        '<path d="M8 12.5L11 8" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>'
+        '<circle cx="8" cy="12.5" r="1.2" fill="{color}"/>'
+        '<path d="M5.25 14.5H10.75" stroke="{color}" stroke-width="1.4" stroke-linecap="round"/>',
     ),
     "stats": (  # a plain ascending bar-chart, same "deliberately simple, not traced" reasoning.
         "0 0 16 16",
@@ -86,6 +92,46 @@ _ICON_SOURCES = {
     "tab_dirty": (  # plain filled dot -- shown instead of the close 'x' on an unsaved tab
         "0 0 16 16",
         '<circle cx="8" cy="8" r="3.5"/>',
+    ),
+    "compass": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)",
+        # later: "for locations please use a compass icon" -- a ring plus a two-tone needle
+        # (the north half solid, the south half translucent, both traced as plain kite-shaped
+        # polygons), same "deliberately simple, not traced from any icon set" reasoning as
+        # "dashboard"/"stats" above.
+        "0 0 16 16",
+        '<circle cx="8" cy="8" r="6.3" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        '<path d="M8 3.2L9.6 8L8 8.9L6.4 8Z" fill="{color}"/>'
+        '<path d="M8 12.8L6.4 8L8 7.1L9.6 8Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "git": (  # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a
+        # dulwich gui))" -- a plain three-node branch graph (a main-line commit at top and bottom,
+        # a branch point curving off to a third node), same "deliberately simple, not traced from
+        # any icon set" reasoning as "compass"/"dashboard" below.
+        "0 0 16 16",
+        '<circle cx="4" cy="3" r="1.5" fill="{color}"/>'
+        '<circle cx="4" cy="13" r="1.5" fill="{color}"/>'
+        '<circle cx="12" cy="9" r="1.5" fill="{color}"/>'
+        '<path d="M4 4.5V11.5" stroke="{color}" stroke-width="1.3" fill="none"/>'
+        '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
+    ),
+    "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
+        # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"
+        # reasoning as "compass"/"dashboard" below.
+        "0 0 16 16",
+        '<path d="M1.5 13.5H14.5" stroke="{color}" stroke-width="1.2" stroke-linecap="round" fill="none"/>'
+        '<rect x="2.3" y="4.2" width="2" height="9" fill="{color}"/>'
+        '<rect x="5.1" y="2.6" width="2" height="10.6" fill="{color}"/>'
+        '<rect x="7.9" y="5.4" width="2" height="7.8" fill="{color}"/>'
+        '<rect x="10.7" y="3.6" width="2" height="9.6" fill="{color}"/>'
+        '<rect x="13.2" y="6.6" width="1.2" height="6.6" fill="{color}"/>',
+    ),
+    "help": (  # PROMPT.md: "please then add a help (?) icon above the settings icon" -- a plain
+        # circled question mark, same "deliberately simple" reasoning as "compass" above.
+        "0 0 16 16",
+        '<circle cx="8" cy="8" r="6.5" fill="none" stroke="{color}" stroke-width="1.3"/>'
+        '<path d="M6.2 6.1c0-1.05.85-1.9 1.9-1.9s1.9.72 1.9 1.7c0 .95-.6 1.35-1.15 1.75'
+        '-.5.36-.75.6-.75 1.15" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
+        '<circle cx="8" cy="11.2" r="0.75" fill="{color}"/>',
     ),
     # Window controls: plain geometric shapes only (no glyph tracing needed at all).
     "win_minimize": (
@@ -185,36 +231,87 @@ def _with_disabled_badge(pixmap: QPixmap) -> QPixmap:
 
 
 def apply_icon(color: str = DEFAULT_COLOR, size: int = 24, *, enabled: bool = True) -> QIcon:
-    """A checkmark glyph -- the activity bar's "Apply" button (PROMPT.md: "below the rvt icon we
-    want another icon for 'Apply'"). Rendered as a real Unicode checkmark character rather than
-    hand-traced SVG path data, same reasoning as :mod:`in_reach.ide.file_icons`'s own glyph icons
-    -- a mis-plotted checkmark polygon is an easy, easy-to-miss mistake; a font glyph can't be
-    wrong the same way.
+    """A horizontal-arrow glyph -- the activity bar's own compile/"Apply" button (PROMPT.md:
+    "make it so the tick in the side panel was instead a horizontal arrow (representing
+    compiling)"; originally a checkmark, see git history for that). Deliberately simple geometric
+    shape, same "not traced from any icon set" reasoning as :data:`_ICON_SOURCES`'s own
+    "dashboard"/"stats"/"compass" entries -- a mis-plotted polygon here is an easy, easy-to-miss
+    mistake, and there's no ready-made codicon for "compile".
 
     Args:
-        enabled: When ``False`` (PROMPT.md: "please also use the red no entry icon (like you do
-            for rvt) when the apply button can not be pressed"), overlays the same "no entry"
-            circle-and-dash badge :func:`rvt_icon` uses, registered for both Normal and Disabled
-            icon modes for the same reason documented there.
+        enabled: When ``True``, there's something pending to compile -- a plain arrow, no badge.
+            When ``False`` (PROMPT.md: "has small green tick (same size as the do not enter sign)
+            when there is nothing to compile"), overlays a small green tick badge instead of the
+            red "no entry" badge :func:`rvt_icon` uses -- "nothing to compile" is a fine/expected
+            state here, not a blocked one, so it reads as a positive confirmation rather than an
+            error. Registered for both Normal and Disabled icon modes, same reason as
+            :func:`rvt_icon`.
     """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    font = painter.font()
-    font.setPixelSize(round(size * 0.8))
-    font.setBold(True)
-    painter.setFont(font)
-    painter.setPen(QColor(color))
-    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "✓")
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.4, size * 0.09))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    mid_y = size * 0.5
+    painter.drawLine(QPointF(size * 0.18, mid_y), QPointF(size * 0.68, mid_y))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(size * 0.56, size * 0.28),
+                QPointF(size * 0.86, mid_y),
+                QPointF(size * 0.56, size * 0.72),
+            ]
+        )
+    )
     painter.end()
     if enabled:
         return QIcon(pixmap)
-    badged = _with_disabled_badge(pixmap)
+    badged = _with_done_badge(pixmap)
     icon = QIcon()
     icon.addPixmap(badged, QIcon.Mode.Normal)
     icon.addPixmap(badged, QIcon.Mode.Disabled)
     return icon
+
+
+def _with_done_badge(pixmap: QPixmap) -> QPixmap:
+    """Overlays a small green circle-and-tick "all done" badge in the bottom-right corner of
+    ``pixmap`` -- a copy, ``pixmap`` itself is left untouched. Same size/position as
+    :func:`_with_disabled_badge`'s own red "blocked" badge, just a different color/glyph for a
+    fine/expected state (PROMPT.md: "has small green tick (same size as the do not enter sign)")."""
+    badged = QPixmap(pixmap)
+    size = min(badged.width(), badged.height())
+    badge_size = max(6, round(size * 0.55))
+    x = badged.width() - badge_size
+    y = badged.height() - badge_size
+
+    painter = QPainter(badged)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#2ea043"))
+    painter.drawEllipse(x, y, badge_size, badge_size)
+    pen = QPen(QColor("#ffffff"))
+    pen.setWidthF(max(1.0, badge_size * 0.18))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    cx, cy = x + badge_size / 2, y + badge_size / 2
+    painter.drawPolyline(
+        QPolygonF(
+            [
+                QPointF(cx - badge_size * 0.22, cy),
+                QPointF(cx - badge_size * 0.04, cy + badge_size * 0.2),
+                QPointF(cx + badge_size * 0.26, cy - badge_size * 0.22),
+            ]
+        )
+    )
+    painter.end()
+    return badged
 
 
 def lock_icon(size: int = 16) -> QIcon:
@@ -232,5 +329,88 @@ def lock_icon(size: int = 16) -> QIcon:
     font.setPixelSize(round(size * 0.85))
     painter.setFont(font)
     painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "🔒")
+    painter.end()
+    return QIcon(pixmap)
+
+
+#: PROMPT.md: "a flame icon which can be of different states depending on the status of the
+#: players halo install and running detection ... just firewood: player has not verified their
+#: install ... after being verified the firewood should have the outline of a flame ... if [Halo:
+#: MCC] is running ... the flame should be filled" -- the activity bar's bottom-pinned Halo status
+#: indicator (see :meth:`~in_reach.ide.activity_bar.ActivityBar.set_halo_status`).
+STATUS_UNVERIFIED = "unverified"
+STATUS_VERIFIED = "verified"
+STATUS_RUNNING = "running"
+
+
+def _firewood_path(size: float) -> tuple[QPainterPath, float]:
+    """Two logs leaning together in a peak, confined to the icon's own bottom quarter (and the
+    stroke width to draw them at) -- present in every :func:`status_icon` state, per PROMPT.md's
+    own "just firewood" starting point. Kept well clear of :func:`_flame_path`'s own vertical span
+    -- PROMPT.md: "make the different icon statuses a little more obvious" -- so the two never
+    visually merge into one blob the way an earlier, taller/overlapping pass did.
+    """
+    path = QPainterPath()
+    log_width = size * 0.13
+    for start, end in (
+        (QPointF(size * 0.18, size * 0.96), QPointF(size * 0.82, size * 0.74)),
+        (QPointF(size * 0.82, size * 0.96), QPointF(size * 0.18, size * 0.74)),
+    ):
+        segment = QPainterPath()
+        segment.moveTo(start)
+        segment.lineTo(end)
+        path.addPath(segment)
+    return path, log_width
+
+
+def _flame_path(size: float) -> QPainterPath:
+    """A large, simple teardrop confined to the icon's own top ~60% -- deliberately simple
+    geometry (just two curves, no inner "flicker" notch -- that self-intersected, which left a
+    hole in the middle when filled), same reasoning as this module's other hand-drawn glyphs
+    (compass/dashboard/help/apply_icon), not traced from any icon set. Sized to read clearly at
+    the activity bar's own small icon sizes -- PROMPT.md: "make the different icon statuses a
+    little more obvious" -- rather than a smaller, more delicate shape easily lost next to the
+    firewood.
+    """
+    path = QPainterPath()
+    path.moveTo(size * 0.50, size * 0.03)
+    path.cubicTo(size * 0.90, size * 0.32, size * 0.78, size * 0.58, size * 0.68, size * 0.68)
+    path.quadTo(size * 0.50, size * 0.78, size * 0.32, size * 0.68)
+    path.cubicTo(size * 0.22, size * 0.58, size * 0.10, size * 0.32, size * 0.50, size * 0.03)
+    path.closeSubpath()
+    return path
+
+
+def status_icon(state: str, color: str = DEFAULT_COLOR, size: int = 24) -> QIcon:
+    """The activity bar's Halo install/running status indicator.
+
+    Args:
+        state: One of :data:`STATUS_UNVERIFIED` (just the firewood -- nothing verified yet),
+            :data:`STATUS_VERIFIED` (firewood plus a flame *outline*), or :data:`STATUS_RUNNING`
+            (firewood plus a *filled* flame). Falls back to :data:`STATUS_UNVERIFIED` for any
+            other value rather than raising.
+        color: Stroke/fill color for both the firewood and the flame.
+        size: Pixel width/height to render at.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    logs_path, log_width = _firewood_path(size)
+    pen = QPen(QColor(color))
+    pen.setWidthF(log_width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.strokePath(logs_path, pen)
+
+    if state in (STATUS_VERIFIED, STATUS_RUNNING):
+        flame_path = _flame_path(size)
+        if state == STATUS_RUNNING:
+            painter.fillPath(flame_path, QColor(color))
+        else:
+            outline_pen = QPen(QColor(color))
+            outline_pen.setWidthF(max(1.4, size * 0.09))
+            painter.strokePath(flame_path, outline_pen)
+
     painter.end()
     return QIcon(pixmap)

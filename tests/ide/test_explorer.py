@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFrame
 
-from in_reach.app import env_file, system_verify
 from in_reach.ide.explorer import ExplorerPanel
 
 
@@ -15,14 +15,29 @@ def panel(qtbot) -> ExplorerPanel:
     return widget
 
 
+# -- no bordered "bubble" chrome ---------------------------------------------------------------
+
+
+def test_settings_tree_has_no_default_frame_border(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please remove the bubble outline around ... setings, and output.txt" -- QTreeView
+    # (like every QAbstractScrollArea) defaults to a sunken StyledPanel frame around itself.
+    assert panel.settings_tree.frameShape() == QFrame.Shape.NoFrame
+
+
+def test_stats_progress_bar_has_no_border(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge
+    # lables and strings" -- Fusion's default QProgressBar is a rounded, bordered pill sitting
+    # directly above those lines.
+    assert "border: none" in panel.stats_progress.styleSheet()
+
+
 def test_starts_with_no_project_placeholder_shown_and_boxes_hidden(panel: ExplorerPanel) -> None:
     assert panel._no_project_label.isVisible() is True
-    assert panel.script_section.isVisible() is False
     assert panel.settings_section.isVisible() is False
     assert panel.stats_section.isVisible() is False
 
 
-def test_open_project_shows_the_script_and_settings_boxes_rooted_at_it(
+def test_open_project_shows_the_settings_box_rooted_at_it(
     panel: ExplorerPanel, tmp_path: Path
 ) -> None:
     folder = tmp_path / "project"
@@ -31,21 +46,18 @@ def test_open_project_shows_the_script_and_settings_boxes_rooted_at_it(
     panel.open_project(folder)
 
     assert panel._no_project_label.isVisible() is False
-    assert panel.script_section.isVisible() is True
     assert panel.settings_section.isVisible() is True
-    assert Path(panel._script_model.rootPath()) == folder / "script"
     assert Path(panel._settings_model.rootPath()) == folder / "settings"
 
 
-def test_close_all_projects_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_close_active_project_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
     panel.open_project(folder)
 
-    panel.close_all_projects()
+    panel.close_active_project()
 
     assert panel._no_project_label.isVisible() is True
-    assert panel.script_section.isVisible() is False
     assert panel.settings_section.isVisible() is False
 
 
@@ -53,62 +65,39 @@ def test_opening_a_nonexistent_project_folder_is_a_no_op(panel: ExplorerPanel, t
     panel.open_project(tmp_path / "does-not-exist")
 
     assert panel._no_project_label.isVisible() is True
-    assert panel.script_section.isVisible() is False
-    assert panel.open_projects == []
+    assert panel.settings_section.isVisible() is False
+    assert panel.current_folder is None
 
 
-# -- Script/Settings boxes (PROMPT.md: "boxes like Personal Game Variants for Script and Settings")
+# -- Settings box (PROMPT.md: "boxes like Personal Game Variants for Script and Settings")
 
 
-def test_script_and_settings_sections_are_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
-    assert panel.script_section.isVisible() is False
+def test_settings_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
     assert panel.settings_section.isVisible() is False
 
 
-def test_opening_a_project_points_the_script_and_settings_trees_at_its_own_subfolders(
+def test_opening_a_project_points_the_settings_tree_at_its_own_subfolder(
     panel: ExplorerPanel, tmp_path: Path
 ) -> None:
     folder = tmp_path / "project"
-    (folder / "script").mkdir(parents=True)
     (folder / "settings").mkdir(parents=True)
 
     panel.open_project(folder)
 
-    assert panel.script_section.isVisible() is True
     assert panel.settings_section.isVisible() is True
-    assert Path(panel._script_model.rootPath()) == folder / "script"
     assert Path(panel._settings_model.rootPath()) == folder / "settings"
 
 
-def test_closing_the_last_project_hides_the_script_and_settings_sections_again(
+def test_closing_the_last_project_hides_the_settings_section_again(
     panel: ExplorerPanel, tmp_path: Path
 ) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
     panel.open_project(folder)
 
-    panel.close_all_projects()
+    panel.close_active_project()
 
-    assert panel.script_section.isVisible() is False
     assert panel.settings_section.isVisible() is False
-
-
-def test_clicking_a_file_in_the_script_section_emits_file_activated(
-    panel: ExplorerPanel, qtbot, tmp_path: Path
-) -> None:
-    folder = tmp_path / "project"
-    (folder / "script").mkdir(parents=True)
-    output_txt = folder / "script" / "output.txt"
-    output_txt.write_text("-- script --", encoding="utf-8")
-    panel.open_project(folder)
-    model = panel._script_model
-    qtbot.waitUntil(lambda: model.rowCount(panel.script_tree.rootIndex()) > 0, timeout=2000)
-
-    activated: list[Path] = []
-    panel.file_activated.connect(activated.append)
-    panel.script_tree.clicked.emit(model.index(str(output_txt)))
-
-    assert activated == [output_txt]
 
 
 # -- the Stats box (PROMPT.md: "please also add a stats view into the dashboard") ----------------
@@ -128,6 +117,7 @@ def test_no_stats_file_shows_the_placeholder_and_hides_the_progress_bar(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is False
+    assert panel.stats_counts_label.isVisible() is False
     assert "No build stats" in panel.stats_label.text()
 
 
@@ -168,8 +158,16 @@ def test_a_real_stats_file_populates_the_progress_bar_and_counts(
 
     assert panel.stats_progress.isVisible() is True
     assert panel.stats_progress.value() == 50
-    assert "100" in panel.stats_label.text() and "200" in panel.stats_label.text()
-    assert "Triggers: 3" in panel.stats_label.text()
+    # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%) (and
+    # with the progress bar background)" -- shown as the progress bar's own text, not a label line.
+    assert "100" in panel.stats_progress.text() and "200" in panel.stats_progress.text()
+    assert panel.stats_counts_label.isVisible() is True
+    assert "Triggers: 3" in panel.stats_counts_label.text()
+    # PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
+    # display on the same line" -- word-wrap off is what actually guarantees that (see
+    # ExplorerPanel.__init__'s own comment); a wrapping label would still split it in two given a
+    # narrow enough panel.
+    assert panel.stats_counts_label.wordWrap() is False
 
 
 def _write_strings_json(path: Path, entries: int) -> None:
@@ -242,8 +240,11 @@ def test_stats_box_shows_both_build_stats_and_strings_count_together(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is True
-    assert "Triggers: 3" in panel.stats_label.text()
-    assert "Strings: 7" in panel.stats_label.text()
+    assert "Triggers: 3" in panel.stats_counts_label.text()
+    # PROMPT.md: "Forge labels and Strings should be on the same line"
+    lines = panel.stats_label.text().splitlines()
+    forge_line = next(line for line in lines if "Forge Labels" in line)
+    assert "Strings: 7" in forge_line
 
 
 def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
@@ -287,103 +288,36 @@ def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
     assert panel.stats_progress.isVisible() is True
 
 
-# -- the two personal-folder sections -----------------------------------------------------------
-
-
-@pytest.fixture
-def env_project_dir(tmp_path: Path) -> Path:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    (project_dir / ".env").write_text("", encoding="utf-8")
-    return project_dir
-
-
-# Sections start collapsed (see the "collapsible sections" tests below), so a nested tree/
-# placeholder's own isVisible() reflects the whole ancestor chain including that collapse -- these
-# tests care about the resolved-vs-placeholder state on its own, so they check visibility relative
-# to the section's own body instead (see QWidget.isVisibleTo's own docs).
-
-
-def test_personal_sections_start_with_the_not_resolved_placeholder(
-    panel: ExplorerPanel, env_project_dir: Path
-) -> None:
-    panel.set_env_project_dir(env_project_dir)
-
-    body1 = panel.personal_variants_section.body
-    body2 = panel.personal_maps_section.body
-    assert panel.personal_variants_placeholder.isVisibleTo(body1) is True
-    assert panel.personal_variants_tree.isVisibleTo(body1) is False
-    assert panel.personal_maps_placeholder.isVisibleTo(body2) is True
-    assert panel.personal_maps_tree.isVisibleTo(body2) is False
-
-
-def test_personal_sections_resolve_once_the_env_keys_are_set(
-    panel: ExplorerPanel, env_project_dir: Path, tmp_path: Path
-) -> None:
-    variants = tmp_path / "variants"
-    variants.mkdir()
-    maps = tmp_path / "maps"
-    maps.mkdir()
-    env_file.update_env_value(env_project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
-    env_file.update_env_value(env_project_dir / ".env", system_verify.PERSONAL_MAPS_KEY, str(maps))
-
-    panel.set_env_project_dir(env_project_dir)
-
-    body1 = panel.personal_variants_section.body
-    body2 = panel.personal_maps_section.body
-    assert panel.personal_variants_placeholder.isVisibleTo(body1) is False
-    assert panel.personal_variants_tree.isVisibleTo(body1) is True
-    assert Path(panel._personal_variants_model.rootPath()) == variants
-    assert panel.personal_maps_placeholder.isVisibleTo(body2) is False
-    assert panel.personal_maps_tree.isVisibleTo(body2) is True
-    assert Path(panel._personal_maps_model.rootPath()) == maps
-
-
-def test_refresh_personal_folders_picks_up_a_later_verify(
-    panel: ExplorerPanel, env_project_dir: Path, tmp_path: Path
-) -> None:
-    panel.set_env_project_dir(env_project_dir)
-    body = panel.personal_variants_section.body
-    assert panel.personal_variants_tree.isVisibleTo(body) is False
-
-    variants = tmp_path / "variants"
-    variants.mkdir()
-    env_file.update_env_value(env_project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
-    panel.refresh_personal_folders()
-
-    assert panel.personal_variants_tree.isVisibleTo(body) is True
-
-
-def test_set_env_project_dir_none_clears_both_sections(
-    panel: ExplorerPanel, env_project_dir: Path, tmp_path: Path
-) -> None:
-    variants = tmp_path / "variants"
-    variants.mkdir()
-    env_file.update_env_value(env_project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
-    panel.set_env_project_dir(env_project_dir)
-    body = panel.personal_variants_section.body
-    assert panel.personal_variants_tree.isVisibleTo(body) is True
-
-    panel.set_env_project_dir(None)
-
-    assert panel.personal_variants_placeholder.isVisibleTo(body) is True
-    assert panel.personal_variants_tree.isVisibleTo(body) is False
-
-
 # -- collapsible sections -------------------------------------------------------------------------
 
 
-def test_personal_sections_start_collapsed(panel: ExplorerPanel) -> None:
-    assert panel.personal_variants_section.expanded is False
-    assert panel.personal_maps_section.expanded is False
-    assert panel.personal_variants_section.body.isVisible() is False
+def test_dashboard_sections_start_expanded(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "we then want boxes like Personal Game Variants for Script and Settings" (open by
+    # default, unlike that now-removed section) -- Stats/Settings are both central to the active
+    # project, not secondary, so they start expanded rather than collapsed.
+    for section in (panel.stats_section, panel.settings_section):
+        assert section.expanded is True
 
 
-def test_clicking_a_section_header_expands_it(panel: ExplorerPanel, qtbot) -> None:
-    qtbot.mouseClick(panel.personal_variants_section._toggle, Qt.MouseButton.LeftButton)
+def test_clicking_a_section_header_collapses_and_expands_it(
+    panel: ExplorerPanel, qtbot, tmp_path: Path
+) -> None:
+    # A project must be open, or settings_section itself (not just its body) is hidden -- so
+    # body.isVisible() (which reflects the whole ancestor chain, not just the toggle's own state)
+    # would read False regardless of what's toggled here.
+    folder = tmp_path / "project"
+    folder.mkdir()
+    panel.open_project(folder)
 
-    assert panel.personal_variants_section.expanded is True
-    assert panel.personal_variants_section.body.isVisible() is True
+    qtbot.mouseClick(panel.settings_section._toggle, Qt.MouseButton.LeftButton)
+
+    assert panel.settings_section.expanded is False
+    assert panel.settings_section.body.isVisible() is False
+
+    qtbot.mouseClick(panel.settings_section._toggle, Qt.MouseButton.LeftButton)
+
+    assert panel.settings_section.expanded is True
+    assert panel.settings_section.body.isVisible() is True
 
 
 # -- clicking a file opens it ----------------------------------------------------------------------
@@ -392,10 +326,8 @@ def test_clicking_a_section_header_expands_it(panel: ExplorerPanel, qtbot) -> No
 def test_clicking_a_file_in_the_settings_section_via_the_real_signal_emits_file_activated(
     panel: ExplorerPanel, qtbot, tmp_path: Path
 ) -> None:
-    # Unlike test_clicking_a_file_in_the_script_section_emits_file_activated above (which drives
-    # the private handler directly), this fires the tree's own `clicked` signal -- confirming the
-    # Settings box really is wired up, the mirror image of the "personal folders are NOT wired up"
-    # tests below.
+    # Fires the tree's own `clicked` signal (rather than driving the private handler directly) --
+    # confirming the Settings box really is wired up.
     folder = tmp_path / "project"
     folder.mkdir()
     panel.open_project(folder)
@@ -417,11 +349,11 @@ def test_clicking_a_file_in_the_settings_section_via_the_real_signal_emits_file_
 
 def test_clicking_a_folder_does_not_emit_file_activated(panel: ExplorerPanel, qtbot, tmp_path: Path) -> None:
     folder = tmp_path / "project"
-    (folder / "script" / "subfolder").mkdir(parents=True)
+    (folder / "settings" / "subfolder").mkdir(parents=True)
     panel.open_project(folder)
-    model = panel._script_model
-    qtbot.waitUntil(lambda: model.rowCount(panel.script_tree.rootIndex()) > 0, timeout=2000)
-    dir_index = model.index(str(folder / "script" / "subfolder"))
+    model = panel._settings_model
+    qtbot.waitUntil(lambda: model.rowCount(panel.settings_tree.rootIndex()) > 0, timeout=2000)
+    dir_index = model.index(str(folder / "settings" / "subfolder"))
 
     activated: list[Path] = []
     panel.file_activated.connect(activated.append)
@@ -436,58 +368,7 @@ def test_an_invalid_index_does_not_emit_file_activated(panel: ExplorerPanel) -> 
     activated: list[Path] = []
     panel.file_activated.connect(activated.append)
 
-    panel._on_tree_clicked(panel._script_model, QModelIndex())
-
-    assert activated == []
-
-
-def test_clicking_a_file_in_a_personal_folder_section_does_not_open_it(
-    panel: ExplorerPanel, qtbot, tmp_path: Path
-) -> None:
-    # PROMPT.md: "disable clicking on personal game variants of personal map variants window for
-    # now" -- those are raw .bin/.mvar files, and opening one as text just raised an error. Clicks
-    # in either personal-folder tree are simply never wired to file_activated at all (see
-    # ExplorerPanel.__init__) -- this drives the real `clicked` signal, not the private handler
-    # directly, so it actually exercises that wiring (or lack of it) rather than just the handler.
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    (project_dir / ".env").write_text("", encoding="utf-8")
-    variants = tmp_path / "variants"
-    variants.mkdir()
-    file_path = variants / "Slayer.bin"
-    file_path.write_bytes(b"")
-    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_VARIANTS_KEY, str(variants))
-    panel.set_env_project_dir(project_dir)
-    model = panel._personal_variants_model
-    qtbot.waitUntil(lambda: model.rowCount(panel.personal_variants_tree.rootIndex()) > 0, timeout=2000)
-    file_index = model.index(str(file_path))
-
-    activated: list[Path] = []
-    panel.file_activated.connect(activated.append)
-    panel.personal_variants_tree.clicked.emit(file_index)
-
-    assert activated == []
-
-
-def test_clicking_a_file_in_the_personal_maps_section_also_does_not_open_it(
-    panel: ExplorerPanel, qtbot, tmp_path: Path
-) -> None:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    (project_dir / ".env").write_text("", encoding="utf-8")
-    maps = tmp_path / "maps"
-    maps.mkdir()
-    file_path = maps / "Forge.mvar"
-    file_path.write_bytes(b"")
-    env_file.update_env_value(project_dir / ".env", system_verify.PERSONAL_MAPS_KEY, str(maps))
-    panel.set_env_project_dir(project_dir)
-    model = panel._personal_maps_model
-    qtbot.waitUntil(lambda: model.rowCount(panel.personal_maps_tree.rootIndex()) > 0, timeout=2000)
-    file_index = model.index(str(file_path))
-
-    activated: list[Path] = []
-    panel.file_activated.connect(activated.append)
-    panel.personal_maps_tree.clicked.emit(file_index)
+    panel._on_tree_clicked(panel._settings_model, QModelIndex())
 
     assert activated == []
 
@@ -521,26 +402,48 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(panel: ExplorerPanel)
         app.setFont(original)
 
 
-def test_personal_section_headers_are_10_percent_smaller_than_the_panel_font(panel: ExplorerPanel) -> None:
+def test_section_headers_are_10_percent_smaller_than_the_panel_font(panel: ExplorerPanel) -> None:
     panel_size = panel.font().pointSizeF()
 
-    for section in (panel.personal_variants_section, panel.personal_maps_section):
+    for section in (panel.stats_section, panel.settings_section):
         assert section._toggle.font().pointSizeF() == pytest.approx(
             panel_size * ExplorerPanel.HEADER_TEXT_SCALE
         )
 
 
-# -- multi-project tabs ------------------------------------------------------------------------
+def test_settings_tree_font_is_10_percent_larger_than_the_panel_font(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "in the dashboard panel please make the font for the settings jsons 10% bigger,
+    # they look too small in the sidebar".
+    panel_size = panel.font().pointSizeF()
+
+    assert panel.settings_tree.font().pointSizeF() == pytest.approx(
+        panel_size * ExplorerPanel.SETTINGS_TREE_TEXT_SCALE
+    )
 
 
-def test_project_tabs_are_hidden_with_no_project(panel: ExplorerPanel) -> None:
-    assert panel.project_tabs.isVisible() is False
-    assert panel.project_tabs.count() == 0
+def test_settings_tree_font_tracks_a_later_app_font_change(panel: ExplorerPanel) -> None:
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 2)
+        app.setFont(bigger)
+
+        panel.refresh_font_scale()
+
+        expected = bigger.pointSizeF() * ExplorerPanel.TEXT_SCALE * ExplorerPanel.SETTINGS_TREE_TEXT_SCALE
+        assert panel.settings_tree.font().pointSizeF() == pytest.approx(expected)
+    finally:
+        app.setFont(original)
 
 
-def test_open_project_adds_a_tab_labeled_with_the_projects_own_title(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+# -- one project per window (PROMPT.md: "we now want it to be 1 per window") --------------------
+
+
+def test_open_project_becomes_the_current_folder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "abcd1234"
     (folder / "settings").mkdir(parents=True)
     (folder / "settings" / "settings.json").write_text(
@@ -549,44 +452,10 @@ def test_open_project_adds_a_tab_labeled_with_the_projects_own_title(
 
     panel.open_project(folder)
 
-    assert panel.project_tabs.isVisible() is True
-    assert panel.project_tabs.count() == 1
-    assert panel.project_tabs.tabText(0) == "Slayer Plus"
-    assert panel.open_projects == [folder]
     assert panel.current_folder == folder
 
 
-def test_open_project_tab_falls_back_to_the_folder_name_without_a_settings_json(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-
-    panel.open_project(folder)
-
-    assert panel.project_tabs.tabText(0) == "abcd1234"
-
-
-def test_opening_an_already_open_project_switches_instead_of_duplicating(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
-
-    panel.open_project(first)
-
-    assert panel.project_tabs.count() == 2
-    assert panel.open_projects == [first, second]
-    assert panel.current_folder == first
-
-
-def test_opening_a_second_project_adds_a_tab_without_closing_the_first(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+def test_opening_a_second_project_replaces_the_first(panel: ExplorerPanel, tmp_path: Path) -> None:
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
@@ -595,90 +464,63 @@ def test_opening_a_second_project_adds_a_tab_without_closing_the_first(
     panel.open_project(first)
     panel.open_project(second)
 
-    assert panel.project_tabs.count() == 2
-    assert panel.open_projects == [first, second]
     assert panel.current_folder == second
     assert Path(panel._settings_model.rootPath()) == second / "settings"
 
 
-def test_close_project_switches_to_a_remaining_tab(panel: ExplorerPanel, tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
+def test_opening_the_same_project_again_is_a_no_op(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    panel.open_project(folder)
+    seen: list[Path | None] = []
+    panel.active_project_changed.connect(seen.append)
 
-    panel.close_project(second)
+    panel.open_project(folder)
 
-    assert panel.open_projects == [first]
-    assert panel.current_folder == first
-    assert panel.project_tabs.isVisible() is True
+    assert seen == []  # no redundant re-activate
 
 
-def test_close_project_of_the_last_tab_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_close_project_of_a_folder_that_is_not_open_is_a_no_op(panel: ExplorerPanel, tmp_path: Path) -> None:
+    open_folder = tmp_path / "open"
+    open_folder.mkdir()
+    other_folder = tmp_path / "other"
+    other_folder.mkdir()
+    panel.open_project(open_folder)
+
+    panel.close_project(other_folder)
+
+    assert panel.current_folder == open_folder
+
+
+def test_close_project_of_the_open_project_restores_the_placeholder(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "abcd1234"
     folder.mkdir()
     panel.open_project(folder)
 
     panel.close_project(folder)
 
-    assert panel.open_projects == []
     assert panel.current_folder is None
     assert panel._no_project_label.isVisible() is True
-    assert panel.script_section.isVisible() is False
-    assert panel.project_tabs.isVisible() is False
+    assert panel.settings_section.isVisible() is False
 
 
-def test_close_active_project_closes_whichever_tab_is_current(panel: ExplorerPanel, tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
+def test_close_active_project_closes_the_open_project(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    panel.open_project(folder)
 
     panel.close_active_project()
 
-    assert panel.open_projects == [first]
-    assert panel.current_folder == first
+    assert panel.current_folder is None
 
 
 def test_close_active_project_with_no_project_open_is_a_no_op(panel: ExplorerPanel) -> None:
     panel.close_active_project()  # should not raise
 
-    assert panel.open_projects == []
+    assert panel.current_folder is None
 
 
-def test_closing_a_background_tab_does_not_change_the_active_project(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
-    first = tmp_path / "first"
-    first.mkdir()
-    second = tmp_path / "second"
-    second.mkdir()
-    panel.open_project(first)
-    panel.open_project(second)
-
-    panel.close_project(first)
-
-    assert panel.open_projects == [second]
-    assert panel.current_folder == second
-
-
-def test_tab_close_button_closes_that_projects_tab(panel: ExplorerPanel, tmp_path: Path) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-    panel.open_project(folder)
-
-    # Drives the tab bar's own close-request signal, not close_project() directly -- confirms the
-    # close (X) button is actually wired up.
-    panel.project_tabs.tabCloseRequested.emit(0)
-
-    assert panel.open_projects == []
-
-
-def test_active_project_changed_fires_on_open_switch_and_close(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_active_project_changed_fires_on_open_and_close(panel: ExplorerPanel, tmp_path: Path) -> None:
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
@@ -687,65 +529,47 @@ def test_active_project_changed_fires_on_open_switch_and_close(panel: ExplorerPa
     panel.active_project_changed.connect(seen.append)
 
     panel.open_project(first)
-    panel.open_project(second)
-    panel.open_project(first)  # switch back -- "first" is active again
-    panel.close_project(first)  # closing the *active* tab -- "second" becomes active
-    panel.close_project(second)  # last one -- back to no project
+    panel.open_project(second)  # replaces "first", still fires
+    panel.close_project(second)
 
-    assert seen == [first, second, first, second, None]
+    assert seen == [first, second, None]
 
 
-def test_open_projects_changed_fires_on_open_and_close_but_not_on_switch(
-    panel: ExplorerPanel, tmp_path: Path
-) -> None:
+def test_opening_a_second_project_closes_the_first(panel: ExplorerPanel, tmp_path: Path) -> None:
+    # With only one project open at a time, replacing it *is* closing it -- MainWindow relies on
+    # project_closed firing here to terminate the outgoing project's own RVT process.
     first = tmp_path / "first"
     first.mkdir()
     second = tmp_path / "second"
     second.mkdir()
-    seen: list[list[Path]] = []
-    panel.open_projects_changed.connect(seen.append)
-
     panel.open_project(first)
+    seen: list[Path] = []
+    panel.project_closed.connect(seen.append)
+
     panel.open_project(second)
-    panel.open_project(first)  # already open -- just switches, no set change
-    panel.close_project(second)
 
-    assert seen == [[first], [first, second], [first]]
+    assert seen == [first]
 
 
-# -- folder subheading / personal-section placement ----------------------------------------------
+def test_project_closed_fires_only_for_the_currently_open_project(panel: ExplorerPanel, tmp_path: Path) -> None:
+    open_folder = tmp_path / "open"
+    open_folder.mkdir()
+    other_folder = tmp_path / "other"
+    other_folder.mkdir()
+    panel.open_project(open_folder)
+    seen: list[Path] = []
+    panel.project_closed.connect(seen.append)
+
+    panel.close_project(other_folder)  # not open -- no-op, no signal
+    panel.close_project(open_folder)
+
+    assert seen == [open_folder]
 
 
-def test_folder_subheading_is_hidden_with_no_project(panel: ExplorerPanel) -> None:
-    assert panel.folder_subheading.isVisible() is False
-    assert panel.folder_subheading.text() == ""
-
-
-def test_folder_subheading_shows_the_folders_own_name(panel: ExplorerPanel, tmp_path: Path) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-
-    panel.open_project(folder)
-
-    # The folder's own id, not the (human-typed) title shown in the tab itself.
-    assert panel.folder_subheading.text() == "abcd1234"
-    assert panel.folder_subheading.isVisible() is True
-
-
-def test_folder_subheading_hides_again_once_the_project_closes(panel: ExplorerPanel, tmp_path: Path) -> None:
-    folder = tmp_path / "abcd1234"
-    folder.mkdir()
-    panel.open_project(folder)
-
-    panel.close_project(folder)
-
-    assert panel.folder_subheading.isVisible() is False
-    assert panel.folder_subheading.text() == ""
+# -- no-project spacer -----------------------------------------------------------------------
 
 
 def test_no_project_spacer_is_visible_only_with_no_project_open(panel: ExplorerPanel, tmp_path: Path) -> None:
-    # PROMPT.md: "when no project is open, the Personal Game Variants and Personal Map Variants
-    # should appear at the bottom of the file explorer panel".
     assert panel._no_project_spacer.isVisible() is True
 
     folder = tmp_path / "abcd1234"
@@ -755,3 +579,102 @@ def test_no_project_spacer_is_visible_only_with_no_project_open(panel: ExplorerP
 
     panel.close_project(folder)
     assert panel._no_project_spacer.isVisible() is True
+
+
+# -- Export/View Output.txt button row (PROMPT.md: "Underneath project tabs please add the
+# following buttons: Export RVT File (on the left) and on the right: View Output.txt") -----------
+
+
+def test_button_row_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
+    assert panel.button_row.isVisible() is False
+
+
+def test_button_row_shows_once_a_project_opens_and_hides_once_it_closes(
+    panel: ExplorerPanel, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    panel.open_project(folder)
+    assert panel.button_row.isVisible() is True
+
+    panel.close_project(folder)
+    assert panel.button_row.isVisible() is False
+
+
+def test_export_button_emits_export_requested(panel: ExplorerPanel, qtbot) -> None:
+    seen = []
+    panel.export_requested.connect(lambda: seen.append(True))
+
+    qtbot.mouseClick(panel.export_button, Qt.MouseButton.LeftButton)
+
+    assert seen == [True]
+
+
+def test_view_output_button_emits_view_output_requested(panel: ExplorerPanel, qtbot) -> None:
+    seen = []
+    panel.view_output_requested.connect(lambda: seen.append(True))
+
+    qtbot.mouseClick(panel.view_output_button, Qt.MouseButton.LeftButton)
+
+    assert seen == [True]
+
+
+def test_export_and_view_output_buttons_each_have_their_own_background_and_no_shared_style(
+    panel: ExplorerPanel,
+) -> None:
+    # PROMPT.md: "please remove the bubble connecting the project dashboard buttons so they do
+    # not appear connected, and give them a background colour to make it clear they are buttons".
+    for button in (panel.export_button, panel.view_output_button):
+        sheet = button.styleSheet()
+        assert "background-color" in sheet
+        assert button.autoRaise() is False
+    # Each button's stylesheet is its own -- neither is empty/borrowed from a shared container
+    # style that could read as one connected control.
+    assert panel.export_button.styleSheet() == panel.view_output_button.styleSheet()
+    assert panel.button_row.styleSheet() == ""
+
+
+def test_dashboard_buttons_hover_with_the_theme_highlight_not_the_unthemed_light_role(
+    panel: ExplorerPanel,
+) -> None:
+    # None of the dark/Whiley themes' own JSON sets a "light" QPalette role, so a hover styled
+    # with `palette(light)` fell back to Qt's own unrelated (plain white) default -- unreadable
+    # against those themes' own light button text. `palette(highlight)` is always themed.
+    sheet = panel.export_button.styleSheet()
+    assert "palette(light)" not in sheet
+    assert "QToolButton:hover { background-color: palette(highlight)" in sheet
+
+
+# -- Documentation section (PROMPT.md: "add a section above Settings for Documentation") --------
+
+
+def test_documentation_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
+    assert panel.documentation_section.isVisible() is False
+
+
+def test_documentation_section_shows_once_a_project_opens(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    panel.open_project(folder)
+
+    assert panel.documentation_section.isVisible() is True
+
+
+def test_documentation_section_sits_above_settings(panel: ExplorerPanel) -> None:
+    layout = panel.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    assert widgets.index(panel.documentation_section) < widgets.index(panel.settings_section)
+
+
+def test_clicking_notes_emits_notes_requested(panel: ExplorerPanel, qtbot) -> None:
+    with qtbot.waitSignal(panel.notes_requested, timeout=1000):
+        panel.notes_button.click()
+
+
+def test_documentation_button_is_a_disabled_stub(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "2nd button should be stubbed and lablled 'Documentation' -- later we will
+    # implement better doc practice and articles here".
+    assert panel.documentation_button.text() == "Documentation"
+    assert panel.documentation_button.isEnabled() is False

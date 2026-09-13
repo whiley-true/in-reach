@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt
+from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QMouseEvent, QPaintEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -95,11 +95,23 @@ def _on_editor_save_requested(widget: TextEditorWidget) -> None:
         pane._save_tab(index)
 
 
+def _on_editor_cursor_changed(widget: TextEditorWidget) -> None:
+    # Looked up dynamically via _owner_pane, same reasoning as _on_editor_modified above -- and
+    # only re-emitted while widget is actually the pane's own visible tab, so a background tab's
+    # cursor (e.g. one just reloaded off disk) never overwrites the status bar for whatever tab
+    # the user is actually looking at.
+    pane = getattr(widget, "_owner_pane", None)
+    if pane is not None and widget is pane.currentWidget():
+        pane.cursor_info_changed.emit()
+
+
 def _connect_editor_signals(editor: TextEditorWidget) -> None:
     editor.document().modificationChanged.connect(
         lambda modified, w=editor: _on_editor_modified(w, modified)
     )
     editor.save_requested.connect(lambda w=editor: _on_editor_save_requested(w))
+    editor.cursorPositionChanged.connect(lambda w=editor: _on_editor_cursor_changed(w))
+    editor.selectionChanged.connect(lambda w=editor: _on_editor_cursor_changed(w))
 
 
 class _DragTabBar(QTabBar):
@@ -153,9 +165,9 @@ class _DragTabBar(QTabBar):
         drag.exec(Qt.DropAction.MoveAction)
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        """Draws every tab exactly as the base implementation would, then re-draws just the dirty
-        ones' own shape+label a second time in italic (PROMPT.md: "if a file has unsaved edits, its
-        tab text should be in italics, and become not italic when saved").
+        """Draws every tab itself (shape, then label) exactly once each, in italic for a dirty tab
+        and upright otherwise (PROMPT.md: "if a file has unsaved edits, its tab text should be in
+        italics, and become not italic when saved").
 
         QTabBar has no per-tab font setter of its own (unlike :meth:`setTabTextColor`); the two
         approaches that look obvious both turned out to be unsafe in practice against this app's
@@ -164,26 +176,25 @@ class _DragTabBar(QTabBar):
         crashes outright, and calling :meth:`QWidget.setFont` on the bar itself from inside
         ``initStyleOption()`` re-enters that same override through ``QStyleSheetStyle``'s own
         style-invalidation machinery, recursing until the stack overflows. Changing the *painter's*
-        font instead (a `QStylePainter`, only for this second, dirty-tabs-only pass) never touches
-        the widget's own styled properties at all, so neither failure mode applies -- redrawing the
-        shape first (not just the label) is what keeps the swapped-in italic text from visibly
-        double-printing over the upright glyphs the first, normal pass already painted underneath
-        it, since italic metrics are rarely pixel-identical to upright ones.
+        font instead never touches the widget's own styled properties at all, so neither failure
+        mode applies.
+
+        This used to let the base implementation paint every tab upright first, then redraw just
+        the dirty ones' own shape+label a second time in italic on top -- which visibly
+        double-printed the label (upright glyphs from the first pass showing through the italic
+        ones from the second, since italic metrics are rarely pixel-identical to upright ones).
+        Painting each tab exactly once, choosing its font up front, avoids that entirely.
         """
-        super().paintEvent(event)
-        painter: QStylePainter | None = None
+        painter = QStylePainter(self)
+        base_font = QFont(painter.font())
+        italic_font = QFont(base_font)
+        italic_font.setItalic(True)
         for index in range(self.count()):
-            if not _is_modified(self._pane.widget(index)):
-                continue
-            if painter is None:
-                painter = QStylePainter(self)
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
             painter.save()
-            font = QFont(painter.font())
-            font.setItalic(True)
-            painter.setFont(font)
+            painter.setFont(italic_font if _is_modified(self._pane.widget(index)) else base_font)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option)
             painter.restore()
 
@@ -193,12 +204,19 @@ class TabPane(QTabWidget):
     dragged in from a sibling pane, with a corner widget offering both a horizontal and a vertical
     split button."""
 
+    #: Emitted whenever the *currently visible* tab's own cursor position/selection changes, or the
+    #: current tab itself switches -- what the bottom status bar's Ln/Col/Spaces segments (PROMPT.md:
+    #: Quick Access Bar work) key off of. Never fired for a background tab.
+    cursor_info_changed = pyqtSignal()
+
     def __init__(self, area: "MainPanelArea", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._area = area
         self.group: "_PaneGroup | None" = None  # set by _PaneGroup.add_pane()
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
         self._tab_state: dict[QWidget, _TabState] = {}
+        self.currentChanged.connect(lambda _index: self.cursor_info_changed.emit())
+        self.currentChanged.connect(lambda _index: self._refresh_preview_button())
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
         self.setTabsClosable(True)
@@ -246,10 +264,23 @@ class TabPane(QTabWidget):
         self.split_button.setAutoRaise(True)
         self.split_button.clicked.connect(lambda: self._area.split_from(self))
 
+        # PROMPT.md (Notes-as-Markdown): "magnif[y]ing glass icon should appear next to the split
+        # panel icons" -- only while the active tab is an editable Markdown one (see
+        # :meth:`_refresh_preview_button`), so it doesn't clutter every other file type's tab bar.
+        self.preview_button = QToolButton()
+        self.preview_button.setIcon(icons.icon("search", color=_SPLIT_ICON_COLOR, size=icon_size))
+        self.preview_button.setIconSize(QSize(icon_size, icon_size))
+        self.preview_button.setFixedSize(button_size, button_size)
+        self.preview_button.setToolTip("Split panel right with a live Markdown preview")
+        self.preview_button.setAutoRaise(True)
+        self.preview_button.clicked.connect(lambda: self._area.preview_split_from(self))
+        self.preview_button.hide()
+
         corner = QWidget()
         corner_layout = QHBoxLayout(corner)
         corner_layout.setContentsMargins(0, 0, 0, 0)
         corner_layout.setSpacing(0)
+        corner_layout.addWidget(self.preview_button)
         corner_layout.addWidget(self.vsplit_button)
         corner_layout.addWidget(self.split_button)
         self.setCornerWidget(corner, Qt.Corner.TopRightCorner)
@@ -263,6 +294,18 @@ class TabPane(QTabWidget):
 
     def _tab_state_for(self, widget: QWidget) -> _TabState:
         return self._tab_state.setdefault(widget, _TabState())
+
+    def _refresh_preview_button(self) -> None:
+        """Shows :attr:`preview_button` only while the active tab is an editable Markdown one --
+        a :class:`~in_reach.ide.editor.TextEditorWidget` opened via ``open_file(...,
+        editable_markdown=True)``, identifiable after the fact by its own ``.md`` path (a plain
+        :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` tab, opened for every other
+        ``.md`` file, is never a ``TextEditorWidget`` in the first place -- see ``open_file``)."""
+        widget = self.currentWidget()
+        is_editable_markdown = (
+            isinstance(widget, TextEditorWidget) and widget.path is not None and widget.path.suffix.lower() == ".md"
+        )
+        self.preview_button.setVisible(is_editable_markdown)
 
     def _update_close_icon(self, index: int) -> None:
         button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
@@ -390,13 +433,40 @@ class TabPane(QTabWidget):
             if _is_modified(widget) and self._tab_state_for(widget).path is not None:
                 self._save_tab(index)
 
-    def open_file(self, path: Path) -> None:
+    def open_file(self, path: Path, *, force_reload: bool = False, editable_markdown: bool = False) -> None:
         """"Open File" (the File menu, and clicking a file in the Explorer panel) -- adds ``path``
         as a new tab, reading its content in. Switches to the existing tab instead of duplicating
-        it if ``path`` is already open in this pane."""
+        it if ``path`` is already open in this pane.
+
+        PROMPT.md: "with the exception of pinned tabs and the welcome page tab: clicking on a file
+        that is not open should only open a new tab if the present tab has unsaved changes[;]
+        otherwise the present tab should change to the selected file (this is to prevent too many
+        tabs from spawning)" -- when ``path`` isn't already open anywhere in this pane, the current
+        tab's own content is silently replaced instead of adding a new tab alongside it, unless
+        that current tab is pinned, is the Welcome tab, or has unsaved changes (see
+        :meth:`_reusable_tab_index`).
+
+        Args:
+            path: The file to open.
+            force_reload: Re-reads ``path`` from disk and refreshes the already-open tab's content
+                even if it's already open (the default, ``False``, just switches to it, leaving
+                whatever was loaded when it was first opened) -- for a file that's meant to reflect
+                its current on-disk content every time it's (re-)opened, e.g. the Dashboard's own
+                "View Output.txt" button, which regenerates the file it opens on every click (see
+                :meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`).
+            editable_markdown: Opens a ``.md`` file as a real, editable
+                :class:`~in_reach.ide.editor.TextEditorWidget` instead of the usual read-only
+                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, the
+                Documentation section's "Notes" button when Notes format is Markdown: "editor
+                should be .md" -- with the magnifying-glass split-to-live-preview icon, see
+                :meth:`_refresh_preview_button`, this is where an editable Markdown source and its
+                live rendered preview both come from). Ignored for any other suffix.
+        """
         for index in range(self.count()):
             if self._tab_state_for(self.widget(index)).path == path:
                 self.setCurrentIndex(index)
+                if force_reload:
+                    self._reload_tab(index)
                 return
         try:
             text = path.read_text(encoding="utf-8")
@@ -405,11 +475,12 @@ class TabPane(QTabWidget):
             return
 
         # PROMPT.md: "please make .md be preview when opened" -- a rendered, read-only view
-        # instead of the plain text editor every other file type gets here.
-        if path.suffix.lower() == ".md":
+        # instead of the plain text editor every other file type gets here, unless the caller
+        # explicitly asked for an editable one (see editable_markdown's own docstring above).
+        if path.suffix.lower() == ".md" and not editable_markdown:
             widget: QWidget = MarkdownPreviewWidget(path=path)
             widget.setMarkdown(text)
-            new_index = self.addTab(widget, path.name)
+            tab_icon = None
         else:
             editor = TextEditorWidget(path=path)
             editor.setPlainText(text)
@@ -423,13 +494,60 @@ class TabPane(QTabWidget):
             # PROMPT.md: "they have a padlock symbol in the tab" -- a generated file's read-only
             # status never changes for the tab's own lifetime, unlike the dirty-state icon on its
             # close button, so this is set once here rather than needing its own refresh hook.
-            if generated:
-                new_index = self.addTab(editor, icons.lock_icon(), path.name)
-            else:
-                new_index = self.addTab(editor, path.name)
+            tab_icon = icons.lock_icon() if generated else None
             widget = editor
+
+        reuse_index = self._reusable_tab_index()
+        if reuse_index is not None:
+            old_widget = self.widget(reuse_index)
+            self.removeTab(reuse_index)
+            self._tab_state.pop(old_widget, None)
+            old_widget.deleteLater()
+            if tab_icon is not None:
+                new_index = self.insertTab(reuse_index, widget, tab_icon, path.name)
+            else:
+                new_index = self.insertTab(reuse_index, widget, path.name)
+        elif tab_icon is not None:
+            new_index = self.addTab(widget, tab_icon, path.name)
+        else:
+            new_index = self.addTab(widget, path.name)
         self._track_tab(new_index, widget, state=_TabState(path=path))
         self.setCurrentIndex(new_index)
+
+    def _reusable_tab_index(self) -> int | None:
+        """The current tab's index, if it's safe for :meth:`open_file` to silently replace with a
+        newly-opened file instead of adding a new tab alongside it -- never the Welcome tab or a
+        pinned tab, and never a tab with unsaved changes (PROMPT.md, see :meth:`open_file`'s own
+        docstring)."""
+        if self.count() == 0:
+            return None
+        index = self.currentIndex()
+        widget = self.widget(index)
+        if isinstance(widget, WelcomeTab):
+            return None
+        if self._tab_state_for(widget).pinned:
+            return None
+        if _is_modified(widget):
+            return None
+        return index
+
+    def _reload_tab(self, index: int) -> None:
+        """Re-reads the tab at ``index`` from disk and refreshes its content in place -- see
+        :meth:`open_file`'s own ``force_reload`` docstring. A no-op for a tab with no path, or one
+        whose file can no longer be read."""
+        widget = self.widget(index)
+        path = self._tab_state_for(widget).path
+        if path is None:
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        if isinstance(widget, TextEditorWidget):
+            widget.setPlainText(text)
+            widget.document().setModified(False)
+        elif isinstance(widget, MarkdownPreviewWidget):
+            widget.setMarkdown(text)
 
     def open_file_at_line(self, path: Path, line_number: int) -> None:
         """"Jump to this result" -- the Search panel's own way into a file: :meth:`open_file`
@@ -738,6 +856,73 @@ class MainPanelArea(QWidget):
         for pane in self.panes:
             pane.save_all()
 
+    def _open_tab_locations(self, paths: set[Path]) -> list[tuple[TabPane, int]]:
+        return [
+            (pane, index)
+            for pane in self.panes
+            for index in range(pane.count())
+            if pane._tab_state_for(pane.widget(index)).path in paths
+        ]
+
+    def save_paths(self, paths: list[Path]) -> None:
+        """Saves every already-open tab for one of ``paths`` that has unsaved edits -- used by
+        :meth:`~in_reach.ide.main_window.MainWindow._warn_unsaved_settings_before_rvt`'s own "Save
+        and Continue" button (PROMPT.md) to clear exactly the dirty settings/script_settings/
+        strings.json tabs blocking an RVT launch, without touching unrelated dirty tabs elsewhere."""
+        for pane, index in self._open_tab_locations(set(paths)):
+            if _is_modified(pane.widget(index)):
+                pane._save_tab(index)
+
+    def dirty_tab_names(self, paths: list[Path]) -> list[str]:
+        """The (sorted, deduplicated) file names of any already-open tab for one of ``paths`` that
+        has unsaved edits -- PROMPT.md: RVT resyncing a project's own settings/script_settings/
+        strings.json "with unsaved changes should pop up showing all unsaved changes[.]" Used by
+        :meth:`~in_reach.ide.main_window.MainWindow._on_watched_bin_changed` to decide whether that
+        resync needs confirming first."""
+        names = {
+            pane._tab_state_for(pane.widget(index)).path.name
+            for pane, index in self._open_tab_locations(set(paths))
+            if _is_modified(pane.widget(index))
+        }
+        return sorted(names)
+
+    def reload_open_tabs(self, paths: list[Path]) -> None:
+        """Re-reads every already-open tab for one of ``paths`` from disk in place -- PROMPT.md:
+        RVT resyncing a project's own settings/script_settings/strings.json "without saved changes
+        should immediately update in place." Every occurrence across every pane is reloaded (not
+        just the first), so a duplicate opened via a pane split stays in sync too."""
+        for pane, index in self._open_tab_locations(set(paths)):
+            pane._reload_tab(index)
+
+    def _open_tab_locations_under(self, folder: Path) -> list[tuple[TabPane, int]]:
+        return [
+            (pane, index)
+            for pane in self.panes
+            for index in range(pane.count())
+            if (path := pane._tab_state_for(pane.widget(index)).path) is not None and folder in path.parents
+        ]
+
+    def dirty_tab_names_under(self, folder: Path) -> list[str]:
+        """The (sorted, deduplicated) file names of any already-open tab anywhere under ``folder``
+        that has unsaved edits -- used by :meth:`~in_reach.ide.main_window.MainWindow.
+        vcs_switch_branch` (PROMPT.md: "it should be possible ... to change and switch
+        versions/branches") to warn before a branch switch overwrites files on disk out from under
+        an open, unsaved tab."""
+        names = {
+            pane._tab_state_for(pane.widget(index)).path.name
+            for pane, index in self._open_tab_locations_under(folder)
+            if _is_modified(pane.widget(index))
+        }
+        return sorted(names)
+
+    def reload_open_tabs_under(self, folder: Path) -> None:
+        """Re-reads every already-open tab anywhere under ``folder`` from disk in place -- run
+        after a VCS branch switch (PROMPT.md) rewrites the project's own files on disk, so an
+        already-open, already-clean tab reflects the newly checked-out branch instead of silently
+        showing stale content until the user happens to reopen it."""
+        for pane, index in self._open_tab_locations_under(folder):
+            pane._reload_tab(index)
+
     def _new_pane(self) -> TabPane:
         return TabPane(self)
 
@@ -832,6 +1017,32 @@ class MainPanelArea(QWidget):
         self._duplicate_current_tab(source, new_pane)
         group.add_pane(new_pane)
         self._update_split_buttons()
+
+    def preview_split_from(self, source: TabPane) -> None:
+        """The magnifying-glass icon's own split (PROMPT.md, Notes-as-Markdown: "editor should
+        split to show live .md preview on the right hand side") -- a horizontal split like
+        :meth:`split_from`, but seeded with a *live* :class:`~in_reach.ide.markdown_preview.
+        MarkdownPreviewWidget` following ``source``'s current tab (see :meth:`MarkdownPreviewWidget.
+        follow_live`) instead of a plain duplicate. A no-op if ``source``'s current tab isn't an
+        editable Markdown one, or the split cap is already reached."""
+        index = source.currentIndex()
+        widget = source.widget(index) if index >= 0 else None
+        path = source._tab_state_for(widget).path if widget is not None else None
+        is_editable_markdown = (
+            isinstance(widget, TextEditorWidget) and path is not None and path.suffix.lower() == ".md"
+        )
+        if not is_editable_markdown or self.split_count >= _MAX_H_SPLITS:
+            return
+        label = source.tabText(index)
+        preview = MarkdownPreviewWidget(path=path)
+        preview.follow_live(widget)
+
+        new_group = self._new_group()
+        new_pane = self._new_pane()
+        new_index = new_pane.addTab(preview, f"Preview: {label}")
+        new_pane._track_tab(new_index, preview, state=_TabState(path=path))
+        new_group.add_pane(new_pane)
+        self._add_group(new_group)
 
     def new_tab_in(self, pane: TabPane) -> None:
         """Adds a fresh "Untitled-N.txt" text-editor tab to ``pane`` -- called when a click lands

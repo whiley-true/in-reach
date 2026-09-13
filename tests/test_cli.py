@@ -125,6 +125,38 @@ def test_run_regenerates_missing_gitignore(
     assert gitignore_path.read_text() == "*\n"
 
 
+def test_run_writes_a_stub_readme_into_the_in_reach_folder(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "please move the generated README.md file to be in generated .in-reach folder".
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
+
+    result = runner.invoke(main, ["run"])
+
+    assert result.exit_code == 0
+    readme_path = project.get_project_dir(tmp_path) / "README.md"
+    assert readme_path.is_file()
+    assert not (tmp_path / "README.md").exists()  # not at the repo root anymore
+
+
+def test_run_leaves_an_existing_readme_untouched(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("in_reach.cli.sys.platform", "win32")
+    first = runner.invoke(main, ["run"])
+    assert first.exit_code == 0
+
+    readme_path = project.get_project_dir(tmp_path) / "README.md"
+    readme_path.write_text("my own project notes\n", encoding="utf-8")
+
+    second = runner.invoke(main, ["run"])
+
+    assert second.exit_code == 0
+    assert readme_path.read_text(encoding="utf-8") == "my own project notes\n"
+
+
 def test_cfg_prints_placeholder_menu(runner: CliRunner) -> None:
     result = runner.invoke(main, ["cfg"])
 

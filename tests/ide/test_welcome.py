@@ -413,6 +413,40 @@ def test_new_project_dialog_title_help_stays_visible_and_only_its_emphasis_chang
     assert dialog.title_help_label.isEnabled() is True
 
 
+def test_new_project_dialog_field_labels_are_forced_white_on_a_dark_theme(qtbot) -> None:
+    # dark_dark_text.png: the Title/Description field labels read low-contrast on Dark/Whiley.
+    from PyQt6.QtWidgets import QApplication
+
+    from in_reach.ide import theme as theme_module
+
+    app = QApplication.instance()
+    original_palette = app.palette()
+    try:
+        theme_module.apply_theme(app, "Dark")
+        dialog = NewProjectDialog()
+        qtbot.addWidget(dialog)
+        assert "newProjectFieldLabel" in dialog.styleSheet()
+        assert "#ffffff" in dialog.styleSheet()
+    finally:
+        app.setPalette(original_palette)
+
+
+def test_new_project_dialog_field_labels_are_untouched_on_the_light_theme(qtbot) -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    from in_reach.ide import theme as theme_module
+
+    app = QApplication.instance()
+    original_palette = app.palette()
+    try:
+        theme_module.apply_theme(app, "Light")
+        dialog = NewProjectDialog()
+        qtbot.addWidget(dialog)
+        assert dialog.styleSheet() == ""
+    finally:
+        app.setPalette(original_palette)
+
+
 def test_new_project_dialog_hides_the_variant_chooser_for_a_blank_project(qtbot) -> None:
     dialog = NewProjectDialog()
     qtbot.addWidget(dialog)
