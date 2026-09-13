@@ -320,11 +320,15 @@ def test_sidebar_max_width_is_a_quarter_of_the_screen(window: MainWindow) -> Non
     # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width",
     # later revised to 1/4 -- checked against the same constant main_window.py's own
     # _build_primary_sidebar() divides by, not a hardcoded fraction, so a later revision to that
-    # constant doesn't leave this test silently checking the wrong ratio.
-    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION
+    # constant doesn't leave this test silently checking the wrong ratio. Floored at
+    # _SIDEBAR_MIN_WIDTH: a small enough screen (a headless CI display, e.g.) would otherwise let
+    # the fraction-of-screen ceiling undercut the fixed minimum width, a self-contradictory
+    # min > max on the same widget -- see _build_primary_sidebar()'s own comment.
+    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION, _SIDEBAR_MIN_WIDTH
 
     screen = QApplication.primaryScreen()
-    assert window.primary_sidebar.maximumWidth() == screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION
+    expected = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+    assert window.primary_sidebar.maximumWidth() == expected
 
 
 def test_dragging_the_sidebar_wider_than_the_max_width_is_clamped(window: MainWindow) -> None:

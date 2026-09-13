@@ -66,4 +66,7 @@ def test_is_mcc_running_never_shows_a_console_window(monkeypatch: pytest.MonkeyP
 
     halo_status.is_mcc_running()
 
-    assert captured.get("creationflags") == subprocess.CREATE_NO_WINDOW
+    # getattr(..., 0): CREATE_NO_WINDOW only exists on subprocess for an actual Windows build --
+    # this test forces the win32 code path on any platform (see the sys.platform monkeypatch
+    # above), so a bare attribute reference here would crash the same way the old source did.
+    assert captured.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
