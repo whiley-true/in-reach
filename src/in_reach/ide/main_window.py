@@ -73,11 +73,16 @@ _HALO_STATUS_POLL_MS = 500
 #: narrow window has to shrink something else before this text does -- and once more to 300
 #: (PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
 #: display on the same line") for the Dashboard's Stats box, whose "Triggers: N   Conditions: N
-#: Actions: N" line is wider than any section header ever was, and bumped once more to 340 when
+#: Actions: N" line is wider than any section header ever was, bumped once more to 340 when
 #: DEFAULT_ZOOM went from 122% to 134% (PROMPT.md: "increase the default ui scale by 10%") widened
-#: that same line's own sizeHint() past the old 300 floor (see test_ide_smoke.py's own
-#: width-vs-sizeHint regression guard for the margin these were picked against).
-_SIDEBAR_MIN_WIDTH = 340
+#: that same line's own sizeHint() past the old 300 floor, and bumped again to 420 once CI actually
+#: ran the width-vs-sizeHint regression guard (see test_ide_smoke.py) on Linux: that same line's
+#: sizeHint() there measured 360px against the *same* zoomed point size -- a platform default-font
+#: difference (Linux's own default sans-serif renders measurably wider per character than Windows'
+#: Segoe UI at an equal point size), not anything zoom-related on its own. 420 leaves real headroom
+#: over that 360px measurement rather than just barely clearing it, so a slightly different distro
+#: default font doesn't immediately reopen this same regression.
+_SIDEBAR_MIN_WIDTH = 420
 
 #: PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width" --
 #: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
@@ -633,7 +638,12 @@ class MainWindow(QWidget):
             # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen
             # width" -- QSplitter enforces a pane's own setMaximumWidth() as a hard ceiling on how
             # far the user can drag its handle, same as setMinimumWidth() already is for the floor.
-            sidebar.setMaximumWidth(screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+            # Floored at _SIDEBAR_MIN_WIDTH itself -- a small enough screen (a CI box's own
+            # headless/offscreen virtual display, e.g.) can otherwise put the fraction-of-screen
+            # ceiling *below* the fixed floor above, a self-contradictory min > max that leaves
+            # Qt's own constraint solver to pick one arbitrarily rather than actually honoring both.
+            max_width = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+            sidebar.setMaximumWidth(max_width)
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setObjectName("primarySidebar")
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)

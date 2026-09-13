@@ -39,7 +39,12 @@ def is_mcc_running() -> bool:
             text=True,
             timeout=3,
             check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            # CREATE_NO_WINDOW only exists on subprocess when Python itself is built for Windows --
+            # this module is Windows-only in practice (the sys.platform guard above), but its own
+            # tests force this branch on any platform to exercise it, so this can't be a bare
+            # attribute access without crashing there. 0 (no special creation flags) on a platform
+            # that never defines the constant in the first place is a no-op, not a wrong answer.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
         return False
