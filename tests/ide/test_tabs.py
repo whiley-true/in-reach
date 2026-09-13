@@ -801,6 +801,101 @@ def test_splitting_a_pane_with_a_markdown_preview_duplicates_it(window: MainWind
     assert new_pane._tab_state_for(duplicate).path == source
 
 
+# -- editable Markdown + live preview split (PROMPT.md, Notes-as-Markdown) ----------------------
+
+
+def test_open_file_editable_markdown_opens_a_real_text_editor(window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.editor import TextEditorWidget
+
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+
+    pane.open_file(source, editable_markdown=True)
+
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, TextEditorWidget)
+    assert widget.isReadOnly() is False
+    assert widget.toPlainText() == "# Heading\n"
+
+
+def test_preview_button_only_shows_for_the_active_editable_markdown_tab(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    txt_source = tmp_path / "notes.txt"
+    txt_source.write_text("hi\n", encoding="utf-8")
+    md_source = tmp_path / "Notes.md"
+    md_source.write_text("hi\n", encoding="utf-8")
+
+    pane.open_file(txt_source)
+    assert pane.preview_button.isVisible() is False
+
+    pane.open_file(md_source, editable_markdown=True)
+    assert pane.preview_button.isVisible() is True
+
+    pane.setCurrentIndex(0)  # back to the .txt tab
+    assert pane.preview_button.isVisible() is False
+
+
+def test_preview_button_does_not_show_for_the_read_only_markdown_preview(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "README.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+
+    pane.open_file(source)  # editable_markdown defaults to False
+
+    assert pane.preview_button.isVisible() is False
+
+
+def test_preview_split_from_shows_a_live_markdown_preview_beside_the_editor(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.markdown_preview import MarkdownPreviewWidget
+
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane.open_file(source, editable_markdown=True)
+
+    pane.preview_button.click()
+
+    new_pane = window.main_panel.panes[-1]
+    preview = new_pane.widget(new_pane.currentIndex())
+    assert isinstance(preview, MarkdownPreviewWidget)
+    assert "Heading" in preview.toPlainText()
+
+
+def test_preview_split_from_stays_live_as_the_editor_changes(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    pane.open_file(source, editable_markdown=True)
+    editor = pane.widget(pane.currentIndex())
+
+    pane.preview_button.click()
+    new_pane = window.main_panel.panes[-1]
+    preview = new_pane.widget(new_pane.currentIndex())
+
+    editor.setPlainText("# Updated Heading\n")
+
+    assert "Updated Heading" in preview.toPlainText()
+
+
+def test_preview_split_from_is_a_no_op_for_a_non_markdown_tab(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "notes.txt"
+    source.write_text("hi\n", encoding="utf-8")
+    pane.open_file(source)
+
+    before = window.main_panel.split_count
+    window.main_panel.preview_split_from(pane)
+
+    assert window.main_panel.split_count == before
+
+
 def test_splitting_a_pane_carries_the_read_only_state_and_padlock_icon_over(
     window: MainWindow, tmp_path: Path
 ) -> None:

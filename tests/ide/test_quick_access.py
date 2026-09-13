@@ -352,11 +352,21 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Paste",
         "Set Theme",
         "Set UI Scale",
+        "Open Notes",
+        "Set Notes Format",
+        "Stamp Release",
+        "New Branch",
+        "Switch Branch",
+        "Delete Branch",
+        "Restore Snapshot",
+        "Compare",
     ]
     theme_command = next(c for c in commands if c.label == "Set Theme")
     assert [c.label for c in theme_command.children] == ["Light", "Dark", "Whiley"]
     scale_command = next(c for c in commands if c.label == "Set UI Scale")
     assert [c.label for c in scale_command.children] == ["Increase", "Decrease"]
+    notes_format_command = next(c for c in commands if c.label == "Set Notes Format")
+    assert [c.label for c in notes_format_command.children] == ["Text (.txt)", "Markdown (.md)"]
 
 
 def test_running_a_set_theme_command_applies_and_persists_the_theme(project_window: MainWindow) -> None:

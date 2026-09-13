@@ -644,3 +644,37 @@ def test_dashboard_buttons_hover_with_the_theme_highlight_not_the_unthemed_light
     sheet = panel.export_button.styleSheet()
     assert "palette(light)" not in sheet
     assert "QToolButton:hover { background-color: palette(highlight)" in sheet
+
+
+# -- Documentation section (PROMPT.md: "add a section above Settings for Documentation") --------
+
+
+def test_documentation_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
+    assert panel.documentation_section.isVisible() is False
+
+
+def test_documentation_section_shows_once_a_project_opens(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    panel.open_project(folder)
+
+    assert panel.documentation_section.isVisible() is True
+
+
+def test_documentation_section_sits_above_settings(panel: ExplorerPanel) -> None:
+    layout = panel.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    assert widgets.index(panel.documentation_section) < widgets.index(panel.settings_section)
+
+
+def test_clicking_notes_emits_notes_requested(panel: ExplorerPanel, qtbot) -> None:
+    with qtbot.waitSignal(panel.notes_requested, timeout=1000):
+        panel.notes_button.click()
+
+
+def test_documentation_button_is_a_disabled_stub(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "2nd button should be stubbed and lablled 'Documentation' -- later we will
+    # implement better doc practice and articles here".
+    assert panel.documentation_button.text() == "Documentation"
+    assert panel.documentation_button.isEnabled() is False

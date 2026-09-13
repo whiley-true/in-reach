@@ -209,6 +209,11 @@ class ExplorerPanel(QWidget):
     export_requested = pyqtSignal()
     view_output_requested = pyqtSignal()
 
+    #: The Documentation section's "Notes" button (PROMPT.md) -- MainWindow owns opening the
+    #: right file (``Notes.txt`` or ``Notes.md``, per :mod:`in_reach.app.notes_settings`) into the
+    #: active pane, same division of labor as export_requested/view_output_requested above.
+    notes_requested = pyqtSignal()
+
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
     TEXT_SCALE = 1.1
@@ -318,6 +323,33 @@ class ExplorerPanel(QWidget):
         self.stats_section.hide()
         layout.addWidget(self.stats_section)
 
+        # PROMPT.md: "in the dashboard please add a section above Settings for Documentation --
+        # its dropdown should have 2 buttons" -- "Notes" (a freeform scratch pad, opens
+        # Notes.txt/Notes.md per in_reach.app.notes_settings) and a second, stubbed "Documentation"
+        # button (PROMPT.md: "later we will implement better doc practice and articles here"),
+        # disabled until that lands.
+        doc_body = QWidget()
+        doc_layout = QHBoxLayout(doc_body)
+        doc_layout.setContentsMargins(0, 4, 0, 0)
+        self.notes_button = QToolButton()
+        self.notes_button.setText("Notes")
+        self.notes_button.setToolTip("Open this project's own freeform notes file")
+        self.notes_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.notes_button.setAutoRaise(False)
+        self.notes_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.notes_button.clicked.connect(self.notes_requested.emit)
+        doc_layout.addWidget(self.notes_button)
+        self.documentation_button = QToolButton()
+        self.documentation_button.setText("Documentation")
+        self.documentation_button.setToolTip("Coming soon")
+        self.documentation_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.documentation_button.setEnabled(False)
+        doc_layout.addWidget(self.documentation_button)
+        doc_layout.addStretch(1)
+        self.documentation_section = _CollapsibleSection("Documentation", doc_body, collapsed=False)
+        self.documentation_section.hide()
+        layout.addWidget(self.documentation_section)
+
         # Dedicated quick-access boxes for the active project's own script/settings subfolders,
         # open by default since they're central to the active project. Hidden entirely with no
         # project open (see _activate()).
@@ -355,6 +387,7 @@ class ExplorerPanel(QWidget):
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
+        self.documentation_section.set_header_font(header_font)
 
         settings_tree_font = QFont(font)
         settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
@@ -410,6 +443,7 @@ class ExplorerPanel(QWidget):
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
         self.settings_section.setVisible(has_project)
+        self.documentation_section.setVisible(has_project)
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
         )

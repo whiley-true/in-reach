@@ -216,6 +216,7 @@ class TabPane(QTabWidget):
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
         self._tab_state: dict[QWidget, _TabState] = {}
         self.currentChanged.connect(lambda _index: self.cursor_info_changed.emit())
+        self.currentChanged.connect(lambda _index: self._refresh_preview_button())
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
         self.setTabsClosable(True)
@@ -263,10 +264,23 @@ class TabPane(QTabWidget):
         self.split_button.setAutoRaise(True)
         self.split_button.clicked.connect(lambda: self._area.split_from(self))
 
+        # PROMPT.md (Notes-as-Markdown): "magnif[y]ing glass icon should appear next to the split
+        # panel icons" -- only while the active tab is an editable Markdown one (see
+        # :meth:`_refresh_preview_button`), so it doesn't clutter every other file type's tab bar.
+        self.preview_button = QToolButton()
+        self.preview_button.setIcon(icons.icon("search", color=_SPLIT_ICON_COLOR, size=icon_size))
+        self.preview_button.setIconSize(QSize(icon_size, icon_size))
+        self.preview_button.setFixedSize(button_size, button_size)
+        self.preview_button.setToolTip("Split panel right with a live Markdown preview")
+        self.preview_button.setAutoRaise(True)
+        self.preview_button.clicked.connect(lambda: self._area.preview_split_from(self))
+        self.preview_button.hide()
+
         corner = QWidget()
         corner_layout = QHBoxLayout(corner)
         corner_layout.setContentsMargins(0, 0, 0, 0)
         corner_layout.setSpacing(0)
+        corner_layout.addWidget(self.preview_button)
         corner_layout.addWidget(self.vsplit_button)
         corner_layout.addWidget(self.split_button)
         self.setCornerWidget(corner, Qt.Corner.TopRightCorner)
@@ -280,6 +294,18 @@ class TabPane(QTabWidget):
 
     def _tab_state_for(self, widget: QWidget) -> _TabState:
         return self._tab_state.setdefault(widget, _TabState())
+
+    def _refresh_preview_button(self) -> None:
+        """Shows :attr:`preview_button` only while the active tab is an editable Markdown one --
+        a :class:`~in_reach.ide.editor.TextEditorWidget` opened via ``open_file(...,
+        editable_markdown=True)``, identifiable after the fact by its own ``.md`` path (a plain
+        :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` tab, opened for every other
+        ``.md`` file, is never a ``TextEditorWidget`` in the first place -- see ``open_file``)."""
+        widget = self.currentWidget()
+        is_editable_markdown = (
+            isinstance(widget, TextEditorWidget) and widget.path is not None and widget.path.suffix.lower() == ".md"
+        )
+        self.preview_button.setVisible(is_editable_markdown)
 
     def _update_close_icon(self, index: int) -> None:
         button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
@@ -407,7 +433,7 @@ class TabPane(QTabWidget):
             if _is_modified(widget) and self._tab_state_for(widget).path is not None:
                 self._save_tab(index)
 
-    def open_file(self, path: Path, *, force_reload: bool = False) -> None:
+    def open_file(self, path: Path, *, force_reload: bool = False, editable_markdown: bool = False) -> None:
         """"Open File" (the File menu, and clicking a file in the Explorer panel) -- adds ``path``
         as a new tab, reading its content in. Switches to the existing tab instead of duplicating
         it if ``path`` is already open in this pane.
@@ -428,6 +454,13 @@ class TabPane(QTabWidget):
                 its current on-disk content every time it's (re-)opened, e.g. the Dashboard's own
                 "View Output.txt" button, which regenerates the file it opens on every click (see
                 :meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`).
+            editable_markdown: Opens a ``.md`` file as a real, editable
+                :class:`~in_reach.ide.editor.TextEditorWidget` instead of the usual read-only
+                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, the
+                Documentation section's "Notes" button when Notes format is Markdown: "editor
+                should be .md" -- with the magnifying-glass split-to-live-preview icon, see
+                :meth:`_refresh_preview_button`, this is where an editable Markdown source and its
+                live rendered preview both come from). Ignored for any other suffix.
         """
         for index in range(self.count()):
             if self._tab_state_for(self.widget(index)).path == path:
@@ -442,8 +475,9 @@ class TabPane(QTabWidget):
             return
 
         # PROMPT.md: "please make .md be preview when opened" -- a rendered, read-only view
-        # instead of the plain text editor every other file type gets here.
-        if path.suffix.lower() == ".md":
+        # instead of the plain text editor every other file type gets here, unless the caller
+        # explicitly asked for an editable one (see editable_markdown's own docstring above).
+        if path.suffix.lower() == ".md" and not editable_markdown:
             widget: QWidget = MarkdownPreviewWidget(path=path)
             widget.setMarkdown(text)
             tab_icon = None
@@ -860,6 +894,35 @@ class MainPanelArea(QWidget):
         for pane, index in self._open_tab_locations(set(paths)):
             pane._reload_tab(index)
 
+    def _open_tab_locations_under(self, folder: Path) -> list[tuple[TabPane, int]]:
+        return [
+            (pane, index)
+            for pane in self.panes
+            for index in range(pane.count())
+            if (path := pane._tab_state_for(pane.widget(index)).path) is not None and folder in path.parents
+        ]
+
+    def dirty_tab_names_under(self, folder: Path) -> list[str]:
+        """The (sorted, deduplicated) file names of any already-open tab anywhere under ``folder``
+        that has unsaved edits -- used by :meth:`~in_reach.ide.main_window.MainWindow.
+        vcs_switch_branch` (PROMPT.md: "it should be possible ... to change and switch
+        versions/branches") to warn before a branch switch overwrites files on disk out from under
+        an open, unsaved tab."""
+        names = {
+            pane._tab_state_for(pane.widget(index)).path.name
+            for pane, index in self._open_tab_locations_under(folder)
+            if _is_modified(pane.widget(index))
+        }
+        return sorted(names)
+
+    def reload_open_tabs_under(self, folder: Path) -> None:
+        """Re-reads every already-open tab anywhere under ``folder`` from disk in place -- run
+        after a VCS branch switch (PROMPT.md) rewrites the project's own files on disk, so an
+        already-open, already-clean tab reflects the newly checked-out branch instead of silently
+        showing stale content until the user happens to reopen it."""
+        for pane, index in self._open_tab_locations_under(folder):
+            pane._reload_tab(index)
+
     def _new_pane(self) -> TabPane:
         return TabPane(self)
 
@@ -954,6 +1017,32 @@ class MainPanelArea(QWidget):
         self._duplicate_current_tab(source, new_pane)
         group.add_pane(new_pane)
         self._update_split_buttons()
+
+    def preview_split_from(self, source: TabPane) -> None:
+        """The magnifying-glass icon's own split (PROMPT.md, Notes-as-Markdown: "editor should
+        split to show live .md preview on the right hand side") -- a horizontal split like
+        :meth:`split_from`, but seeded with a *live* :class:`~in_reach.ide.markdown_preview.
+        MarkdownPreviewWidget` following ``source``'s current tab (see :meth:`MarkdownPreviewWidget.
+        follow_live`) instead of a plain duplicate. A no-op if ``source``'s current tab isn't an
+        editable Markdown one, or the split cap is already reached."""
+        index = source.currentIndex()
+        widget = source.widget(index) if index >= 0 else None
+        path = source._tab_state_for(widget).path if widget is not None else None
+        is_editable_markdown = (
+            isinstance(widget, TextEditorWidget) and path is not None and path.suffix.lower() == ".md"
+        )
+        if not is_editable_markdown or self.split_count >= _MAX_H_SPLITS:
+            return
+        label = source.tabText(index)
+        preview = MarkdownPreviewWidget(path=path)
+        preview.follow_live(widget)
+
+        new_group = self._new_group()
+        new_pane = self._new_pane()
+        new_index = new_pane.addTab(preview, f"Preview: {label}")
+        new_pane._track_tab(new_index, preview, state=_TabState(path=path))
+        new_group.add_pane(new_pane)
+        self._add_group(new_group)
 
     def new_tab_in(self, pane: TabPane) -> None:
         """Adds a fresh "Untitled-N.txt" text-editor tab to ``pane`` -- called when a click lands

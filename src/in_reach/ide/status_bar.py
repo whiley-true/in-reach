@@ -66,13 +66,23 @@ class StatusBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        # A fixed-width spacer matching the right-side segments keeps the centered project label
-        # actually centered on the whole bar rather than drifting left once those segments show.
-        self._left_spacer = QWidget()
-        layout.addWidget(self._left_spacer)
+        # PROMPT.md: "present branch - last stamped - last saved should be showin in the left of
+        # the bottom bar" -- clickable the same way cursor_label/spaces_label are, opening the Git
+        # panel rather than a quick-pick. Hidden with no project open (see set_vcs_status), same
+        # convention as the right-side segments.
+        self.vcs_label = _ClickableLabel()
+        self.vcs_label.hide()
+        layout.addWidget(self.vcs_label)
+        # Two equal stretches around the project label keep it centered in the gap between
+        # vcs_label and the right-side cursor/spaces segments -- the same "center between two
+        # stretches" trick as the top bar's own Quick Access pill, replacing the old fixed-width
+        # spacer this used before vcs_label existed (that trick only works when both sides are
+        # fixed-width, which the left side no longer is).
+        layout.addStretch(1)
         self._project_label = QLabel()
         self._project_label.setStyleSheet("color: #ffffff;")
-        layout.addWidget(self._project_label, 1, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._project_label)
+        layout.addStretch(1)
 
         self.cursor_label = _ClickableLabel()
         self.cursor_label.hide()
@@ -92,6 +102,23 @@ class StatusBar(QWidget):
         """Sets the centered "<title> (<folder id>)" text (PROMPT.md), or clears it for ``""``
         once no project is open."""
         self._project_label.setText(text)
+
+    def set_vcs_status(
+        self, branch: str, last_stamp: str | None, last_saved: str, *, on_click: Callable[[], None]
+    ) -> None:
+        """Shows/refreshes the bottom-left "<branch> - <last stamped> - <last saved>" segment
+        (PROMPT.md). ``last_stamp`` is already formatted (e.g. ``"v1.0"``) or ``None`` for "never
+        stamped yet"; ``last_saved`` is already a relative/absolute time string -- this method just
+        joins and displays them, leaving the actual formatting to the caller (mirroring
+        ``set_cursor_info``'s own division of labor)."""
+        stamped = last_stamp if last_stamp is not None else "not yet stamped"
+        self.vcs_label.setText(f"{branch} - {stamped} - saved {last_saved}")
+        self.vcs_label.set_on_click(on_click)
+        self.vcs_label.show()
+
+    def clear_vcs_status(self) -> None:
+        """Hides the branch/stamp/saved segment -- no project open, or it has no history yet."""
+        self.vcs_label.hide()
 
     def set_cursor_info(
         self,
@@ -119,13 +146,11 @@ class StatusBar(QWidget):
         self.spaces_label.setText(f"{label}: {indent_width}")
         self.spaces_label.set_on_click(on_spaces_click)
         self.spaces_label.show()
-        self._left_spacer.setFixedWidth(self.cursor_label.sizeHint().width() + self.spaces_label.sizeHint().width())
 
     def clear_cursor_info(self) -> None:
         """Hides the Ln/Col/Spaces segments -- no ``.txt``/``.json`` tab is active."""
         self.cursor_label.hide()
         self.spaces_label.hide()
-        self._left_spacer.setFixedWidth(0)
 
     def _edges_at(self, pos) -> Qt.Edge:  # noqa: ANN001 -- QPoint
         if self._window.isMaximized():

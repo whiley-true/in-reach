@@ -16,6 +16,7 @@ dependencies = [
     "tomlkit==0.15.1",
     "PyQt6==6.11.0",
     "pydantic==2.13.4",
+    "dulwich==1.2.12",
 ]
 
 [project.optional-dependencies]

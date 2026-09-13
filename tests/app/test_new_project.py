@@ -512,3 +512,15 @@ def test_is_generated_file_true_for_build_output(tmp_path: Path, relative: str) 
 )
 def test_is_generated_file_false_for_hand_editable_source(tmp_path: Path, relative: str) -> None:
     assert new_project.is_generated_file(tmp_path / relative) is False
+
+
+# -- vcs ------------------------------------------------------------------------------------------
+
+
+def test_create_gametype_project_starts_a_shadow_history(project_dir: Path) -> None:
+    from in_reach.app import vcs
+
+    folder, _warning = new_project.create_gametype_project(project_dir, "Blank")
+
+    assert vcs.is_initialized(folder) is True
+    assert len(vcs.history(folder)) == 1

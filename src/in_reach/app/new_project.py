@@ -64,7 +64,7 @@ BUILD_DIST_SUBDIR = "dist"
 INIT_GAMETYPE_DIRNAME = "init_gametype"
 #: PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
 NOTES_FILENAME = "Notes.txt"
-_NOTES_TEMPLATE = "Use this space for free form notes.\n"
+NOTES_TEMPLATE = "Use this space for free form notes.\n"
 #: PROMPT.md: "please also add a second stubbed README.md file in the generated project folder"
 #: -- distinct from (and, unlike the old one this module's docstring mentions removing, carries no
 #: copy of) the title: a plain stub, same treatment as the .in-reach-level one (see
@@ -419,7 +419,7 @@ def create_gametype_project(
     (build_dir / BUILD_DIST_SUBDIR).mkdir(parents=True)
     (build_dir / ".gitignore").write_text(_BUILD_GITIGNORE, encoding="utf-8")
 
-    (folder / NOTES_FILENAME).write_text(_NOTES_TEMPLATE, encoding="utf-8")
+    (folder / NOTES_FILENAME).write_text(NOTES_TEMPLATE, encoding="utf-8")
     (folder / README_FILENAME).write_text(_README_TEMPLATE, encoding="utf-8")
 
     resolved_icon = category_icon if category_icon is not None else (default_icon_for(category) or EngineIcon.capture_the_flag)
@@ -449,4 +449,13 @@ def create_gametype_project(
         warning = f"{warning}\n\n{decompile_warning}" if warning else decompile_warning
 
     env_file.update_env_value(project_dir / _ENV_NAME, PROJECT_DIR_KEY, str(folder))
+
+    # PROMPT.md: "vcs should be started when a new blank project (either blank or from template)"
+    # -- local import to avoid a cycle (in_reach.app.vcs imports is_generated_file from this
+    # module). Runs last, once every file a new project starts with actually exists, so the very
+    # first snapshot captures the whole thing rather than a partially-written folder.
+    from in_reach.app import vcs
+
+    vcs.init(folder)
+
     return folder, warning

@@ -498,11 +498,18 @@ class MainWindow(QWidget):
 
         env_project_dir = project.get_project_dir(self.root_dir)
         self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
+        self.explorer_panel.active_project_changed.connect(self.git_panel.set_project)
         self.explorer_panel.active_project_changed.connect(self._rewatch_project_bin)
         self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
         self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
         self.explorer_panel.active_project_changed.connect(self._persist_active_project)
         self.explorer_panel.project_closed.connect(self._close_rvt_for_project)
+        self.git_panel.stamp_requested.connect(self.vcs_stamp)
+        self.git_panel.new_branch_requested.connect(self.vcs_new_branch)
+        self.git_panel.switch_branch_requested.connect(self.vcs_switch_branch)
+        self.git_panel.delete_branch_requested.connect(self.vcs_delete_branch)
+        self.git_panel.compare_requested.connect(self.vcs_compare)
+        self.git_panel.restore_requested.connect(self.vcs_restore)
         # PROMPT.md: "1 per window" -- initial_project (see __init__'s own docstring) wins over
         # whatever's persisted; otherwise restore the one project PROJECT_DIR_KEY last had open,
         # the same key every gametype-project creation already writes (see
@@ -517,6 +524,7 @@ class MainWindow(QWidget):
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
         self.explorer_panel.export_requested.connect(self.export_rvt_file)
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
+        self.explorer_panel.notes_requested.connect(self.open_notes)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
@@ -539,6 +547,9 @@ class MainWindow(QWidget):
         # Same priming reasoning as the status label just above -- a restored project (or the lack
         # of one) already fired active_project_changed before this method's own connection existed.
         self._sync_project_dependent_views(self.explorer_panel.current_folder)
+        # Also needs self.status_bar to already exist -- same reasoning as the status label above.
+        self.explorer_panel.active_project_changed.connect(self._refresh_vcs_status)
+        self._refresh_vcs_status(self.explorer_panel.current_folder)
 
         # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- active_pane is
         # always panes[0] for now (see MainPanelArea.active_pane's own docstring), so a single
@@ -776,6 +787,8 @@ class MainWindow(QWidget):
         shortcut as its ``detail``, followed by "Set Theme" and "Set UI Scale", each a two-level
         pick. Rebuilt on every open rather than cached, since none of this is expensive to
         construct and this keeps it all from ever going stale."""
+        from in_reach.app import notes_settings
+
         return [
             Command(label="New Window", action=self.open_new_window, detail=_SHORTCUT_NEW_WINDOW),
             Command(label="Open Folder", action=self.open_folder, detail=_SHORTCUT_OPEN_FOLDER),
@@ -802,7 +815,99 @@ class MainWindow(QWidget):
                     Command(label="Decrease", action=self._zoom_out),
                 ],
             ),
+            Command(label="Open Notes", action=self.open_notes),
+            Command(
+                label="Set Notes Format",
+                children=[
+                    Command(label="Text (.txt)", action=lambda: self._set_notes_format(notes_settings.FORMAT_TXT)),
+                    Command(label="Markdown (.md)", action=lambda: self._set_notes_format(notes_settings.FORMAT_MD)),
+                ],
+            ),
+            Command(label="Stamp Release", action=self._vcs_stamp_via_dialog),
+            Command(label="New Branch", action=self._vcs_new_branch_via_dialog),
+            Command(
+                label="Switch Branch",
+                children=[
+                    Command(label=name, action=lambda n=name: self.vcs_switch_branch(n))
+                    for name in self._vcs_branches()
+                ],
+            ),
+            Command(
+                label="Delete Branch",
+                children=[
+                    Command(label=name, action=lambda n=name: self.vcs_delete_branch(n))
+                    for name in self._vcs_branches()
+                ],
+            ),
+            Command(
+                label="Restore Snapshot",
+                children=[
+                    Command(
+                        label=snapshot.stamp_message if snapshot.is_stamp else snapshot.message,
+                        action=lambda sha=snapshot.sha: self.vcs_restore(sha),
+                    )
+                    for snapshot in self._vcs_history()
+                ],
+            ),
+            Command(
+                label="Compare",
+                children=[
+                    Command(
+                        label=label_a,
+                        children=[
+                            Command(label=label_b, action=lambda a=ref_a, b=ref_b: self.vcs_compare(a, b))
+                            for ref_b, label_b in self._vcs_compare_refs()
+                            if ref_b != ref_a
+                        ],
+                    )
+                    for ref_a, label_a in self._vcs_compare_refs()
+                ],
+            ),
         ]
+
+    def _vcs_branches(self) -> list[str]:
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import vcs
+
+        return vcs.list_branches(folder) if vcs.is_initialized(folder) else []
+
+    def _vcs_history(self) -> list:
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import vcs
+
+        return vcs.history(folder) if vcs.is_initialized(folder) else []
+
+    def _vcs_compare_refs(self) -> list[tuple[str, str]]:
+        """Every ref the ``>`` palette's "Compare" entry can pick from -- every branch (label =
+        its own name) plus every stamp on the current branch (label = "Stamp: <message>") -- same
+        set the Git panel's own compare combos offer."""
+        folder = self.explorer_panel.current_folder
+        refs = [(name, name) for name in self._vcs_branches()]
+        if folder is not None:
+            refs += [
+                (snapshot.sha, self._vcs_ref_label(folder, snapshot.sha))
+                for snapshot in self._vcs_history()
+                if snapshot.is_stamp
+            ]
+        return refs
+
+    def _vcs_stamp_via_dialog(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        message, ok = QInputDialog.getText(self, "Stamp Release", "Commit message:")
+        if ok and message.strip():
+            self.vcs_stamp(message.strip())
+
+    def _vcs_new_branch_via_dialog(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "New Branch", "Branch name:")
+        if ok and name.strip():
+            self.vcs_new_branch(name.strip())
 
     def _set_theme(self, name: str) -> None:
         app = QApplication.instance()
@@ -972,10 +1077,17 @@ class MainWindow(QWidget):
         return chosen
 
     def open_settings_dialog(self) -> None:
-        """The activity bar's settings cog -- opens the Settings popout (System/UI stubbed, Theme
-        live) centered at half the screen's size (see
+        """The activity bar's settings cog -- opens the Settings popout (System stubbed, UI's own
+        Notes format live, Theme live) centered at half the screen's size (see
         :class:`~in_reach.ide.settings_dialog.SettingsDialog`'s own ``showEvent``)."""
-        dialog = SettingsDialog(self, on_theme_changed=self.on_theme_applied)
+        from in_reach.app import notes_settings
+
+        dialog = SettingsDialog(
+            self,
+            on_theme_changed=self.on_theme_applied,
+            notes_format=notes_settings.get_notes_format(self._notes_format_env_path()),
+            on_notes_format_changed=self._set_notes_format,
+        )
         dialog.exec()
 
     def open_recent_project(self, folder: Path) -> None:
@@ -1313,8 +1425,233 @@ class MainWindow(QWidget):
         """Re-checks the Apply button's enabled state whenever a file is saved -- PROMPT.md: Apply
         "should only be available if a user has made changes to files in settings". Cheap enough to
         just always re-check on any save rather than filtering to paths under ``settings/`` first;
-        the check itself is a handful of small-file reads."""
-        self._refresh_apply_enabled(self.explorer_panel.current_folder)
+        the check itself is a handful of small-file reads.
+
+        Also takes a traceable VCS snapshot of the active project (PROMPT.md: "every change should
+        be traceable (but not stamped explicitly)") -- a no-op if nothing actually changed on disk
+        since the last snapshot, or if the project has no history yet (see :func:`in_reach.app.vcs.
+        record_change`)."""
+        folder = self.explorer_panel.current_folder
+        self._refresh_apply_enabled(folder)
+        if folder is not None:
+            from in_reach.app import vcs
+
+            vcs.record_change(folder)
+            self._refresh_vcs_status(folder)
+
+    # -- VCS panel (PROMPT.md: "vcs panel and dulwich implementation") --------------------------
+
+    def _refresh_vcs_status(self, folder: Path | None) -> None:
+        """Refreshes (or hides) the bottom-left "<branch> - <last stamped> - <last saved>" segment
+        to match ``folder``'s own VCS history -- called whenever the active project changes and
+        after any action that adds to that history (a save, a stamp, a new/switched branch)."""
+        from in_reach.app import vcs
+
+        if folder is None or not vcs.is_initialized(folder):
+            self.status_bar.clear_vcs_status()
+            return
+        branch = vcs.current_branch(folder) or "?"
+        last_stamp = vcs.last_stamp(folder)
+        stamp_text = last_stamp.stamp_message if last_stamp is not None else None
+        saved_at = vcs.last_saved_at(folder)
+        saved_text = self._format_time_ago(saved_at) if saved_at is not None else "never"
+        self.status_bar.set_vcs_status(
+            branch, stamp_text, saved_text, on_click=lambda: self._on_sidebar_view_selected("git")
+        )
+
+    @staticmethod
+    def _format_time_ago(epoch: float) -> str:
+        """A short "just now"/"N min ago"/"N hr ago"/"N days ago" rendering of a past Unix
+        timestamp -- kept to whole units rather than exact durations, since the bottom bar's own
+        segment is a glance-at-it status, not a precise log."""
+        import time
+
+        seconds = max(0, int(time.time() - epoch))
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} min ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours} hr ago"
+        days = hours // 24
+        return f"{days} day{'s' if days != 1 else ''} ago"
+
+    def vcs_stamp(self, message: str) -> None:
+        """"Stamp Release" (the Git panel's own button) -- PROMPT.md: "ability for a user to stamp
+        a release (which takes a 'commit message')". A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.stamp(folder, message)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        self.git_panel.refresh()
+        self._refresh_vcs_status(folder)
+
+    def vcs_new_branch(self, name: str) -> None:
+        """"New Branch" (the Git panel's own button) -- PROMPT.md: "also ability to create a new
+        branch". A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.create_branch(folder, name)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        self.git_panel.refresh()
+        self._refresh_vcs_status(folder)
+
+    def vcs_switch_branch(self, name: str) -> None:
+        """Switching branches (the Git panel's own branch combo, PROMPT.md: "it should be possible
+        ... to change and switch versions/branches") overwrites/deletes real files on disk to match
+        the target branch's own last snapshot -- refuses outright if that would blow away an
+        open tab's own unsaved edits (same "warn, don't silently clobber" treatment as an RVT
+        resync, see :meth:`_confirm_overwrite_rvt_changes`), and snapshots the project's current
+        state first so anything already saved to disk is never actually lost from history even
+        though the working files themselves are about to change. Reloads every open tab under this
+        project afterward so nothing already open goes stale."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_switch_branch_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        vcs.record_change(folder)
+        try:
+            vcs.switch_branch(folder, name)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        self.main_panel.reload_open_tabs_under(folder)
+        self.git_panel.refresh()
+        self._refresh_vcs_status(folder)
+
+    def _confirm_switch_branch_overwrite(self, dirty_names: list[str]) -> bool:
+        """Asks whether to proceed with a branch switch that would overwrite unsaved edits in
+        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_overwrite_rvt_changes`.
+
+        Returns:
+            ``True`` for "Switch Anyway", ``False`` for "Cancel".
+        """
+        joined = "\n".join(dirty_names)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "Switching branches will overwrite unsaved changes in the following open files:\n\n"
+            f"{joined}\n\nSwitch anyway, or cancel?"
+        )
+        box.addButton("Switch Anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
+
+    def vcs_delete_branch(self, name: str) -> None:
+        """"Delete Branch" (the Git panel's own button, PROMPT.md: "add any other functionality
+        you think may help the user manage the project using vcs") -- reports a refusal (the
+        current branch, or the only remaining one) rather than crashing. A no-op with no project
+        open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.delete_branch(folder, name)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        self.git_panel.refresh()
+        self._refresh_vcs_status(folder)
+
+    def _vcs_ref_label(self, folder: Path, ref: str) -> str:
+        """A ref token's own display label -- a branch name as-is, or a stamp's sha rendered as
+        "Stamp: <message>" -- shared by the diff dialog's own title and the command palette's
+        "Compare" entries."""
+        from in_reach.app import vcs
+
+        if ref in vcs.list_branches(folder):
+            return ref
+        snapshot = next((s for s in vcs.history(folder) if s.sha == ref and s.is_stamp), None)
+        return f"Stamp: {snapshot.stamp_message}" if snapshot is not None else ref
+
+    def vcs_compare(self, ref_a: str, ref_b: str) -> None:
+        """"Compare" (the Git panel's own combos, PROMPT.md: "they should be able to view branch
+        differences[; and] compare different stamped versions") -- opens a
+        :class:`~in_reach.ide.diff_dialog.DiffDialog` listing every file that differs between
+        ``ref_a`` and ``ref_b`` (each a branch name or a stamp's sha). A no-op with no project
+        open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+        from in_reach.ide.diff_dialog import DiffDialog
+
+        try:
+            diffs = vcs.diff(folder, ref_a, ref_b)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        title = f"{self._vcs_ref_label(folder, ref_a)} vs. {self._vcs_ref_label(folder, ref_b)}"
+        dialog = DiffDialog(self, title=title, diffs=diffs)
+        dialog.exec()
+
+    def vcs_restore(self, sha: str) -> None:
+        """"Restore Selected" (the Git panel's own history list, PROMPT.md: "add any other
+        functionality you think may help the user manage the project using vcs") -- brings the
+        project's files back to a specific past snapshot (any stamp or traceable commit) without
+        switching branches (see :func:`~in_reach.app.vcs.restore_snapshot`'s own docstring for why
+        this never loses history). Same unsaved-edits guard and open-tab reload as
+        :meth:`vcs_switch_branch`. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_restore_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.restore_snapshot(folder, sha)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        self.main_panel.reload_open_tabs_under(folder)
+        self.git_panel.refresh()
+        self._refresh_vcs_status(folder)
+
+    def _confirm_restore_overwrite(self, dirty_names: list[str]) -> bool:
+        """Asks whether to proceed with a restore that would overwrite unsaved edits in
+        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``True`` for "Restore Anyway", ``False`` for "Cancel".
+        """
+        joined = "\n".join(dirty_names)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "Restoring this snapshot will overwrite unsaved changes in the following open files:\n\n"
+            f"{joined}\n\nRestore anyway, or cancel?"
+        )
+        box.addButton("Restore Anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
 
     def apply_settings_changes(self) -> None:
         """"Apply" (the activity bar's own button) -- compiles the active project's ``settings/``
@@ -1371,6 +1708,40 @@ class MainWindow(QWidget):
 
         path = write_output_view(folder)
         self.main_panel.active_pane.open_file(path, force_reload=True)
+
+    def open_notes(self) -> None:
+        """"Notes" (the Dashboard's own Documentation section, PROMPT.md) -- opens the active
+        project's own freeform scratch notes file, ``Notes.txt`` or ``Notes.md`` per the saved
+        :mod:`in_reach.app.notes_settings` preference (see :func:`~in_reach.app.notes_settings.
+        ensure_notes_file`, which creates the target file from the same template ``Notes.txt``
+        already starts with if this is the first time it's been opened in that format). A no-op
+        with no project open.
+
+        PROMPT.md: "if .md is chosen, then editor should be .md" -- opened as a real, editable tab
+        (see :meth:`~in_reach.ide.tabs.TabPane.open_file`'s own ``editable_markdown``) rather than
+        the usual read-only rendered preview every other ``.md`` file gets, so there's an actual
+        source view to type notes into and (via the magnifying-glass icon that appears next to the
+        split buttons for exactly this tab) split into a live preview alongside it.
+        """
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import notes_settings
+
+        notes_format = notes_settings.get_notes_format(self._notes_format_env_path())
+        path = notes_settings.ensure_notes_file(folder, notes_format)
+        self.main_panel.active_pane.open_file(path, editable_markdown=notes_format == notes_settings.FORMAT_MD)
+
+    def _notes_format_env_path(self) -> Path:
+        return project.get_project_dir(self.root_dir) / ".env"
+
+    def _set_notes_format(self, notes_format: str) -> None:
+        """"Set Notes Format" (the ``>`` command palette, PROMPT.md: "can be set in settings or
+        command palette") -- persists which file "Notes" opens from here on. Never touches whatever
+        notes file is already open in a tab."""
+        from in_reach.app import notes_settings
+
+        notes_settings.set_notes_format(self._notes_format_env_path(), notes_format)
 
     def export_rvt_file(self) -> None:
         """"Export RVT File" (PROMPT.md, under the Dashboard's own button row) -- compiles the
@@ -1541,6 +1912,13 @@ class MainWindow(QWidget):
                     # PROMPT.md: "please also add a stats view into the dashboard" -- this resync
                     # just regenerated build/stats.autogenerated.json too.
                     self.explorer_panel.refresh_stats()
+                    # PROMPT.md: "every change should be traceable" -- RVT overwriting settings/
+                    # directly (outside the normal in-app save path _on_file_saved already covers)
+                    # is still a real change to the project's own tracked files.
+                    from in_reach.app import vcs
+
+                    vcs.record_change(folder)
+                    self._refresh_vcs_status(folder)
         # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
         # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so
         # the *next* save still gets caught.

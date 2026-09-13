@@ -1404,6 +1404,498 @@ def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
     assert project_window._bin_watcher.files() == [str(compiled_bin)]
 
 
+# -- VCS panel (PROMPT.md: "vcs panel and dulwich implementation") ------------------------------
+
+
+def _make_vcs_project(tmp_path: Path):
+    from in_reach.app import vcs
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    vcs.init(folder)
+    return folder, vcs
+
+
+def test_opening_a_project_with_history_shows_the_vcs_status_segment(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, _vcs = _make_vcs_project(tmp_path)
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.status_bar.vcs_label.isVisible() is True
+    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved")
+
+
+def test_opening_a_project_with_no_history_yet_hides_the_vcs_status_segment(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = _make_project_with_settings(tmp_path)  # no vcs.init()
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.status_bar.vcs_label.isVisible() is False
+
+
+def test_closing_the_project_hides_the_vcs_status_segment(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, _vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+
+    project_window.explorer_panel.close_active_project()
+
+    assert project_window.status_bar.vcs_label.isVisible() is False
+
+
+def test_saving_a_file_records_a_traceable_vcs_snapshot(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    before = len(vcs.history(folder))
+
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("edited\n")
+    project_window.main_panel.active_pane.save_current()
+
+    assert len(vcs.history(folder)) == before + 1
+    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved just now")
+
+
+def test_vcs_stamp_creates_a_labelled_snapshot_and_refreshes_the_ui(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+
+    project_window.vcs_stamp("First release")
+
+    assert vcs.last_stamp(folder).stamp_message == "First release"
+    assert "First release" in project_window.status_bar.vcs_label.text()
+
+
+def test_vcs_stamp_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_stamp("First release")  # should not raise
+
+
+def test_vcs_new_branch_switches_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+
+    project_window.vcs_new_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+    assert project_window.status_bar.vcs_label.text().startswith("feature -")
+    assert project_window.git_panel.branch_combo.currentText() == "feature"
+
+
+def test_vcs_new_branch_reports_a_duplicate_name_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_new_branch("feature")
+
+    assert len(errors) == 1
+
+
+def test_vcs_switch_branch_reloads_a_clean_open_tab_from_disk(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature branch content\n", encoding="utf-8")
+    vcs.record_change(folder)
+
+    project_window.vcs_switch_branch(vcs.DEFAULT_BRANCH)
+
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH
+
+
+def test_vcs_switch_branch_warns_before_overwriting_an_unsaved_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("unsaved edit")
+    widget.document().setModified(True)
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_switch_branch_overwrite", lambda self, names: warned.append(names) or False
+    )
+
+    project_window.vcs_switch_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # switch refused, still on main
+
+
+def test_vcs_switch_branch_proceeds_once_confirmed_despite_the_dirty_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("unsaved edit")
+    widget.document().setModified(True)
+    monkeypatch.setattr(MainWindow, "_confirm_switch_branch_overwrite", lambda self, names: True)
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+
+
+def test_vcs_switch_branch_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_switch_branch("feature")  # should not raise
+
+
+def test_stamp_release_command_prompts_and_stamps(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("v1.0", True)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Stamp Release").action()
+
+    assert vcs.last_stamp(folder).stamp_message == "v1.0"
+
+
+def test_stamp_release_command_does_nothing_when_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Stamp Release").action()
+
+    assert vcs.last_stamp(folder) is None
+
+
+def test_new_branch_command_prompts_and_creates(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("feature", True)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "New Branch").action()
+
+    assert vcs.current_branch(folder) == "feature"
+
+
+def test_switch_branch_command_lists_and_switches_branches(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    commands = project_window.build_command_palette_commands()
+    switch_command = next(c for c in commands if c.label == "Switch Branch")
+    assert {c.label for c in switch_command.children} == {vcs.DEFAULT_BRANCH, "feature"}
+
+    next(c for c in switch_command.children if c.label == "feature").action()
+
+    assert vcs.current_branch(folder) == "feature"
+
+
+def test_vcs_delete_branch_removes_it_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    project_window.vcs_delete_branch("feature")
+
+    assert vcs.list_branches(folder) == [vcs.DEFAULT_BRANCH]
+    assert "feature" not in {
+        project_window.git_panel.branch_combo.itemText(i) for i in range(project_window.git_panel.branch_combo.count())
+    }
+
+
+def test_vcs_delete_branch_reports_a_refusal_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_delete_branch(vcs.DEFAULT_BRANCH)  # the only branch
+
+    assert len(errors) == 1
+
+
+def test_vcs_delete_branch_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_delete_branch("feature")  # should not raise
+
+
+def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.ide.diff_dialog import DiffDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    vcs.record_change(folder)
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    opened = []
+    monkeypatch.setattr(DiffDialog, "exec", lambda self: opened.append(self) or None)
+
+    project_window.vcs_compare(vcs.DEFAULT_BRANCH, "feature")
+
+    assert len(opened) == 1
+    dialog = opened[0]
+    assert dialog.windowTitle() == "main vs. feature"
+    assert [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())] == ["M Notes.txt"]
+
+
+def test_vcs_compare_labels_a_stamp_ref_with_its_message(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.ide.diff_dialog import DiffDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    first = vcs.stamp(folder, "v1")
+    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    second = vcs.stamp(folder, "v2")
+
+    opened = []
+    monkeypatch.setattr(DiffDialog, "exec", lambda self: opened.append(self) or None)
+
+    project_window.vcs_compare(first, second)
+
+    assert opened[0].windowTitle() == "Stamp: v1 vs. Stamp: v2"
+
+
+def test_vcs_compare_reports_an_unknown_ref_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_compare(vcs.DEFAULT_BRANCH, "does-not-exist")
+
+    assert len(errors) == 1
+
+
+def test_vcs_compare_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_compare("main", "feature")  # should not raise
+
+
+def test_vcs_restore_brings_back_old_content_and_records_a_new_snapshot(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    first = vcs.stamp(folder, "v1")
+    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    vcs.stamp(folder, "v2")
+    before = len(vcs.history(folder))
+
+    project_window.vcs_restore(first)
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert len(vcs.history(folder)) == before + 1
+
+
+def test_vcs_restore_reloads_a_clean_open_tab_from_disk(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    first = vcs.stamp(folder, "v1")
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    vcs.stamp(folder, "v2")
+
+    project_window.vcs_restore(first)
+
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+
+
+def test_vcs_restore_warns_before_overwriting_an_unsaved_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    first = vcs.stamp(folder, "v1")
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("unsaved edit")
+    widget.document().setModified(True)
+    warned = []
+    monkeypatch.setattr(MainWindow, "_confirm_restore_overwrite", lambda self, names: warned.append(names) or False)
+    before = len(vcs.history(folder))
+
+    project_window.vcs_restore(first)
+
+    assert warned == [["Notes.txt"]]
+    assert len(vcs.history(folder)) == before  # refused -- nothing restored
+
+
+def test_vcs_restore_rejects_an_unknown_sha_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_restore("not-a-real-sha")
+
+    assert len(errors) == 1
+
+
+def test_vcs_restore_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_restore("deadbeef")  # should not raise
+
+
+def test_delete_branch_command_lists_and_deletes_branches(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    commands = project_window.build_command_palette_commands()
+    delete_command = next(c for c in commands if c.label == "Delete Branch")
+    next(c for c in delete_command.children if c.label == "feature").action()
+
+    assert vcs.list_branches(folder) == [vcs.DEFAULT_BRANCH]
+
+
+def test_restore_snapshot_command_lists_stamps_and_autosaves_and_restores(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    first = vcs.stamp(folder, "v1")
+    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    vcs.stamp(folder, "v2")
+
+    commands = project_window.build_command_palette_commands()
+    restore_command = next(c for c in commands if c.label == "Restore Snapshot")
+    next(c for c in restore_command.children if c.label == "v1").action()
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+
+
+def test_compare_command_offers_a_two_level_pick_and_opens_the_diff_dialog(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.ide.diff_dialog import DiffDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    opened = []
+    monkeypatch.setattr(DiffDialog, "exec", lambda self: opened.append(self) or None)
+
+    commands = project_window.build_command_palette_commands()
+    compare_command = next(c for c in commands if c.label == "Compare")
+    first_level = {c.label for c in compare_command.children}
+    assert first_level == {vcs.DEFAULT_BRANCH, "feature"}
+
+    main_branch_pick = next(c for c in compare_command.children if c.label == vcs.DEFAULT_BRANCH)
+    assert [c.label for c in main_branch_pick.children] == ["feature"]  # never compares a ref with itself
+    main_branch_pick.children[0].action()
+
+    assert len(opened) == 1
+
+
+# -- Documentation section / Notes (PROMPT.md) ---------------------------------------------------
+
+
+def test_open_notes_opens_notes_txt_by_default(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    project_window._on_project_opened(folder)
+
+    project_window.open_notes()
+
+    from in_reach.ide.editor import TextEditorWidget
+
+    widget = project_window.main_panel.active_pane.currentWidget()
+    assert isinstance(widget, TextEditorWidget)
+    assert widget.path == folder / "Notes.txt"
+
+
+def test_open_notes_opens_an_editable_notes_md_when_that_format_is_set(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.app import notes_settings
+    from in_reach.ide.editor import TextEditorWidget
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    project_window._on_project_opened(folder)
+    notes_settings.set_notes_format(project_window._notes_format_env_path(), notes_settings.FORMAT_MD)
+
+    project_window.open_notes()
+
+    widget = project_window.main_panel.active_pane.currentWidget()
+    assert isinstance(widget, TextEditorWidget)  # editable, not the read-only preview
+    assert widget.path == folder / "Notes.md"
+    assert widget.isReadOnly() is False
+
+
+def test_open_notes_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.open_notes()  # should not raise
+
+
+def test_set_notes_format_command_persists_the_choice(project_window: MainWindow) -> None:
+    from in_reach.app import notes_settings
+
+    commands = project_window.build_command_palette_commands()
+    notes_format_command = next(c for c in commands if c.label == "Set Notes Format")
+    markdown = next(c for c in notes_format_command.children if c.label == "Markdown (.md)")
+
+    markdown.action()
+
+    assert notes_settings.get_notes_format(project_window._notes_format_env_path()) == notes_settings.FORMAT_MD
+
+
+def test_open_notes_command_opens_the_active_projects_notes_file(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    project_window._on_project_opened(folder)
+
+    commands = project_window.build_command_palette_commands()
+    open_notes_command = next(c for c in commands if c.label == "Open Notes")
+    open_notes_command.action()
+
+    widget = project_window.main_panel.active_pane.currentWidget()
+    assert widget.path == folder / "Notes.txt"
+
+
 # -- View Output.txt / Export RVT File (PROMPT.md: "Underneath project tabs please add the
 # following buttons: Export RVT File (on the left) and on the right: View Output.txt") -----------
 
@@ -2177,6 +2669,35 @@ def test_the_watched_bin_changing_resyncs_the_build_snapshot(
     assert calls[0][1] == folder
 
 
+def test_the_watched_bin_changing_records_a_traceable_vcs_snapshot(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import new_project, project, vcs
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    (folder / "settings").mkdir(parents=True)
+    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    vcs.init(folder)
+    before = len(vcs.history(folder))
+    bin_path = new_project.compiled_variant_path(folder)
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"")
+    window._on_project_opened(folder)
+
+    def _fake_resync(bin_path, folder, **k):
+        (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Renamed"}}', encoding="utf-8")
+
+    monkeypatch.setattr("in_reach.app.rvt.decompile.resync_from_bin", _fake_resync)
+
+    window._on_watched_bin_changed(str(bin_path))
+
+    assert len(vcs.history(folder)) == before + 1
+    assert window.status_bar.vcs_label.isVisible() is True
+
+
 def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2728,6 +3249,31 @@ def test_status_bar_clear_cursor_info_hides_both_segments(window: MainWindow) ->
 
     assert window.status_bar.cursor_label.isVisible() is False
     assert window.status_bar.spaces_label.isVisible() is False
+
+
+def test_status_bar_set_vcs_status_shows_branch_stamp_and_saved_text(window: MainWindow) -> None:
+    clicks = []
+    window.status_bar.set_vcs_status("main", "v1.0", "2 min ago", on_click=lambda: clicks.append(True))
+
+    assert window.status_bar.vcs_label.text() == "main - v1.0 - saved 2 min ago"
+    assert window.status_bar.vcs_label.isVisible() is True
+
+    window.status_bar.vcs_label._on_click()
+    assert clicks == [True]
+
+
+def test_status_bar_set_vcs_status_shows_not_yet_stamped_when_never_stamped(window: MainWindow) -> None:
+    window.status_bar.set_vcs_status("main", None, "just now", on_click=lambda: None)
+
+    assert window.status_bar.vcs_label.text() == "main - not yet stamped - saved just now"
+
+
+def test_status_bar_clear_vcs_status_hides_the_segment(window: MainWindow) -> None:
+    window.status_bar.set_vcs_status("main", None, "just now", on_click=lambda: None)
+
+    window.status_bar.clear_vcs_status()
+
+    assert window.status_bar.vcs_label.isVisible() is False
 
 
 def test_opening_a_txt_file_shows_the_cursor_segments(project_window: MainWindow, tmp_path: Path) -> None:

@@ -22,12 +22,36 @@ def test_settings_dialog_theme_tab_applies_live_and_notifies(qtbot) -> None:
     assert dialog.theme_tab.theme_picker.buttons["Light"].isChecked() is False
 
 
-def test_settings_dialog_system_and_ui_tabs_are_stubs(qtbot) -> None:
+def test_settings_dialog_system_tab_is_a_stub(qtbot) -> None:
     dialog = SettingsDialog()
     qtbot.addWidget(dialog)
 
     assert dialog.system_tab.isEnabled() is True  # the tab itself, just its stub label is muted
-    assert dialog.ui_tab.isEnabled() is True
+
+
+def test_settings_dialog_ui_tab_shows_the_notes_format_preference(qtbot) -> None:
+    from in_reach.app import notes_settings
+
+    dialog = SettingsDialog(notes_format=notes_settings.FORMAT_MD)
+    qtbot.addWidget(dialog)
+
+    combo = dialog.ui_tab.notes_format_combo
+    assert combo.currentData() == notes_settings.FORMAT_MD
+
+
+def test_settings_dialog_ui_tab_notifies_on_notes_format_change(qtbot) -> None:
+    from in_reach.app import notes_settings
+
+    changed = []
+    dialog = SettingsDialog(
+        notes_format=notes_settings.FORMAT_TXT, on_notes_format_changed=changed.append
+    )
+    qtbot.addWidget(dialog)
+
+    combo = dialog.ui_tab.notes_format_combo
+    combo.setCurrentIndex(combo.findData(notes_settings.FORMAT_MD))
+
+    assert changed == [notes_settings.FORMAT_MD]
 
 
 def test_settings_dialog_close_button_accepts(qtbot) -> None:
