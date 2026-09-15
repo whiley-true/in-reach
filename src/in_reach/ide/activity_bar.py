@@ -22,7 +22,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QMimeData, QObject, QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDrag, QMouseEvent
-from PyQt6.QtWidgets import QApplication, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QLayout, QMenu, QToolButton, QVBoxLayout, QWidget
 
 from in_reach.app import env_file
 from in_reach.ide import icons
@@ -92,6 +92,19 @@ def _bar_button(
     return button
 
 
+def _effective_height(button: QToolButton) -> int:
+    """The height a button actually occupies once laid out -- ``sizeHint()`` alone ignores an
+    explicit ``setFixedSize()`` (every real bar button has one, see :func:`_bar_button`), so a
+    button clamped to e.g. 44px would otherwise be measured at its unclamped natural hint instead.
+    Used by :meth:`_IconStrip._relayout` to decide how many buttons actually fit."""
+    height = button.sizeHint().height()
+    height = max(height, button.minimumSizeHint().height(), button.minimumHeight())
+    max_height = button.maximumHeight()
+    if max_height < 16_777_215:  # QWIDGETSIZE_MAX -- Qt's "no explicit maximum" sentinel
+        height = min(height, max_height)
+    return height or _BUTTON_SIZE
+
+
 def _load_order(env_path: Path | None) -> list[str] | None:
     if env_path is None:
         return None
@@ -120,6 +133,17 @@ class _IconStrip(QWidget):
     straight to that child, it never bubbles up), so drag detection is instead done via an event
     filter installed on each button (see :meth:`add_button`/:meth:`eventFilter`) -- watching every
     button's events from here without needing a dedicated draggable-button subclass.
+
+    A button can be added ``pinned=True`` (see :meth:`add_button`) -- PROMPT.md: "the compile icon
+    should be stuck to the top". A pinned button can never be dragged, and nothing can ever be
+    dropped ahead of it -- :meth:`_apply_order` re-sorts pinned keys (in their own existing
+    relative order) to the front of every order this strip ever applies, whatever order was
+    requested, so a pinned button stays first even across a stale/hand-edited persisted order.
+
+    When the strip is too short to show every button at once, the extras collapse behind a single
+    trailing "..." button rather than overlapping (PROMPT.md: "the side panel icons are overlaying
+    on each other becoming unreadable ... instead we want ... icons ... collapsed into a ... icon
+    which opens a popout window") -- see :meth:`_relayout`/:meth:`_show_overflow_menu`.
     """
 
     order_changed = pyqtSignal(list)
@@ -129,19 +153,48 @@ class _IconStrip(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(4)
+        # A QVBoxLayout otherwise forces this widget's own minimumSize up to fit every button it
+        # currently holds (even hidden ones don't help until *after* that minimum is computed),
+        # which would silently override any resize down to less than that and defeat the whole
+        # overflow mechanism below -- see _relayout()'s own docstring.
+        self._layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self._buttons: dict[str, QToolButton] = {}
         self._order: list[str] = []
+        self._pinned: set[str] = set()
+        self._hidden_keys: list[str] = []
         self._drag_start: QPoint | None = None
         self._drag_key: str | None = None
         self._drag_source: QToolButton | None = None
         self.setAcceptDrops(True)
 
-    def add_button(self, key: str, button: QToolButton) -> None:
+        self._overflow_button = QToolButton(self)
+        self._overflow_button.setToolTip("More")
+        self._overflow_button.setAutoRaise(True)
+        self._overflow_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._overflow_button.hide()
+        self._overflow_button.clicked.connect(self._show_overflow_menu)
+        self.set_overflow_icon(icons.icon("more", color=_ICON_COLOR, size=_ICON_SIZE))
+
+    def add_button(self, key: str, button: QToolButton, *, pinned: bool = False) -> None:
         button.setProperty("_reorder_key", key)
         button.installEventFilter(self)
         self._buttons[key] = button
         self._order.append(key)
+        if pinned:
+            self._pinned.add(key)
         self._layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._apply_order(self._order)
+
+    def set_overflow_icon(
+        self, icon, icon_size: int = _ICON_SIZE, button_size: int = _BUTTON_SIZE
+    ) -> None:  # noqa: ANN001 -- QIcon
+        """Lets the owner (:class:`ActivityBar`) re-render the "..." button's icon at the current
+        zoom scale, the same way it does for every other button -- see
+        :meth:`ActivityBar.refresh_icon_scale`."""
+        self._overflow_button.setIcon(icon)
+        self._overflow_button.setIconSize(QSize(icon_size, icon_size))
+        self._overflow_button.setFixedSize(button_size, button_size)
+        self._relayout()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 -- Qt override
         # getattr, not self._buttons directly: PyQt can re-wrap a still-alive C++ QToolButton (one
@@ -157,9 +210,13 @@ class _IconStrip(QWidget):
 
         event_type = event.type()
         if event_type == QEvent.Type.MouseButtonPress and isinstance(event, QMouseEvent):
-            if event.button() == Qt.MouseButton.LeftButton:
+            key = watched.property("_reorder_key")
+            # A pinned button (PROMPT.md: "the compile icon should be stuck to the top") never
+            # starts tracking a drag at all -- it still gets `return False` below so a plain click
+            # keeps working, it just can never become `self._drag_key`.
+            if event.button() == Qt.MouseButton.LeftButton and key not in self._pinned:
                 self._drag_start = event.position().toPoint()
-                self._drag_key = watched.property("_reorder_key")
+                self._drag_key = key
                 self._drag_source = watched
             return False  # let the button still see the press (so a plain click still works)
 
@@ -173,6 +230,7 @@ class _IconStrip(QWidget):
             ):
                 key = self._drag_key
                 source = self._drag_source
+                cursor_pos = event.position().toPoint()
                 self._drag_start = None
                 self._drag_key = None
                 self._drag_source = None
@@ -183,6 +241,15 @@ class _IconStrip(QWidget):
                 mime.setData(_REORDER_MIME, key.encode("utf-8"))
                 drag = QDrag(source)
                 drag.setMimeData(mime)
+                # PROMPT.md: "the buttons should drag under the cursor to be more visually
+                # appealing" -- without an explicit pixmap/hotspot, QDrag shows no representation
+                # of what's being dragged at all (just a plain cursor), so reordering gave no
+                # visual feedback about which icon was moving or where. Grabbing the source
+                # button's own current appearance and pinning the hotspot to where the cursor
+                # already is (in the button's own local coordinates, same frame `cursor_pos` is
+                # already in) makes the dragged icon track the cursor exactly, like a real drag.
+                drag.setPixmap(source.grab())
+                drag.setHotSpot(cursor_pos)
                 drag.exec(Qt.DropAction.MoveAction)
                 return True  # swallow -- don't let the button process this move too
             return False
@@ -199,6 +266,11 @@ class _IconStrip(QWidget):
     def order(self) -> list[str]:
         return list(self._order)
 
+    @property
+    def hidden_keys(self) -> list[str]:
+        """Keys currently collapsed behind the "..." overflow button -- see :meth:`_relayout`."""
+        return list(self._hidden_keys)
+
     def set_order(self, order: list[str]) -> None:
         """Applies a persisted order, dropping any key that no longer names a real button and
         appending (in their existing relative order) any button not mentioned -- a future new
@@ -209,11 +281,77 @@ class _IconStrip(QWidget):
         self._apply_order(known + missing)
 
     def _apply_order(self, order: list[str]) -> None:
+        # Pinned keys (in their own existing relative order) always sort to the front, regardless
+        # of what order was requested -- see this class's own docstring.
+        if self._pinned:
+            order = [key for key in order if key in self._pinned] + [
+                key for key in order if key not in self._pinned
+            ]
         self._order = order
         for key in self._order:
             # Re-adding a widget already in the layout just moves it to the end -- the standard
             # Qt idiom for reordering a QBoxLayout in place.
             self._layout.addWidget(self._buttons[key], 0, Qt.AlignmentFlag.AlignHCenter)
+        self._relayout()
+
+    # -- overflow ("..." popout for icons that don't fit) ---------------------------------------
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001 -- QResizeEvent
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        """Shows as many buttons (top to bottom, in ``self._order``) as fit in the strip's current
+        height, collapsing the rest behind a trailing "..." button -- see this class's own
+        docstring. A height of 0 (not laid out/shown yet, e.g. mid-construction) shows everything;
+        a real resize corrects that once it happens."""
+        order = self._order
+        if not order:
+            self._hidden_keys = []
+            self._overflow_button.hide()
+            return
+
+        available = self.height()
+        spacing = self._layout.spacing()
+        heights = [_effective_height(self._buttons[key]) for key in order]
+        overflow_h = _effective_height(self._overflow_button)
+
+        if available <= 0:
+            visible_count = len(order)
+        else:
+            visible_count = len(order)
+            while visible_count > 0:
+                shown_h = sum(heights[:visible_count]) + spacing * max(visible_count - 1, 0)
+                needs_overflow = visible_count < len(order)
+                total_h = shown_h + (spacing + overflow_h if needs_overflow else 0)
+                if total_h <= available or visible_count <= 1:
+                    break
+                visible_count -= 1
+
+        visible = order[:visible_count]
+        hidden = order[visible_count:]
+
+        for key in visible:
+            self._buttons[key].show()
+        for key in hidden:
+            self._buttons[key].hide()
+
+        self._hidden_keys = hidden
+        if hidden:
+            self._layout.addWidget(self._overflow_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self._overflow_button.show()
+        else:
+            self._overflow_button.hide()
+
+    def _show_overflow_menu(self) -> None:
+        if not self._hidden_keys:
+            return
+        menu = QMenu(self)
+        for key in self._hidden_keys:
+            button = self._buttons[key]
+            action = menu.addAction(button.icon(), button.toolTip() or key)
+            action.triggered.connect(button.click)
+        menu.exec(self._overflow_button.mapToGlobal(self._overflow_button.rect().bottomLeft()))
 
     # -- drop target (accepting a drag started from eventFilter() above) ----------------------
 
@@ -230,20 +368,27 @@ class _IconStrip(QWidget):
         if not mime.hasFormat(_REORDER_MIME):
             return
         source_key = bytes(mime.data(_REORDER_MIME)).decode("utf-8")
-        if source_key not in self._buttons or source_key not in self._order:
+        if source_key not in self._buttons or source_key not in self._order or source_key in self._pinned:
             return
 
+        # Only currently-visible buttons have a meaningful (non-stale) geometry to target a drop
+        # position against -- an overflowed one is hidden, so its last layout position is whatever
+        # it was before it collapsed into "...".
+        visible = [key for key in self._order if key not in self._hidden_keys]
         drop_y = event.position().toPoint().y()
-        target_index = len(self._order)
-        for index, key in enumerate(self._order):
+        target_key: str | None = None
+        for key in visible:
+            # Skip pinned buttons as possible drop targets -- nothing may ever land ahead of one
+            # (a pinned key is always order[0], so matching it here would insert the drag source
+            # at index 0, ahead of it).
+            if key in self._pinned:
+                continue
             if drop_y < self._buttons[key].geometry().center().y():
-                target_index = index
+                target_key = key
                 break
 
         order = [key for key in self._order if key != source_key]
-        current_index = self._order.index(source_key)
-        if target_index > current_index:
-            target_index -= 1
+        target_index = order.index(target_key) if target_key is not None else len(order)
         order.insert(target_index, source_key)
 
         self._apply_order(order)
@@ -379,6 +524,10 @@ class ActivityBar(QWidget):
                     "locations": self.locations_button,
                     "search": self.search_button,
                 }[key],
+                # PROMPT.md: "the compile icon should be stuck to the top" -- never draggable,
+                # never a drop target's predecessor, always sorted first. See _IconStrip's own
+                # docstring.
+                pinned=(key == "compile"),
             )
         saved_order = _load_order(self._env_path)
         if saved_order is not None:
@@ -505,3 +654,7 @@ class ActivityBar(QWidget):
         self.status_button.setIcon(icons.status_icon(self._halo_status, _ICON_COLOR, icon_size))
         self.status_button.setIconSize(QSize(icon_size, icon_size))
         self.status_button.setFixedSize(button_size, button_size)
+
+        self._icon_strip.set_overflow_icon(
+            icons.icon("more", color=_ICON_COLOR, size=icon_size), icon_size, button_size
+        )

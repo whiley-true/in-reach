@@ -888,7 +888,9 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
 
     # git/scripts aren't named in the saved order at all -- appended after it, in their existing
     # (default) relative order, same as any other icon added after a user's own .env was written.
-    assert bar._icon_strip.order == ["search", "explorer", "rvt", "locations", "compile", "git", "scripts"]
+    # "compile" is pinned (PROMPT.md: "the compile icon should be stuck to the top") -- it sorts to
+    # the front regardless of where the saved order put it.
+    assert bar._icon_strip.order == ["compile", "search", "explorer", "rvt", "locations", "git", "scripts"]
 
 
 def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
@@ -905,7 +907,8 @@ def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path
     qtbot.addWidget(bar)
 
     order = bar._icon_strip.order
-    assert order[:2] == ["search", "rvt"]
+    # "compile" is pinned to the front (PROMPT.md: "the compile icon should be stuck to the top").
+    assert order[:3] == ["compile", "search", "rvt"]
     assert set(order) == {"compile", "rvt", "explorer", "git", "scripts", "locations", "search"}
 
 
@@ -1012,6 +1015,186 @@ def test_pressing_and_dragging_a_bar_button_past_the_threshold_starts_a_real_dra
 
     assert started_with == [b"a"]
     assert button_a.isDown() is False
+
+
+def test_dragging_a_bar_button_sets_a_pixmap_and_hotspot_so_it_tracks_the_cursor(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "the buttons should drag under the cursor to be more visually appealing" --
+    # without an explicit pixmap/hotspot QDrag shows no representation of the dragged icon at all.
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QDrag, QMouseEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c"):
+        strip.add_button(key, QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+    button_a = strip._buttons["a"]
+
+    seen: dict[str, object] = {}
+
+    def fake_set_pixmap(self, pixmap):
+        seen["pixmap"] = pixmap
+
+    def fake_set_hotspot(self, point):
+        seen["hotspot"] = point
+
+    def fake_exec(self, *args, **kwargs):
+        return Qt.DropAction.MoveAction
+
+    monkeypatch.setattr(QDrag, "setPixmap", fake_set_pixmap)
+    monkeypatch.setattr(QDrag, "setHotSpot", fake_set_hotspot)
+    monkeypatch.setattr(QDrag, "exec", fake_exec)
+
+    QApplication.sendEvent(
+        button_a,
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(5, 5),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        button_a,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(5, 40),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert seen["pixmap"].isNull() is False
+    assert seen["hotspot"] == QPoint(5, 40)
+
+
+def test_the_pinned_compile_button_cannot_be_dragged(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PROMPT.md: "the compile icon should be stuck to the top".
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QDrag, QMouseEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    strip.add_button("pinned", QToolButton(), pinned=True)
+    strip.add_button("b", QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+    pinned_button = strip._buttons["pinned"]
+
+    started = []
+    monkeypatch.setattr(QDrag, "exec", lambda self, *a, **k: started.append(True))
+
+    QApplication.sendEvent(
+        pinned_button,
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(5, 5),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        pinned_button,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(5, 40),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert started == []
+
+
+def test_dropping_onto_the_pinned_button_never_lands_ahead_of_it(qtbot) -> None:
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QMimeData, QPointF
+    from PyQt6.QtCore import Qt as QtNS
+    from PyQt6.QtGui import QDropEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    strip.add_button("pinned", QToolButton(), pinned=True)
+    for key in ("b", "c"):
+        strip.add_button(key, QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+
+    mime = QMimeData()
+    mime.setData("application/x-inreach-activitybar-icon", b"c")
+    drop_pos = QPointF(strip._buttons["pinned"].geometry().center())
+    drop_pos.setY(strip._buttons["pinned"].geometry().top())
+    event = QDropEvent(
+        drop_pos, QtNS.DropAction.MoveAction, mime, QtNS.MouseButton.LeftButton, QtNS.KeyboardModifier.NoModifier
+    )
+    strip.dropEvent(event)
+
+    assert strip.order == ["pinned", "c", "b"]
+
+
+def test_icons_that_do_not_fit_collapse_behind_an_overflow_button(qtbot) -> None:
+    # PROMPT.md: "the side panel icons are overlaying on each other becoming unreadable ...
+    # instead we want ... icons ... collapsed into a ... icon which opens a popout window".
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c", "d", "e"):
+        button = QToolButton()
+        button.setFixedSize(44, 44)
+        strip.add_button(key, button)
+    strip.resize(50, 200)  # room for ~4 buttons at most, not all 5
+    strip.show()
+
+    assert strip.hidden_keys != []
+    assert strip._overflow_button.isVisibleTo(strip) is True
+    for key in strip.hidden_keys:
+        assert strip._buttons[key].isVisibleTo(strip) is False
+    for key in strip.order:
+        if key not in strip.hidden_keys:
+            assert strip._buttons[key].isVisibleTo(strip) is True
+
+    # Growing back gives every icon its own visible slot again.
+    strip.resize(50, 600)
+
+    assert strip.hidden_keys == []
+    assert strip._overflow_button.isVisibleTo(strip) is False
+
+
+def test_overflow_button_menu_lists_hidden_icons_and_clicking_one_activates_it(qtbot) -> None:
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    clicked: list[str] = []
+    for key in ("a", "b", "c", "d", "e"):
+        button = QToolButton()
+        button.setFixedSize(44, 44)
+        button.setToolTip(key)
+        button.clicked.connect(lambda _checked=False, k=key: clicked.append(k))
+        strip.add_button(key, button)
+    strip.resize(50, 200)
+    strip.show()
+    assert strip.hidden_keys != []
+
+    hidden_key = strip.hidden_keys[0]
+    strip._buttons[hidden_key].click()
+
+    assert clicked == [hidden_key]
 
 
 def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path) -> None:
@@ -2394,6 +2577,66 @@ def test_launch_rvt_opens_the_compiled_bin_not_the_frozen_source_one(
     assert calls[0] != source_bin
 
 
+def test_launch_rvt_falls_back_to_the_source_variant_when_the_compile_fails(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "when a user creates a new project from a personal game variant or inbuilt
+    # variant, the compile is not being ran and nothing is being generated in build folder. and
+    # hence nothing is opened when rvt is opened" -- a project created from a real (non-blank)
+    # variant can have a non-trivial script that fails to recompile (the decompile->recompile round
+    # trip isn't guaranteed lossless), which used to leave build/dist/*.bin unwritten and RVT
+    # launched against `None` (opening blank) instead of at least the source variant the user
+    # actually picked.
+    from in_reach.app import apply_settings, new_project, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    source_bin = new_project.source_variant_path(project_dir, folder)
+    source_bin.parent.mkdir(parents=True)
+    source_bin.write_bytes(b"the variant the user actually picked")
+    # No compiled_variant_path() file at all -- the compile below never gets far enough to write one.
+    window._on_project_opened(folder)
+    monkeypatch.setattr(
+        apply_settings,
+        "apply_settings_changes",
+        lambda pd, f: BuildResult(success=False, failure="Megalo compile failed"),
+    )
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [source_bin]
+
+
+def test_launch_rvt_opens_nothing_when_neither_compiled_nor_source_variant_exists(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project.get_project_dir(tmp_path).mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    window._on_project_opened(folder)
+    monkeypatch.setattr(
+        apply_settings,
+        "apply_settings_changes",
+        lambda pd, f: BuildResult(success=False, failure="no settings.json"),
+    )
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.activity_bar.rvt_button.click()
+
+    assert calls == [None]
+
+
 def test_launch_rvt_applies_present_settings_before_launching(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3510,6 +3753,38 @@ def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
     assert notified == ["Whiley"]
     assert dialog._theme_buttons["Whiley"].isChecked() is True
     assert dialog._theme_buttons["Light"].isChecked() is False
+
+
+def test_first_run_dialog_centers_on_the_parent_windows_screen_not_always_primary(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # BUG (PROMPT.md): "the select theme welcome dialog is not always appearing on the same screen
+    # as the in-reach ide" -- it used to always center on QApplication.primaryScreen(), which is
+    # wrong whenever the IDE's own main window lives on a different monitor.
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtWidgets import QWidget
+
+    class _FakeScreen:
+        def __init__(self, rect: QRect) -> None:
+            self._rect = rect
+
+        def availableGeometry(self) -> QRect:
+            return self._rect
+
+    parent_screen = _FakeScreen(QRect(2000, 0, 1000, 800))
+    primary_screen = _FakeScreen(QRect(0, 0, 1000, 800))
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    monkeypatch.setattr(QWidget, "screen", lambda self: parent_screen)
+    monkeypatch.setattr(QApplication, "primaryScreen", staticmethod(lambda: primary_screen))
+
+    dialog = FirstRunDialog(parent)
+    qtbot.addWidget(dialog)
+
+    dialog.show()
+
+    assert dialog.frameGeometry().center() == parent_screen.availableGeometry().center()
 
 
 # -- Halo install/running status (PROMPT.md: "a flame icon which can be of different states

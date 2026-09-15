@@ -1146,12 +1146,67 @@ def test_close_current_on_an_empty_pane_is_a_no_op(window: MainWindow) -> None:
     assert pane.close_current() is False
 
 
-def test_active_pane_is_the_first_pane(window: MainWindow) -> None:
+def test_active_pane_defaults_to_the_first_pane(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+
+    assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_follows_the_pane_created_by_a_split(window: MainWindow) -> None:
+    # PROMPT.md: "when a new file is opened it should load in the LAST ACTIVE/USED tab" --
+    # active_pane now tracks whichever pane was most recently interacted with, not always the
+    # first one. Splitting seeds the new pane with its own first tab, which counts as activity
+    # (matching VSCode: splitting moves you into the new pane).
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
     first_pane.split_button.click()
+    new_pane = main_panel.panes[-1]
+
+    assert main_panel.active_pane is new_pane
+
+
+def test_active_pane_follows_a_tab_switch_within_a_pane(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane  # the split itself already made it active
+
+    # Adding (and so switching to) a new tab in the first pane moves "last active" back to it.
+    main_panel.new_tab_in(first_pane)
 
     assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_follows_keyboard_focus_landing_inside_a_pane(window: MainWindow, tmp_path: Path) -> None:
+    # Clicking into an already-current tab's own content (no tab switch at all) should still move
+    # "last active" to that pane -- caught via QApplication.focusChanged, not currentChanged.
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane
+
+    editor = first_pane.widget(first_pane.currentIndex())
+    editor.setFocus()
+
+    assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_falls_back_to_the_first_pane_once_the_last_active_one_closes(
+    window: MainWindow,
+) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane
+
+    second_pane.tabCloseRequested.emit(second_pane.currentIndex())
+
+    assert second_pane not in main_panel.panes
+    assert main_panel.active_pane is main_panel.panes[0]
 
 
 def test_main_panel_save_all_covers_every_pane_not_just_the_first(

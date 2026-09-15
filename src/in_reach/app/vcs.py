@@ -32,7 +32,10 @@ from pathlib import Path
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
+from in_reach.app import logging_setup
 from in_reach.app.new_project import is_generated_file
+
+_logger = logging_setup.get_logger(__name__)
 
 HISTORY_DIRNAME = ".in-reach/history"
 DEFAULT_BRANCH = "main"
@@ -101,6 +104,7 @@ def init(folder: Path) -> None:
     # default rather than this module's own documented one.
     repo.refs.set_symbolic_ref(b"HEAD", _branch_ref(DEFAULT_BRANCH))
     record_change(folder, message=_AUTOSAVE_MESSAGE)
+    _logger.info("initialized shadow VCS history for %s", folder)
 
 
 def _should_skip(path: Path, folder: Path) -> bool:
@@ -226,6 +230,7 @@ def create_branch(folder: Path, name: str) -> None:
         raise ValueError(f'A branch named "{name}" already exists.')
     repo.refs[ref] = repo.refs[b"HEAD"]
     repo.refs.set_symbolic_ref(b"HEAD", ref)
+    _logger.info("created and switched to branch %r in %s", name, folder)
 
 
 def switch_branch(folder: Path, name: str) -> None:
@@ -247,6 +252,7 @@ def switch_branch(folder: Path, name: str) -> None:
     commit = repo.object_store[repo.refs[ref]]
     _checkout_tree(repo, commit.tree, folder)
     repo.refs.set_symbolic_ref(b"HEAD", ref)
+    _logger.info("switched branch to %r in %s", name, folder)
 
 
 def delete_branch(folder: Path, name: str) -> None:
@@ -267,6 +273,7 @@ def delete_branch(folder: Path, name: str) -> None:
     if len(list_branches(folder)) <= 1:
         raise ValueError("Can't delete the only branch.")
     del repo.refs[ref]
+    _logger.info("deleted branch %r in %s", name, folder)
 
 
 def _checkout_tree(repo: Repo, tree_sha: bytes, folder: Path) -> None:
@@ -322,7 +329,9 @@ def record_change(folder: Path, *, message: str = _AUTOSAVE_MESSAGE) -> str | No
     parent = _head_commit(repo)
     if parent is not None and parent.tree == tree_sha:
         return None
-    return _commit(repo, tree_sha, message)
+    sha = _commit(repo, tree_sha, message)
+    _logger.debug("recorded change %s in %s (%r)", sha, folder, message)
+    return sha
 
 
 def stamp(folder: Path, message: str) -> str:
@@ -345,7 +354,9 @@ def stamp(folder: Path, message: str) -> str:
         tree_sha = parent.tree if parent is not None else None
     if tree_sha is None:
         raise ValueError("Nothing to stamp -- this project has no trackable files yet.")
-    return _commit(repo, tree_sha, f"{_STAMP_PREFIX}{message}")
+    sha = _commit(repo, tree_sha, f"{_STAMP_PREFIX}{message}")
+    _logger.info("stamped %s in %s (%r)", sha, folder, message)
+    return sha
 
 
 def _to_snapshot(commit: Commit) -> Snapshot:
@@ -502,3 +513,4 @@ def restore_snapshot(folder: Path, sha: str) -> None:
         raise ValueError(f'Unknown snapshot: "{sha}".') from exc
     _checkout_tree(repo, commit.tree, folder)
     record_change(folder, message=f"restored {sha[:8]}")
+    _logger.info("restored snapshot %s in %s", sha, folder)

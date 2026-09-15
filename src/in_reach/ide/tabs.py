@@ -795,6 +795,15 @@ class MainPanelArea(QWidget):
     """Holds one or more :class:`_PaneGroup` instances side by side in a horizontal splitter, up
     to :data:`_MAX_H_SPLITS` horizontal splits, each in turn holding up to one vertical split."""
 
+    #: Re-emitted whenever *any* pane's own ``cursor_info_changed`` fires (a tab switch, or the
+    #: current tab's cursor/selection moving) -- MainWindow connects to this once, rather than to
+    #: one specific pane's own signal, since which pane is :attr:`active_pane` can now change over
+    #: the panel's lifetime (see that property's own docstring). ``_update_status_cursor_info``
+    #: always re-reads :attr:`active_pane` fresh when this fires, so a background pane's own cursor
+    #: moving harmlessly recomputes the same (unchanged) status-bar text rather than the active
+    #: one's.
+    cursor_info_changed = pyqtSignal()
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -822,6 +831,13 @@ class MainPanelArea(QWidget):
         self._splitter.setChildrenCollapsible(False)
         layout.addWidget(self._splitter)
 
+        # PROMPT.md: "when a new file is opened it should load in the LAST ACTIVE/USED tab" -- the
+        # pane most recently given keyboard focus (clicking into its content) or switched to a
+        # different tab within it; see :attr:`active_pane`/:meth:`_mark_active`/
+        # :meth:`_on_focus_changed`.
+        self._last_active_pane: TabPane | None = None
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
         self.groups: list[_PaneGroup] = []
         first_group = self._new_group()
         first_pane = self._new_pane()
@@ -831,6 +847,7 @@ class MainPanelArea(QWidget):
         first_group.add_pane(first_pane)
         self._add_group(first_group)
         self._next_tab_number = 1
+        self._last_active_pane = first_pane
 
     @property
     def panes(self) -> list[TabPane]:
@@ -838,13 +855,27 @@ class MainPanelArea(QWidget):
 
     @property
     def active_pane(self) -> TabPane:
-        """The pane the File menu's New File/Open File/Save/Close Editor actions target.
-
-        Always the first pane for now -- this area doesn't yet track which pane last had keyboard
-        focus across a multi-pane split, so a File-menu action always lands in the same place
-        regardless of which split the user was just looking at.
-        """
+        """The pane the File menu's New File/Open File/Save/Close Editor actions target -- the
+        pane most recently interacted with (a tab switch within it, or a click into its content),
+        tracked by :meth:`_mark_active`/:meth:`_on_focus_changed`. Falls back to the first pane if
+        the last-active one has since been closed (or nothing has been interacted with yet)."""
+        if self._last_active_pane is not None and self._last_active_pane in self.panes:
+            return self._last_active_pane
         return self.panes[0]
+
+    def _mark_active(self, pane: TabPane) -> None:
+        self._last_active_pane = pane
+
+    def _on_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
+        """Catches keyboard focus landing anywhere *inside* a pane's own current tab (clicking into
+        an editor without switching tabs) -- :meth:`_mark_active` alone only fires on an actual tab
+        switch, which misses that case entirely."""
+        widget = new
+        while widget is not None:
+            if isinstance(widget, TabPane) and widget in self.panes:
+                self._mark_active(widget)
+                return
+            widget = widget.parentWidget()
 
     @property
     def split_count(self) -> int:
@@ -924,7 +955,11 @@ class MainPanelArea(QWidget):
             pane._reload_tab(index)
 
     def _new_pane(self) -> TabPane:
-        return TabPane(self)
+        pane = TabPane(self)
+        # Switching tabs within a pane counts as "using" it -- see active_pane's own docstring.
+        pane.currentChanged.connect(lambda _index, p=pane: self._mark_active(p))
+        pane.cursor_info_changed.connect(self.cursor_info_changed.emit)
+        return pane
 
     def _new_group(self) -> _PaneGroup:
         return _PaneGroup(self)

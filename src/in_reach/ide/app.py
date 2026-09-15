@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
 
-from in_reach.app import env_file
+from in_reach.app import env_file, logging_setup
 from in_reach.ide import icons
 from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
@@ -22,6 +22,8 @@ from in_reach.ide.main_window import MainWindow
 _ENV_NAME = ".env"
 _FIRST_USE_KEY = "FIRST_USE"
 _WINDOWS_APP_USER_MODEL_ID = "InReach.IDE"
+
+_logger = logging_setup.get_logger(__name__)
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -53,6 +55,11 @@ def run(project_dir: Path) -> int:
     once per project, tracked by the ``FIRST_USE`` flag in ``project_dir/.env``.
     """
     env_path = project_dir / _ENV_NAME
+    # Idempotent, and cheap -- cli.py's own "run" command already calls this before reaching here,
+    # but ide_app.run() is also a valid entry point on its own (tests, a future non-CLI launcher),
+    # so this makes sure logging is live either way rather than depending on the caller.
+    logging_setup.configure_logging(project_dir)
+    _logger.info("IDE starting (project_dir=%s)", project_dir)
 
     _set_windows_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv)
@@ -73,8 +80,11 @@ def run(project_dir: Path) -> int:
     window.refresh_icon_colors()
 
     if _is_first_use(env_path):
+        _logger.info("first use of this project -- showing the welcome dialog")
         dialog = FirstRunDialog(window, on_theme_changed=window.on_theme_applied)
         dialog.exec()
         env_file.update_env_value(env_path, _FIRST_USE_KEY, "false")
 
-    return app.exec()
+    exit_code = app.exec()
+    _logger.info("IDE exiting (code=%d)", exit_code)
+    return exit_code

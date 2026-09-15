@@ -133,6 +133,16 @@ _ICON_SOURCES = {
         '-.5.36-.75.6-.75 1.15" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
         '<circle cx="8" cy="11.2" r="0.75" fill="{color}"/>',
     ),
+    "more": (  # codicon "ellipsis" -- shown by the activity bar's own overflow "..." button once
+        # too many reorderable icons no longer fit the bar's available height (PROMPT.md: "the
+        # side panel icons are overlaying on each other ... instead we want ... icons ... collapsed
+        # into a ... icon which opens a popout window"), same "deliberately simple" plain-dots
+        # reasoning as "compass"/"help" above.
+        "0 0 16 16",
+        '<circle cx="3.5" cy="8" r="1.5" fill="{color}"/>'
+        '<circle cx="8" cy="8" r="1.5" fill="{color}"/>'
+        '<circle cx="12.5" cy="8" r="1.5" fill="{color}"/>',
+    ),
     # Window controls: plain geometric shapes only (no glyph tracing needed at all).
     "win_minimize": (
         "0 0 16 16",

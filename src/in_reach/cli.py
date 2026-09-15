@@ -2,7 +2,7 @@ import sys
 
 import click
 
-from in_reach.app import project, verify
+from in_reach.app import logging_setup, project, verify
 
 
 @click.group()
@@ -33,6 +33,11 @@ def run() -> None:
     project.ensure_gitignore(project_dir)
     project.ensure_readme(project_dir)
     verify.verify_project(project_dir)
+    # verify_project() above guarantees the LOG_* keys this reads are populated -- see
+    # logging_setup's own module docstring for why every logger in the app is a child of
+    # "in_reach" rather than the root logger.
+    logger = logging_setup.configure_logging(project_dir)
+    logger.info("in-reach run starting (project_dir=%s)", project_dir)
 
     from in_reach.ide import app as ide_app
 

@@ -21,10 +21,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from in_reach.app import new_project
+from in_reach.app import logging_setup, new_project
 from in_reach.app.rvt import decompile
 from in_reach.app.rvt.compile import BuildResult, run_compile
 from in_reach.app.rvt.strings_io import LANGUAGES as _LANGUAGE_CODES
+
+_logger = logging_setup.get_logger(__name__)
 
 _LANGUAGE_CODE_SET = frozenset(_LANGUAGE_CODES)
 
@@ -335,4 +337,9 @@ def apply_settings_changes(project_dir: Path, folder: Path) -> BuildResult:
         (PROMPT.md: "raise errors in text window") and blocks ``build/`` from changing when it
         does, simply by virtue of ``run_compile`` never having written anything on a failure.
     """
-    return run_compile(project_dir, folder, save=True)
+    result = run_compile(project_dir, folder, save=True)
+    if result.success:
+        _logger.info("applied settings for %s", folder)
+    else:
+        _logger.warning("apply failed for %s: %s", folder, result.failure)
+    return result

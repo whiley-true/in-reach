@@ -32,6 +32,7 @@ from in_reach.app import (
     env_file,
     halo_status,
     indent_settings,
+    logging_setup,
     new_project,
     project,
     recent,
@@ -56,6 +57,8 @@ from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
 from in_reach.ide.theme import Theme
 from in_reach.ide.window_resize import cursor_for_edges, resize_edges
+
+_logger = logging_setup.get_logger(__name__)
 
 _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
@@ -556,12 +559,14 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self._refresh_vcs_status)
         self._refresh_vcs_status(self.explorer_panel.current_folder)
 
-        # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- active_pane is
-        # always panes[0] for now (see MainPanelArea.active_pane's own docstring), so a single
-        # connection here (rather than threading this through every pane) is enough.
+        # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- connects to the
+        # panel's own re-broadcast signal (MainPanelArea.cursor_info_changed), not one specific
+        # pane's, since which pane is active_pane can change as the user moves between panes (see
+        # that property's own docstring); _update_status_cursor_info always re-reads active_pane
+        # fresh, so this one connection stays correct regardless of which pane fired it.
         indent_env_path = project.get_project_dir(self.root_dir) / ".env"
         indent_state.set_indent(*indent_settings.get_indent(indent_env_path))
-        self.main_panel.active_pane.cursor_info_changed.connect(self._update_status_cursor_info)
+        self.main_panel.cursor_info_changed.connect(self._update_status_cursor_info)
         self._update_status_cursor_info()
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
@@ -1319,11 +1324,24 @@ class MainWindow(QWidget):
             # (PROMPT.md: "we are having to press compile twice").
             self.activity_bar.rvt_button.setEnabled(False)
             try:
-                self._run_compile(project.get_project_dir(self.root_dir), folder)
+                compile_result = self._run_compile(project.get_project_dir(self.root_dir), folder)
             except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
-                pass
+                _logger.exception("best-effort compile before RVT launch failed for %s", folder)
+                compile_result = None
             finally:
                 self.activity_bar.set_rvt_enabled(True)  # folder is not None in this branch
+            if compile_result is not None and not compile_result.success:
+                # Still best-effort/non-blocking by design (see this method's own docstring) --
+                # just logged, not a dialog on every launch -- but this needs at least a trace
+                # somewhere: a script that fails to recompile (a very real risk for anything but a
+                # trivial script -- the decompile->recompile round trip isn't guaranteed lossless)
+                # used to leave build/dist/*.bin silently unwritten with no record of why anywhere,
+                # not even in the log, since only a *raised* exception was ever logged above.
+                _logger.warning(
+                    "best-effort compile before RVT launch did not succeed for %s: %s",
+                    folder,
+                    compile_result.failure or "Megalo compile failed",
+                )
             self._refresh_apply_enabled(folder)
             # A compile above may have just created build/dist/*.bin for the very first time (or
             # overwritten it via a delete-then-recreate save, which silently drops an already-
@@ -1332,10 +1350,12 @@ class MainWindow(QWidget):
             # to be opened against, below) is actually noticed.
             self._rewatch_project_bin(folder)
         try:
-            process = rvt_launcher.launch_rvt(self._current_project_bin())
+            process = rvt_launcher.launch_rvt(self._rvt_launch_target(folder))
         except OSError as exc:
+            _logger.error("couldn't launch ReachVariantTool: %s", exc)
             QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")
             return
+        _logger.info("launched ReachVariantTool (pid=%s, folder=%s)", getattr(process, "pid", None), folder)
         if folder is not None:
             self._rvt_processes[folder] = process
 
@@ -1388,6 +1408,24 @@ class MainWindow(QWidget):
             return None
         bin_path = new_project.compiled_variant_path(folder)
         return bin_path if bin_path.is_file() else None
+
+    def _rvt_launch_target(self, folder: Path | None) -> Path | None:
+        """What :meth:`launch_rvt` actually hands RVT to open -- the freshly-*compiled* ``.bin``
+        (:func:`~in_reach.app.new_project.compiled_variant_path`) if the best-effort pre-launch
+        compile above produced one, same as :attr:`_current_project_bin`'s own result. Falls back
+        to :func:`~in_reach.app.new_project.source_variant_path` (the project's original,
+        never-recompiled starting point) when it hasn't -- a project created from a real personal/
+        built-in variant with a non-trivial script can genuinely fail to recompile (the decompile->
+        recompile round trip isn't guaranteed lossless), which used to leave ``launch_rvt`` opening
+        RVT against nothing at all rather than at least the gametype the user actually picked.
+        """
+        if folder is None:
+            return None
+        compiled = new_project.compiled_variant_path(folder)
+        if compiled.is_file():
+            return compiled
+        source = new_project.source_variant_path(project.get_project_dir(self.root_dir), folder)
+        return source if source.is_file() else None
 
     def _on_active_project_changed(self, folder: Path | None) -> None:
         """PROMPT.md: "rvt should not be launchable if no project is open" -- and the Apply

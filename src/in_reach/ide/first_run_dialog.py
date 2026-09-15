@@ -56,7 +56,12 @@ class FirstRunDialog(QDialog):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        screen = QApplication.primaryScreen()
+        # BUG (PROMPT.md): centering on QApplication.primaryScreen() unconditionally put this
+        # dialog on the primary monitor even when the IDE's own main window lives on a different
+        # one -- prefer the parent window's current screen (where the IDE actually is), falling
+        # back to the primary screen only when there's no parent to ask (e.g. shown standalone).
+        parent = self.parentWidget()
+        screen = (parent.window().screen() if parent is not None else None) or QApplication.primaryScreen()
         if screen is not None:
             frame = self.frameGeometry()
             frame.moveCenter(screen.availableGeometry().center())
