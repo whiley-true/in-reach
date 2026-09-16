@@ -11,6 +11,7 @@ importing in-reach as a library, and pytest's own log capture is unaffected unle
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 from pathlib import Path
 
@@ -20,6 +21,13 @@ _ENV_NAME = ".env"
 _LOGGER_NAME = "in_reach"
 _DEFAULT_LEVEL = "INFO"
 _DEFAULT_MAX_LINES = 1000
+_CRASH_FILE_NAME = "crash.log"
+
+#: Keeps the crash-dump file object alive for the whole process -- faulthandler.enable() needs its
+#: file argument to stay open (it writes to the raw file descriptor from inside a signal handler,
+#: which can't safely re-open anything), so this can't be a local variable that gets garbage
+#: collected once enable_crash_dumps() returns.
+_crash_file = None
 
 _LEVELS = {
     "DEBUG": logging.DEBUG,
@@ -118,6 +126,48 @@ def configure_logging(project_dir: Path) -> logging.Logger:
         logger.addHandler(logging.NullHandler())
 
     return logger
+
+
+def enable_crash_dumps(project_dir: Path) -> Path | None:
+    """Enables :mod:`faulthandler` against ``<LOG_DIR>/crash.log`` -- catches what
+    :func:`configure_logging`'s own Python-level logging structurally cannot: a fatal *native*
+    crash (an access violation inside Qt/PyQt's own C++ code, a stack overflow, ...) that kills the
+    process before Python's exception machinery -- ``sys.excepthook`` included -- ever runs at all.
+    A bug report of "the whole app just disappears, nothing in the log" is exactly what that looks
+    like from the outside; this is the one thing that can still leave a trace for it (a Python-level
+    stack per thread, not a full native one, but far better than nothing).
+
+    Idempotent (safe to call more than once in the same process, e.g. across tests) -- re-running it
+    just re-points ``faulthandler`` at a fresh file handle rather than stacking anything.
+
+    Args:
+        project_dir: The project's ``.in-reach`` folder, same argument :func:`configure_logging`
+            takes.
+
+    Returns:
+        The crash-log path, or ``None`` if it couldn't be opened (a read-only/missing ``LOG_DIR``)
+        -- faulthandler is simply left disabled in that case, same as if this were never called.
+    """
+    global _crash_file
+    values = env_file.get_env_values(project_dir / _ENV_NAME)
+    log_dir = Path(values.get("LOG_DIR") or (project_dir / "logs"))
+    crash_path = log_dir / _CRASH_FILE_NAME
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handle = crash_path.open("a", buffering=1, encoding="utf-8")
+    except OSError:
+        return None
+
+    if _crash_file is not None:
+        faulthandler.disable()
+        try:
+            _crash_file.close()
+        except OSError:
+            pass
+
+    _crash_file = handle
+    faulthandler.enable(file=_crash_file, all_threads=True)
+    return crash_path
 
 
 def get_logger(name: str) -> logging.Logger:

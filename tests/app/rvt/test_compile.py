@@ -186,3 +186,71 @@ def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(t
     before_script_settings.pop("$schema", None)
     after_script_settings.pop("$schema", None)
     assert before_script_settings == after_script_settings
+
+
+# -- isolated child process (see compile.py's own module docstring for why compiling runs here) --
+
+
+def test_run_compile_never_spawns_a_subprocess_for_an_early_validation_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("_run_compile_isolated() should never be reached")
+
+    monkeypatch.setattr(compile_module, "_run_compile_isolated", _fail_if_called)
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir(parents=True)
+    folder = tmp_path / "abcd1234"
+    (folder / "settings").mkdir(parents=True)
+    (folder / "settings" / "settings.json").write_text("{not valid json", encoding="utf-8")
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+
+    assert result.success is False
+    assert "settings.json" in result.failure
+
+
+@_NEEDS_NATIVE_RVT
+def test_run_compile_isolated_reports_a_crashed_child_process_as_a_build_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The one failure mode this isolation exists to contain (see compile.py's own module
+    # docstring): a hard crash in the child process must surface as an ordinary, reportable
+    # BuildResult -- never a raised exception or a crash of *this* (the caller's) process.
+    import subprocess as subprocess_module
+
+    project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
+
+    def _fake_run(*_args, **_kwargs):
+        return subprocess_module.CompletedProcess(args=[], returncode=-1073741819, stdout="", stderr="")
+
+    monkeypatch.setattr(compile_module.subprocess, "run", _fake_run)
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+
+    assert result.success is False
+    assert "exited unexpectedly" in result.failure
+
+
+@_NEEDS_NATIVE_RVT
+def test_run_compile_isolated_reports_unparseable_child_output_as_a_build_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
+
+    real_run = compile_module.subprocess.run
+
+    def _fake_run(args, **kwargs):
+        # Let the real child run, then clobber whatever it wrote to the result file -- simulating
+        # e.g. a native call writing stray bytes to the wrong place, or a truncated write.
+        completed = real_run(args, **kwargs)
+        result_path = Path(args[-1])
+        result_path.write_text("not json", encoding="utf-8")
+        return completed
+
+    monkeypatch.setattr(compile_module.subprocess, "run", _fake_run)
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+
+    assert result.success is False
+    assert "compile result" in result.failure.lower()

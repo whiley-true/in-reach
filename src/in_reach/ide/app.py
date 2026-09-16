@@ -18,6 +18,7 @@ from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import MainWindow
+from in_reach.ide.win_native_filter import BlockAccessibilityQueries
 
 _ENV_NAME = ".env"
 _FIRST_USE_KEY = "FIRST_USE"
@@ -48,6 +49,33 @@ def _is_first_use(env_path: Path) -> bool:
     return value.strip().lower() != "false"
 
 
+def _install_crash_logging() -> None:
+    """Logs any exception that escapes all the way to the top of the app, before whatever happens
+    next (PyQt6's own default behavior for an exception raised inside a Qt slot -- print and
+    otherwise treat it as fatal).
+
+    Without this, a bug report like "the whole app just disappears, no error" was genuinely
+    impossible to diagnose: ``OUTPUT_TO_STREAM`` defaults to ``false`` (see ``logging_setup``), and
+    a GUI app launched via a Start Menu/desktop shortcut (rather than a terminal) has no console
+    for the default ``sys.excepthook``'s own stderr print to land on anyway -- there was *nowhere*
+    the traceback could have been seen. Chains to whatever ``sys.excepthook`` was already installed
+    (the interpreter's own default, normally) after logging, so this only adds a log record, it
+    never changes what happens to the exception afterward.
+    """
+    if getattr(sys.excepthook, "_in_reach_crash_logging", False):
+        return  # already installed -- e.g. a second run() in the same process (tests) -- don't
+        # stack another wrapper around it on top.
+
+    previous_hook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_tb) -> None:
+        _logger.critical("unhandled exception -- the app may be about to exit", exc_info=(exc_type, exc_value, exc_tb))
+        previous_hook(exc_type, exc_value, exc_tb)
+
+    _hook._in_reach_crash_logging = True
+    sys.excepthook = _hook
+
+
 def run(project_dir: Path) -> int:
     """Opens the IDE, fullscreen, against ``project_dir``'s ``.in-reach`` project folder.
 
@@ -59,10 +87,19 @@ def run(project_dir: Path) -> int:
     # but ide_app.run() is also a valid entry point on its own (tests, a future non-CLI launcher),
     # so this makes sure logging is live either way rather than depending on the caller.
     logging_setup.configure_logging(project_dir)
+    _install_crash_logging()
+    crash_log_path = logging_setup.enable_crash_dumps(project_dir)
+    if crash_log_path is not None:
+        _logger.info("native crash dumps (if any) will be written to %s", crash_log_path)
     _logger.info("IDE starting (project_dir=%s)", project_dir)
 
     _set_windows_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv)
+    # Kept alive on the app itself -- installNativeEventFilter() doesn't take Python-side ownership,
+    # so a local-only reference would let this get garbage-collected out from under Qt's C++ side.
+    # See win_native_filter.py's own module docstring for why this exists at all.
+    app._in_reach_accessibility_filter = BlockAccessibilityQueries()
+    app.installNativeEventFilter(app._in_reach_accessibility_filter)
     app.setWindowIcon(icons.app_icon())
     saved_theme_name = env_file.get_env_values(env_path).get(theme_module.THEME_KEY, theme_module.DEFAULT_THEME_NAME)
     theme = theme_module.apply_theme(app, saved_theme_name)

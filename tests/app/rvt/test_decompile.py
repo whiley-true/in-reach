@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,21 @@ def _patch(monkeypatch, variant, settings) -> None:
     monkeypatch.setattr(decompile, "get_rvt", lambda: type("Rvt", (), {"load": staticmethod(lambda path: variant)})())
     monkeypatch.setattr(decompile, "extract_game_settings", lambda v, path: settings)
     monkeypatch.setattr(decompile.strings_io, "extract_strings", lambda mp: {"meta": {}, "teams": [], "script_strings": []})
+    # decompile_into_project()/resync_from_bin() normally isolate the real work in a fresh child
+    # process (see decompile.py's own module docstring for why) -- a separate interpreter that
+    # would never see any of the monkeypatches above. These tests are about the orchestration/
+    # writing logic around a *fake* native layer, not the isolation boundary itself (see
+    # test_run_decompile_isolated_* below for that), so route straight to the in-process
+    # implementations instead of actually spawning a subprocess.
+    monkeypatch.setattr(
+        decompile,
+        "_run_decompile_isolated",
+        lambda mode, bin_path, folder, **kwargs: (
+            decompile._decompile_into_project_in_process
+            if mode == "into_project"
+            else decompile._resync_from_bin_in_process
+        )(bin_path, folder, **kwargs),
+    )
 
 
 def test_decompile_into_project_writes_settings_strings_and_script(
@@ -430,3 +446,75 @@ def test_decompile_into_project_against_a_real_bin(tmp_path: Path) -> None:
 
     stats = json.loads((folder / "build" / decompile.GENERATED_STATS_FILENAME).read_text(encoding="utf-8"))
     assert stats["space"]["bytes_used"] > 0
+
+
+# -- isolated child process (see decompile.py's own module docstring for why) --------------------
+
+
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
+def test_decompile_into_project_raises_a_plain_exception_for_an_unreadable_bin(tmp_path: Path) -> None:
+    # The isolated child can't pass its own real exception type/traceback back across the process
+    # boundary -- see _run_decompile_isolated's own docstring -- so every caller only ever gets a
+    # RuntimeError with a message, regardless of what the native extension itself actually raised.
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError):
+        decompile.decompile_into_project(tmp_path / "does-not-exist.bin", folder)
+
+
+def test_run_decompile_isolated_reports_a_crashed_child_process(tmp_path: Path, monkeypatch) -> None:
+    # The one failure mode this isolation exists to contain (see the module's own docstring): a
+    # hard crash in the child process must surface as an ordinary RuntimeError here, never a crash
+    # of *this* (the caller's) process.
+    import subprocess as subprocess_module
+
+    def _fake_run(*_args, **_kwargs):
+        return subprocess_module.CompletedProcess(args=[], returncode=-1073741819, stdout="", stderr="")
+
+    monkeypatch.setattr(decompile.subprocess, "run", _fake_run)
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError, match="exited unexpectedly"):
+        decompile.decompile_into_project(tmp_path / "source.bin", folder)
+
+
+def test_run_decompile_isolated_reports_unparseable_child_output(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as subprocess_module
+
+    def _fake_run(*_args, **kwargs):
+        return subprocess_module.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(decompile.subprocess, "run", _fake_run)
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError, match="[Cc]ouldn't read"):
+        decompile.decompile_into_project(tmp_path / "source.bin", folder)
+
+
+def test_serialize_decompile_request_round_trips_map_entries(tmp_path: Path) -> None:
+    from in_reach.app.maps_io import MapEntry
+
+    entry = MapEntry(
+        filename="foo.mvar",
+        source="standard",
+        title="Foo",
+        description="A map",
+        map_id=42,
+        base_canvas_map="forge_island",
+        forge_labels=["a", "b"],
+    )
+
+    request = decompile._serialize_decompile_request(
+        tmp_path / "x.bin",
+        tmp_path / "project",
+        category=decompile.EngineCategory.none,
+        category_icon=None,
+        title=None,
+        description=None,
+        map_entries=[entry],
+    )
+
+    assert request["map_entries"] == [dataclasses.asdict(entry)]

@@ -19,13 +19,29 @@ its own, for ``MainWindow``'s own ``.bin``-file-watcher to call whenever RVT sav
 ``.bin`` out from under a running project -- ``script/output.txt`` is deliberately never touched by
 that resync, since it's the one genuinely hand-editable thing here, not a live mirror of the
 ``.bin`` the way everything else now is.
+
+Like :mod:`in_reach.app.rvt.compile`, both public entry points here (:func:`decompile_into_project`/
+:func:`resync_from_bin`) run their real work (:func:`_decompile_into_project_in_process`/
+:func:`_resync_from_bin_in_process`, everything from :func:`~in_reach.app.rvt.rvt_bridge.get_rvt`
+onward) in an isolated child process rather than directly in whatever process called them -- see
+``compile.py``'s own module docstring for why (the bundled native extension's own Qt5 conflicting
+with this app's own PyQt6/Qt6 in the same process). Decompiling happens at every single project
+creation, and on every RVT save while a project is open (the ``.bin``-file-watcher's own resync) --
+by far the most common way the native extension ever gets loaded into the GUI process at all, so
+isolating it here matters at least as much as isolating ``compile.py``'s own less-frequent calls.
 """
 from __future__ import annotations
 
+import dataclasses
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from in_reach.app import maps_io, new_project
+from in_reach.app import logging_setup, maps_io, new_project
 from in_reach.app.categories import EngineCategory, EngineIcon
 
 from . import schema_io, settings_io, strings_io
@@ -36,6 +52,8 @@ from .models.game_settings import GameSettings
 from .models.script_settings import ScriptSettings
 from .models.strings import StringsDocument
 from .rvt_bridge import get_rvt
+
+_logger = logging_setup.get_logger(__name__)
 
 SETTINGS_FILENAME = "settings.json"
 SCRIPT_SETTINGS_FILENAME = "script_settings.json"
@@ -171,7 +189,154 @@ def write_build_snapshot(
     )
 
 
+def _serialize_decompile_request(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory,
+    category_icon: EngineIcon | None,
+    title: str | None,
+    description: str | None,
+    map_entries: list[maps_io.MapEntry],
+) -> dict:
+    """Everything :func:`_run_decompile_isolated` needs the child process to reconstruct before
+    calling the real ``_in_process`` function -- plain JSON-safe types only (see
+    :mod:`in_reach.app.rvt.decompile_subprocess`'s own deserialization, the exact inverse)."""
+    return {
+        "bin_path": str(bin_path),
+        "folder": str(folder),
+        "category": int(category),
+        "category_icon": int(category_icon) if category_icon is not None else None,
+        "title": title,
+        "description": description,
+        "map_entries": [dataclasses.asdict(entry) for entry in map_entries],
+    }
+
+
+def _run_decompile_isolated(
+    mode: str,
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory,
+    category_icon: EngineIcon | None,
+    title: str | None,
+    description: str | None,
+    map_entries: list[maps_io.MapEntry],
+) -> None:
+    """Runs ``mode`` (``"into_project"`` or ``"resync"``) in a fresh, isolated ``python -m`` child
+    process -- see this module's own docstring for why. Shared by :func:`decompile_into_project`/
+    :func:`resync_from_bin`, whose real (``_in_process``) implementations differ only in which
+    generated files they write, not in how they need isolating.
+
+    Raises:
+        RuntimeError: The child process reported a failure, or crashed outright (e.g. the same
+            native access violation this isolation exists to contain) -- wrapping whatever the
+            child's own exception message was, or its exit code if it never got the chance to
+            report one at all. Never the *original* exception type/traceback -- those can't cross
+            a process boundary -- but every real caller here only ever needed the message anyway
+            (see e.g. :func:`~in_reach.app.new_project._decompile_source_variant`'s own
+            ``except Exception as exc: f"...: {exc}"``).
+    """
+    request = _serialize_decompile_request(
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        map_entries=map_entries,
+    )
+    request_fd, request_path_str = tempfile.mkstemp(prefix="in-reach-decompile-req-", suffix=".json")
+    result_fd, result_path_str = tempfile.mkstemp(prefix="in-reach-decompile-res-", suffix=".json")
+    os.close(result_fd)
+    request_path = Path(request_path_str)
+    result_path = Path(result_path_str)
+    try:
+        with os.fdopen(request_fd, "w", encoding="utf-8") as handle:
+            json.dump(request, handle)
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "in_reach.app.rvt.decompile_subprocess", mode, str(request_path), str(result_path)],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            _logger.error(
+                "decompile subprocess (%s) for %s exited with code %s: %s",
+                mode,
+                folder,
+                proc.returncode,
+                (proc.stderr or proc.stdout).strip(),
+            )
+            raise RuntimeError(
+                f"The decompile process exited unexpectedly (code {proc.returncode})."
+                f"{(' ' + proc.stderr.strip()) if proc.stderr.strip() else ''}"
+            )
+        try:
+            outcome = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _logger.exception("couldn't read decompile subprocess result for %s", folder)
+            raise RuntimeError(f"Couldn't read the decompile result: {exc}") from exc
+        if not outcome.get("success"):
+            raise RuntimeError(outcome.get("error") or "Decompile failed for an unknown reason.")
+    finally:
+        request_path.unlink(missing_ok=True)
+        result_path.unlink(missing_ok=True)
+
+
 def decompile_into_project(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory = EngineCategory.none,
+    category_icon: EngineIcon | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    map_entries: list[maps_io.MapEntry] = (),
+) -> None:
+    """Isolated-child-process wrapper around :func:`_decompile_into_project_in_process` -- see this
+    module's own docstring for why, and that function's own docstring for what this actually does
+    and its arguments/raises."""
+    _run_decompile_isolated(
+        "into_project",
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        map_entries=list(map_entries),
+    )
+
+
+def resync_from_bin(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory = EngineCategory.none,
+    category_icon: EngineIcon | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    map_entries: list[maps_io.MapEntry] = (),
+) -> None:
+    """Isolated-child-process wrapper around :func:`_resync_from_bin_in_process` -- see this
+    module's own docstring for why, and that function's own docstring for what this actually does
+    and its arguments/raises."""
+    _run_decompile_isolated(
+        "resync",
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        map_entries=list(map_entries),
+    )
+
+
+def _decompile_into_project_in_process(
     bin_path: Path,
     folder: Path,
     *,
@@ -211,6 +376,10 @@ def decompile_into_project(
         Whatever the native extension or pydantic validation raises for a ``.bin`` it can't load or
         make sense of -- callers decide whether that should block project creation or just surface
         as a warning (see that function's own handling).
+
+    Only ever called from :mod:`in_reach.app.rvt.decompile_subprocess`, inside the isolated child
+    process the public :func:`decompile_into_project` spawns -- never call this directly from the
+    GUI process, see this module's own docstring for why.
     """
     decompiled = _decompile(
         bin_path, category=category, category_icon=category_icon, title=title, description=description
@@ -247,7 +416,7 @@ def decompile_into_project(
     )
 
 
-def resync_from_bin(
+def _resync_from_bin_in_process(
     bin_path: Path,
     folder: Path,
     *,
@@ -292,6 +461,10 @@ def resync_from_bin(
     Raises:
         Same as :func:`decompile_into_project` -- callers watching for RVT saves should treat this
         as best-effort and not let it crash the whole app over a ``.bin`` RVT left mid-write.
+
+    Only ever called from :mod:`in_reach.app.rvt.decompile_subprocess`, inside the isolated child
+    process the public :func:`resync_from_bin` spawns -- never call this directly from the GUI
+    process, see this module's own docstring for why.
     """
     decompiled = _decompile(
         bin_path, category=category, category_icon=category_icon, title=title, description=description

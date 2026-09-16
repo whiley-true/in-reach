@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from PyQt6 import sip
 from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar
 
 import in_reach
@@ -928,6 +929,75 @@ def test_splitting_a_pane_with_a_regular_file_has_no_padlock_icon(
     assert new_pane.tabIcon(new_pane.currentIndex()).isNull() is True
 
 
+def test_closing_a_split_pane_source_tab_leaves_its_duplicate_usable(
+    window: MainWindow, tmp_path: Path, qtbot
+) -> None:
+    # A real, native access-violation crash (PROMPT.md: "if i have two tabs open ... and i close
+    # the welcome, things crash"), eventually traced -- via Application Verifier's page heap, well
+    # past every splitter/resize theory that came before it -- to a genuine use-after-free: a
+    # split-pane duplicate shares its source tab's own QTextDocument (module docstring), but
+    # QPlainTextEdit.setDocument() never reparents it away from whichever editor originally created
+    # it, so closing *that* editor first let Qt's own parent-child cleanup delete the document out
+    # from under the still-open duplicate. MainPanelArea._register_document_user/
+    # _unregister_document_user (wired through TabPane._track_tab/_release_tab_widget) now refcount
+    # it instead -- this closes the *source* tab (not the duplicate) and then touches the duplicate,
+    # which would raise sip's own "wrapped C/C++ object has been deleted" RuntimeError (the Python-
+    # level symptom of the same underlying bug) if the fix ever regressed.
+    source_pane = window.main_panel.panes[0]
+    path = tmp_path / "script.txt"
+    path.write_text("hello\nworld\n", encoding="utf-8")
+    source_pane.open_file(path)
+    source_index = source_pane.currentIndex()
+    source_editor = source_pane.widget(source_index)
+
+    source_pane.split_button.click()
+    duplicate_pane = window.main_panel.panes[-1]
+    duplicate_editor = duplicate_pane.widget(duplicate_pane.currentIndex())
+    assert duplicate_editor.document() is source_editor.document()
+
+    source_pane._close_tab(source_index)
+    qtbot.wait(10)
+
+    assert duplicate_editor.toPlainText() == "hello\nworld\n"
+    assert duplicate_editor.document().blockCount() == 3
+
+
+def test_document_is_only_deleted_once_every_view_of_it_closes(
+    window: MainWindow, tmp_path: Path, qtbot
+) -> None:
+    pane = window.main_panel.panes[0]
+    path = tmp_path / "script.txt"
+    path.write_text("hi", encoding="utf-8")
+    pane.open_file(path)
+    index = pane.currentIndex()
+    document = pane.widget(index).document()
+    area = window.main_panel
+
+    assert document in area._document_users
+    assert area._document_owner[document] is pane.widget(index)
+
+    pane.split_button.click()
+    duplicate_pane = window.main_panel.panes[-1]
+    assert len(area._document_users[document]) == 2
+
+    # Closing the *owner* first (source_state.path's original tab) -- see
+    # _register_document_user's own docstring for why its C++ object is deliberately kept alive
+    # (parked, hidden) here rather than actually destroyed, since the duplicate still shares its
+    # document.
+    owner_widget = pane.widget(index)
+    pane._close_tab(index)
+    qtbot.wait(10)
+    assert document in area._document_users
+    assert document in area._parked_owners
+    assert sip.isdeleted(owner_widget) is False
+
+    duplicate_index = duplicate_pane.currentIndex()
+    duplicate_pane._close_tab(duplicate_index)
+    qtbot.wait(10)
+    assert document not in area._document_users
+    assert document not in area._parked_owners
+
+
 # -- schema-checked save (PROMPT.md: "the save should fail") ------------------------------------
 
 
@@ -1146,6 +1216,33 @@ def test_close_current_on_an_empty_pane_is_a_no_op(window: MainWindow) -> None:
     assert pane.close_current() is False
 
 
+def test_emptying_a_pane_defers_its_removal_to_the_next_event_loop_tick(
+    window: MainWindow, qtbot
+) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- a real, native (access-violation) crash, caught via faulthandler,
+    # traced to on_pane_emptied() tearing down the emptied pane's own group *synchronously*, from
+    # deep inside the close button's own click-handling call stack: reparenting/deleting that
+    # group's widget tree reflows the whole area's splitter, resizing a *sibling* pane's editor
+    # while its own click is still being handled, which crashed Qt's native text-layout engine.
+    # Removal must happen on the next event-loop tick instead -- this is the regression guard that
+    # it still does, not just that the pane eventually goes away.
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+
+    second_pane.tabCloseRequested.emit(second_pane.currentIndex())
+
+    # Not removed yet -- the click handler's own call stack hasn't unwound back to the event loop.
+    assert second_pane in main_panel.panes
+    assert second_pane.count() == 0
+
+    qtbot.wait(10)
+
+    assert second_pane not in main_panel.panes
+
+
 def test_active_pane_defaults_to_the_first_pane(window: MainWindow) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
@@ -1195,7 +1292,7 @@ def test_active_pane_follows_keyboard_focus_landing_inside_a_pane(window: MainWi
 
 
 def test_active_pane_falls_back_to_the_first_pane_once_the_last_active_one_closes(
-    window: MainWindow,
+    window: MainWindow, qtbot
 ) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
@@ -1204,6 +1301,8 @@ def test_active_pane_falls_back_to_the_first_pane_once_the_last_active_one_close
     assert main_panel.active_pane is second_pane
 
     second_pane.tabCloseRequested.emit(second_pane.currentIndex())
+    # Pane/group removal is deferred one event-loop tick -- see on_pane_emptied's own docstring.
+    qtbot.wait(10)
 
     assert second_pane not in main_panel.panes
     assert main_panel.active_pane is main_panel.panes[0]

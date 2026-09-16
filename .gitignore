@@ -32,3 +32,6 @@ PROMPT.md
 
 # Dev
 notes.txt
+
+# Windows crash dumps (WER LocalDumps) -- large binaries, never meant to be committed
+*.dmp

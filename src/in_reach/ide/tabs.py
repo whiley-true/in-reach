@@ -24,15 +24,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QMouseEvent, QPaintEvent
+from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QDrag,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QMouseEvent,
+    QPaintEvent,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
     QMenu,
     QMessageBox,
-    QSplitter,
     QStyle,
     QStyleOptionTab,
     QStylePainter,
@@ -46,6 +54,7 @@ from PyQt6.QtWidgets import (
 from in_reach.app.new_project import is_generated_file
 from in_reach.ide import icons, schema_check, style
 from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.markdown_preview import MarkdownPreviewWidget
 from in_reach.ide.welcome import WelcomeTab
 
@@ -290,10 +299,34 @@ class TabPane(QTabWidget):
     def _track_tab(self, index: int, widget: QWidget, state: "_TabState | None" = None) -> None:
         self._tab_state[widget] = state or _TabState()
         widget._owner_pane = self  # read back dynamically by _on_editor_modified
+        if isinstance(widget, TextEditorWidget):
+            # Idempotent (a cross-pane drag re-tracks the same already-registered widget/document
+            # pair here too, not just a genuinely new tab) -- see MainPanelArea.
+            # _register_document_user's own docstring for why this needs to happen at all.
+            self._area._register_document_user(widget.document(), widget)
         self._update_close_icon(index)
 
     def _tab_state_for(self, widget: QWidget) -> _TabState:
         return self._tab_state.setdefault(widget, _TabState())
+
+    def _release_tab_widget(self, widget: QWidget | None) -> None:
+        """Common cleanup for a tab's content widget wherever it's actually being destroyed (never
+        for a cross-pane drag, which reparents the same widget rather than destroying it) -- pairs
+        with the registration ``_track_tab`` does, so a shared document's own original owner is
+        never destroyed while another view still shares it (see ``MainPanelArea.
+        _register_document_user``'s own docstring for why that specifically -- not just the
+        document -- has to wait)."""
+        if widget is None:
+            return
+        self._tab_state.pop(widget, None)
+        if isinstance(widget, TextEditorWidget):
+            if not self._area._unregister_document_user(widget.document(), widget):
+                # Kept alive rather than destroyed -- see _unregister_document_user's own
+                # docstring; MainPanelArea itself deletes it once it's safe to.
+                widget.hide()
+                widget.setParent(None)
+                return
+        widget.deleteLater()
 
     def _refresh_preview_button(self) -> None:
         """Shows :attr:`preview_button` only while the active tab is an editable Markdown one --
@@ -324,9 +357,7 @@ class TabPane(QTabWidget):
     def _close_tab(self, index: int) -> None:
         widget = self.widget(index)
         self.removeTab(index)
-        if widget is not None:
-            self._tab_state.pop(widget, None)
-            widget.deleteLater()
+        self._release_tab_widget(widget)
         self._area.on_pane_emptied(self)
 
     def _maybe_close(self, index: int) -> bool:
@@ -501,8 +532,7 @@ class TabPane(QTabWidget):
         if reuse_index is not None:
             old_widget = self.widget(reuse_index)
             self.removeTab(reuse_index)
-            self._tab_state.pop(old_widget, None)
-            old_widget.deleteLater()
+            self._release_tab_widget(old_widget)
             if tab_icon is not None:
                 new_index = self.insertTab(reuse_index, widget, tab_icon, path.name)
             else:
@@ -755,8 +785,12 @@ class _PaneGroup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.splitter = QSplitter(Qt.Orientation.Vertical)
-        self.splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
+        # PaneSplitter, not a real QSplitter -- see pane_splitter.py's own module docstring for why
+        # (PROMPT.md: "if i have two tabs open ... and i close the welcome, things crash", which
+        # turned out to be a native access violation reproducible from manually dragging a real
+        # QSplitterHandle, independent of tab-closing/file type, that no amount of working around
+        # QSplitter itself (setOpaqueResize(False), etc.) ever fully stopped).
+        self.splitter = PaneSplitter(Qt.Orientation.Vertical)
         self.splitter.setHandleWidth(style.PANEL_GAP)
         # A pane dragged down to (or past) its neighbor's edge must not be able to collapse it to
         # zero height -- only the tab-close/auto-close path should ever remove a pane.
@@ -779,6 +813,7 @@ class _PaneGroup(QWidget):
     def remove_pane(self, pane: TabPane) -> None:
         self.panes.remove(pane)
         card = pane.card
+        self.splitter.removeWidget(card)
         card.setParent(None)
         card.deleteLater()
         self._equalize()
@@ -823,8 +858,9 @@ class MainPanelArea(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
+        # See _PaneGroup.splitter's own comment -- same reasoning applies to this (horizontal,
+        # between pane-groups) splitter too.
+        self._splitter = PaneSplitter(Qt.Orientation.Horizontal)
         self._splitter.setHandleWidth(style.PANEL_GAP)
         # Same reasoning as _PaneGroup.splitter above -- in particular, this is what stops the
         # leftmost pane-group from being drag-resized down to zero width (effectively hiding it).
@@ -837,6 +873,14 @@ class MainPanelArea(QWidget):
         # :meth:`_on_focus_changed`.
         self._last_active_pane: TabPane | None = None
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+        # Every QTextDocument any currently-open TextEditorWidget displays, keyed to the set of
+        # widgets currently displaying it; _document_owner tracks which one of those widgets
+        # originally created it, and _parked_owners holds one kept-alive-but-hidden past its own
+        # tab closing (deferred destruction) -- see _register_document_user's own docstring.
+        self._document_users: dict[QTextDocument, set[TextEditorWidget]] = {}
+        self._document_owner: dict[QTextDocument, TextEditorWidget] = {}
+        self._parked_owners: dict[QTextDocument, TextEditorWidget] = {}
 
         self.groups: list[_PaneGroup] = []
         first_group = self._new_group()
@@ -865,6 +909,76 @@ class MainPanelArea(QWidget):
 
     def _mark_active(self, pane: TabPane) -> None:
         self._last_active_pane = pane
+
+    # -- shared-document lifetime (split-pane duplicates) -----------------------------------------
+
+    def _register_document_user(self, document: QTextDocument, widget: "TextEditorWidget") -> None:
+        """A confirmed, reproducible native crash (PROMPT.md: "if i have two tabs open ... and i
+        close the welcome, things crash"), isolated -- via Application Verifier's page heap, and
+        eventually a from-scratch, zero-custom-code repro (two bare ``QPlainTextEdit``s, no gutter/
+        minimap/breadcrumb/splitter/pane code at all) -- to a genuine PyQt6/Qt6 bug: destroying the
+        *specific* editor whose own construction first created a ``QTextDocument`` corrupts that
+        document's internal state for every other view still sharing it (this app's split-editor
+        duplicate -- module docstring: "the duplicate shares the same underlying QTextDocument, so
+        both views edit the same buffer"), *regardless* of the document's own Qt-parent, its own
+        deletion state, or how many other views reference it. Destroying any *other* (non-owning)
+        view sharing the same document is always safe. (A single ``setDocument()`` call per editor
+        instance, never a second one replacing an already-set document, is also required --
+        :meth:`~in_reach.ide.editor._PlainTextEditor.__init__`'s own docstring covers that half.)
+
+        Every :class:`TextEditorWidget` tab registers its own document here as soon as it's tracked
+        (see ``TabPane._track_tab``); the first registration for a given document also records
+        ``widget`` as that document's owner (see :meth:`_unregister_document_user`). A cross-pane
+        drag re-registers the same widget/document pair (harmless -- a plain ``set``, not a counter)
+        rather than a second, more meaningful share.
+        """
+        users = self._document_users.get(document)
+        if users is None:
+            users = set()
+            self._document_users[document] = users
+            self._document_owner[document] = widget
+        users.add(widget)
+
+    def _unregister_document_user(self, document: QTextDocument, widget: "TextEditorWidget") -> bool:
+        """Pairs with :meth:`_register_document_user` -- called wherever a tab's content widget
+        would normally be destroyed (never for a cross-pane drag, which reparents rather than
+        destroys). Returns whether the caller may actually ``deleteLater()`` ``widget`` now.
+
+        Ordinarily ``True`` -- but if ``widget`` is the document's own owner (see
+        :meth:`_register_document_user`) and other views still share it, returns ``False`` instead:
+        the caller must keep ``widget`` alive (hidden, unparented) rather than destroy it, per this
+        method's own docstring. :meth:`~in_reach.ide.tabs.TabPane._release_tab_widget` is the only
+        caller, and does exactly that. Once every other sharing view has since closed too, whichever
+        one closes last triggers this method to finally ``deleteLater()`` the parked owner itself
+        (its own destruction cascades to the document too, since it was never reparented away from
+        it) -- the caller never needs to know that happened.
+        """
+        users = self._document_users.get(document)
+        if users is None:
+            return True
+        users.discard(widget)
+
+        owner = self._document_owner.get(document)
+        parked = self._parked_owners.get(document)
+        if parked is not None:
+            if users - {parked}:
+                return True  # still other real views besides the parked owner
+            self._document_users.pop(document, None)
+            self._document_owner.pop(document, None)
+            del self._parked_owners[document]
+            parked.deleteLater()
+            return True
+
+        if not users:
+            self._document_users.pop(document, None)
+            self._document_owner.pop(document, None)
+            return True
+
+        if owner is widget:
+            self._parked_owners[document] = widget
+            return False
+
+        return True
 
     def _on_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
         """Catches keyboard focus landing anywhere *inside* a pane's own current tab (clicking into
@@ -1007,11 +1121,10 @@ class MainPanelArea(QWidget):
 
         generated = False
         if isinstance(widget, TextEditorWidget):
-            duplicate: QWidget = TextEditorWidget()
-            duplicate.setDocument(widget.document())
-            # set_path() *after* setDocument() -- it attaches the JSON highlighter (if any) to
-            # whatever document is current at the time, which needs to be the shared one both
-            # views actually edit, not the throwaway blank document TextEditorWidget() started with.
+            # document=widget.document(), not a separate setDocument() call after construction --
+            # see editor.py's _PlainTextEditor.__init__ docstring for why a *second* setDocument()
+            # on the same instance is itself the thing that used to crash here.
+            duplicate: QWidget = TextEditorWidget(document=widget.document())
             duplicate.set_path(source_state.path)
             # A duplicate is its own QWidget, not sharing widget-level (as opposed to document-
             # level) state with the source -- read-only doesn't carry over on its own, so a split
@@ -1131,8 +1244,30 @@ class MainPanelArea(QWidget):
 
     def on_pane_emptied(self, pane: TabPane) -> None:
         """Called after a tab is dragged or closed out of ``pane`` -- removes it (and its group, if
-        that was the group's last pane) unless it's the very last pane in the whole area."""
+        that was the group's last pane) unless it's the very last pane in the whole area.
+
+        The actual removal is deferred one event-loop tick (``QTimer.singleShot(0, ...)``) rather
+        than done immediately, in :meth:`_remove_empty_pane`. This is reached synchronously from
+        deep inside a tab's own close-button click handler (``_maybe_close`` -> ``_close_tab`` ->
+        here), and reparenting/deleting a whole pane-group's widget tree from there reflows this
+        area's own splitter *while that click is still being handled* -- confirmed (PROMPT.md: "if
+        i have two tabs open (1 on welcome and one on any json) and i close the welcome, things
+        crash") to be able to crash Qt's own native text-layout engine outright: an access
+        violation inside a *sibling* pane's ``TextEditorWidget.resizeEvent``, caught via
+        ``faulthandler``, from the resize that splitter reflow triggers landing mid-event-handling
+        like that. Letting the click handler's own call stack unwind back to the event loop first --
+        the same reason ``QWidget.deleteLater()`` defers destruction rather than doing it inline --
+        avoids it.
+        """
         if pane.count() != 0 or len(self.panes) <= 1:
+            return
+        QTimer.singleShot(0, lambda: self._remove_empty_pane(pane))
+
+    def _remove_empty_pane(self, pane: TabPane) -> None:
+        # Re-checked against whatever's true *now*, one event-loop tick after on_pane_emptied's own
+        # check above -- e.g. a tab could have been dropped back into `pane` in the meantime, or
+        # every other pane could have since closed too.
+        if pane.count() != 0 or pane not in self.panes or len(self.panes) <= 1:
             return
 
         group = pane.group
@@ -1141,6 +1276,7 @@ class MainPanelArea(QWidget):
             group._equalize()
         else:
             self.groups.remove(group)
+            self._splitter.removeWidget(group)
             group.setParent(None)
             group.deleteLater()
             self._equalize_groups()

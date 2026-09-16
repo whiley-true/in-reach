@@ -130,3 +130,55 @@ def test_get_logger_returns_a_child_of_the_in_reach_logger() -> None:
 
     assert logger.name == "in_reach.in_reach.ide.main_window"
     assert logger.name.startswith(logging_setup._LOGGER_NAME + ".")
+
+
+# -- enable_crash_dumps() ------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_faulthandler():
+    """enable_crash_dumps() mutates process-global faulthandler state and keeps a module-global
+    file handle open -- undo both after every test."""
+    import faulthandler
+
+    was_enabled = faulthandler.is_enabled()
+    yield
+    faulthandler.disable()
+    if logging_setup._crash_file is not None:
+        try:
+            logging_setup._crash_file.close()
+        except OSError:
+            pass
+        logging_setup._crash_file = None
+    if was_enabled:
+        faulthandler.enable()
+
+
+def test_enable_crash_dumps_creates_the_crash_log_and_enables_faulthandler(tmp_path: Path) -> None:
+    import faulthandler
+
+    crash_path = logging_setup.enable_crash_dumps(tmp_path)
+
+    assert crash_path == tmp_path / "logs" / "crash.log"
+    assert crash_path.is_file()
+    assert faulthandler.is_enabled() is True
+
+
+def test_enable_crash_dumps_respects_a_custom_log_dir(tmp_path: Path) -> None:
+    custom_dir = tmp_path / "elsewhere"
+    _set(tmp_path, "LOG_DIR", str(custom_dir))
+
+    crash_path = logging_setup.enable_crash_dumps(tmp_path)
+
+    assert crash_path == custom_dir / "crash.log"
+    assert crash_path.is_file()
+
+
+def test_enable_crash_dumps_is_idempotent_and_closes_the_previous_handle(tmp_path: Path) -> None:
+    logging_setup.enable_crash_dumps(tmp_path)
+    first_handle = logging_setup._crash_file
+
+    logging_setup.enable_crash_dumps(tmp_path)
+
+    assert logging_setup._crash_file is not first_handle
+    assert first_handle.closed is True

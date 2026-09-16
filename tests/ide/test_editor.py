@@ -28,14 +28,6 @@ def _has_opaque_pixel(image) -> bool:
     )
 
 
-def test_editor_reserves_viewport_space_for_the_gutter(qtbot) -> None:
-    editor = TextEditorWidget()
-    qtbot.addWidget(editor)
-
-    assert editor.viewportMargins().left() == editor.line_number_area_width()
-    assert editor.viewportMargins().left() > 0
-
-
 def test_gutter_width_grows_as_line_count_passes_a_digit_boundary(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
@@ -49,7 +41,7 @@ def test_gutter_width_grows_as_line_count_passes_a_digit_boundary(qtbot) -> None
     assert triple_digit_width > single_digit_width
 
 
-def test_gutter_repaints_wider_when_the_viewport_margin_changes(qtbot) -> None:
+def test_gutter_column_grows_as_the_line_count_passes_a_digit_boundary(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
     editor.show()
@@ -58,7 +50,7 @@ def test_gutter_repaints_wider_when_the_viewport_margin_changes(qtbot) -> None:
     editor.setPlainText("\n".join(str(i) for i in range(200)))
     QApplication.processEvents()
 
-    assert editor.viewportMargins().left() == editor.line_number_area_width()
+    assert editor._line_number_area.width() == editor.line_number_area_width()
 
 
 def test_line_number_area_paints_visible_digits(qtbot) -> None:
@@ -75,20 +67,39 @@ def test_line_number_area_paints_visible_digits(qtbot) -> None:
     assert _has_opaque_pixel(pixmap.toImage())
 
 
-def test_resize_event_repositions_the_gutter_to_fill_the_left_edge(qtbot) -> None:
+def test_resize_repositions_the_gutter_to_fill_the_left_edge(qtbot) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- traced to a real, native access-violation crash (confirmed via a
+    # WinDbg-analyzed crash dump) inside Qt's own internal resize handling, specifically triggered
+    # by the gutter/breadcrumb/minimap all being *overlay* children positioned into
+    # setViewportMargins()-reserved space. They're now ordinary QGridLayout-managed siblings of the
+    # real QPlainTextEdit instead (see editor.py's own module docstring) -- this is the regression
+    # guard that the gutter still ends up in the right place under that new layout, not overlapping
+    # the text or the breadcrumb.
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
     editor.show()
     editor.resize(400, 300)
     QApplication.processEvents()
 
-    geometry = editor._line_number_area.geometry()
-    assert geometry.left() == editor.contentsRect().left()
-    assert geometry.width() == editor.line_number_area_width()
-    # The gutter sits below the breadcrumb bar (see test_breadcrumb.py), not the full contents
-    # height -- the breadcrumb bar itself owns that top strip.
-    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
-    assert geometry.height() == editor.contentsRect().height() - editor._breadcrumb.height()
+    gutter = editor._line_number_area.geometry()
+    assert gutter.left() == 0
+    assert gutter.width() == editor.line_number_area_width()
+    # The gutter sits below the breadcrumb bar and beside the real text edit, not overlapping
+    # either.
+    assert gutter.top() == editor._breadcrumb.height()
+    assert gutter.right() < editor._edit.geometry().left()
+
+
+def test_resize_keeps_the_real_editor_and_gutter_from_overlapping(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.show()
+    editor.resize(400, 300)
+    QApplication.processEvents()
+
+    assert editor._edit.geometry().left() >= editor._line_number_area.geometry().right()
+    assert editor._minimap.geometry().left() >= editor._edit.geometry().right()
 
 
 def test_scrolling_updates_the_gutter_without_raising(qtbot) -> None:
@@ -478,16 +489,7 @@ def test_an_untitled_tab_with_no_path_never_shows_an_error(qtbot) -> None:
 # -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----
 
 
-def test_editor_reserves_viewport_space_for_the_minimap(qtbot) -> None:
-    from in_reach.ide.editor import _MINIMAP_WIDTH
-
-    editor = TextEditorWidget()
-    qtbot.addWidget(editor)
-
-    assert editor.viewportMargins().right() == _MINIMAP_WIDTH
-
-
-def test_resize_event_positions_the_minimap_along_the_right_edge(qtbot) -> None:
+def test_resize_positions_the_minimap_along_the_right_edge(qtbot) -> None:
     from in_reach.ide.editor import _MINIMAP_WIDTH
 
     editor = TextEditorWidget()
@@ -497,9 +499,9 @@ def test_resize_event_positions_the_minimap_along_the_right_edge(qtbot) -> None:
     QApplication.processEvents()
 
     geometry = editor._minimap.geometry()
-    assert geometry.right() == editor.contentsRect().right()
+    assert geometry.right() == editor.width() - 1
     assert geometry.width() == _MINIMAP_WIDTH
-    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
+    assert geometry.top() == editor._breadcrumb.height()
 
 
 def test_minimap_paints_without_raising_on_an_empty_document(qtbot) -> None:
@@ -716,11 +718,15 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(qtbot, tmp_path) -> N
 
 
 def test_tab_inserts_spaces_when_the_indent_style_is_spaces(qtbot) -> None:
+    # keyPressEvent() lives on the real inner QPlainTextEdit (editor._edit) -- the wrapper itself
+    # doesn't handle key events directly, it just lays that widget out (see editor.py's own module
+    # docstring); a real click would land on _edit directly since it fills the wrapper's own
+    # interior, same as this targets it explicitly.
     indent_state.set_indent(indent_settings.STYLE_SPACES, 3)
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
 
-    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Tab)
 
     assert editor.toPlainText() == "   "
 
@@ -730,7 +736,7 @@ def test_tab_inserts_a_literal_tab_when_the_indent_style_is_tabs(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
 
-    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Tab)
 
     assert editor.toPlainText() == "\t"
 

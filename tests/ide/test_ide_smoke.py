@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_MIN_WIDTH, MainWindow
+from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 from in_reach.ide.welcome import WelcomeTab
 
@@ -3282,7 +3284,7 @@ def test_closing_a_tab_via_its_close_button_removes_it(window: MainWindow) -> No
     assert pane.count() == before - 1
 
 
-def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainWindow) -> None:
+def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainWindow, qtbot) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
     first_pane.split_button.click()
@@ -3290,6 +3292,11 @@ def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainW
     assert new_pane.count() == 1
 
     new_pane.tabCloseRequested.emit(0)
+    # Pane/group removal is deferred one event-loop tick -- see on_pane_emptied's own docstring
+    # (PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- a native crash confirmed via faulthandler, from a sibling pane's
+    # editor getting resized mid-event-handling by the immediate splitter surgery this used to do).
+    qtbot.wait(10)
 
     assert new_pane not in main_panel.panes
     assert main_panel.split_count == 0
@@ -3369,7 +3376,23 @@ def test_panel_splitters_refuse_to_collapse_children(window: MainWindow) -> None
     assert first_group.splitter.childrenCollapsible() is False
 
 
-def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow) -> None:
+def test_panel_splitters_are_not_real_qsplitters(window: MainWindow) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- traced to a real, native access-violation crash reproducible just
+    # from *dragging* a real QSplitterHandle (independent of tab-closing/file type), persisting
+    # across two different PyQt6/Qt versions/two Python versions, that no amount of working around
+    # QSplitter itself (non-opaque resize, etc.) ever fully stopped. main_panel._splitter and every
+    # _PaneGroup.splitter are PaneSplitter (see pane_splitter.py) -- a from-scratch replacement that
+    # never constructs a real QSplitter/QSplitterHandle at all, rather than another attempt to work
+    # around one.
+    main_panel = window.main_panel
+    first_group = main_panel.panes[0].group
+
+    assert isinstance(main_panel._splitter, PaneSplitter)
+    assert isinstance(first_group.splitter, PaneSplitter)
+
+
+def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow, qtbot) -> None:
     main_panel = window.main_panel
     source = main_panel.panes[0]
     main_panel.new_tab_in(source)
@@ -3395,6 +3418,7 @@ def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindo
         source.removeTab(0)
         dest.addTab(widget, label)
     main_panel.on_pane_emptied(source)
+    qtbot.wait(10)  # pane/group removal is deferred one event-loop tick
 
     assert source not in main_panel.panes
     assert main_panel.split_count == 0
@@ -3915,6 +3939,57 @@ def test_second_run_skips_the_first_run_dialog(
     ide_app.run(project_dir)
 
     assert shown == []
+
+
+def test_install_crash_logging_logs_the_exception_and_chains_to_the_previous_hook(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # PROMPT.md: "if i have two tabs open ... and i close the welcome, things crash" -- "the whole
+    # app just disappears, no error" turned out to be plausible even for an ordinary Python
+    # exception: OUTPUT_TO_STREAM defaults to false (see logging_setup), and a GUI app launched
+    # without an attached console has nowhere for the default sys.excepthook's own stderr print to
+    # land at all. This is the regression guard that an unhandled exception is now at least logged
+    # (to LOG_FILE) rather than vanishing with zero trace, and that installing this hook doesn't
+    # swallow/replace whatever hook was already there.
+    import logging
+
+    from in_reach.app import logging_setup
+
+    in_reach_logger = logging.getLogger(logging_setup._LOGGER_NAME)
+    in_reach_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.CRITICAL, logger=logging_setup._LOGGER_NAME)
+    try:
+        chained_calls = []
+        monkeypatch.setattr(sys, "excepthook", lambda *args: chained_calls.append(args))
+
+        ide_app._install_crash_logging()
+
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            exc_info = sys.exc_info()
+        sys.excepthook(*exc_info)
+
+        assert chained_calls == [exc_info]
+        assert any(
+            record.levelno == logging.CRITICAL and "unhandled exception" in record.message
+            for record in caplog.records
+        )
+    finally:
+        in_reach_logger.removeHandler(caplog.handler)
+
+
+def test_install_crash_logging_does_not_stack_a_second_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Called on every ide_app.run() -- e.g. more than once in the same process across tests --
+    # calling it twice must not wrap the hook twice (an ever-growing chain would eventually recurse).
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+
+    ide_app._install_crash_logging()
+    hook_after_first_install = sys.excepthook
+
+    ide_app._install_crash_logging()
+
+    assert sys.excepthook is hook_after_first_install
 
 
 def test_run_shows_the_restore_icon_since_it_launches_maximized(

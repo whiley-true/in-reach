@@ -1,31 +1,51 @@
-"""Plain text-editor widget used for every open/Untitled tab in the main panel.
+"""Text-editor widget used for every open/Untitled tab in the main panel.
 
 Adds, on top of the base ``QPlainTextEdit`` (PROMPT.md, across two passes):
 
 - A line-number gutter -- the standard Qt "Code Editor Example" pattern: a small sibling widget
-  drawn in the space ``setViewportMargins()`` reserves along the editor's left edge, repainted from
-  ``QPlainTextEdit``'s own block-layout geometry rather than tracked as separate state, so it can
-  never drift out of sync with the actual text.
+  repainted from ``QPlainTextEdit``'s own block-layout geometry rather than tracked as separate
+  state, so it can never drift out of sync with the actual text.
 - Fold markers in that same gutter, and the bracket-matching behind them (see
   :mod:`in_reach.ide.code_folding`) -- "collapsible and expandable snippets". Bracket-based, not
   JSON-specific, so it works the same for a Megalo ``script.txt`` as a settings ``.json``.
 - Indent guides -- thin vertical lines through the text area at each indentation level (PROMPT.md:
   "the | symbol to show line markers"; a first pass read this as the fold arrows above instead, per
   a later PROMPT.md pass -- "we're still missing the | symbol" -- that one wasn't it).
-- A breadcrumb bar pinned to the top margin (the same reserved-margin trick, just on the opposite
-  edge) -- the open file's own path, plus (for a ``.json`` file specifically) the live JSON
-  structural path to wherever the cursor currently sits (see :mod:`in_reach.ide.json_breadcrumb`).
+- A breadcrumb bar pinned above the text -- the open file's own path, plus (for a ``.json`` file
+  specifically) the live JSON structural path to wherever the cursor currently sits (see
+  :mod:`in_reach.ide.json_breadcrumb`).
 - JSON syntax highlighting (see :mod:`in_reach.ide.json_highlighter`), attached only when the
   file's own extension is ``.json``.
 - A minimap pinned along the right edge, next to the vertical scrollbar (PROMPT.md: "a live code
   preview on the right hand side next to the scrollbar") -- see :class:`_Minimap`.
+
+``TextEditorWidget`` (the class every other module imports and treats as "the editor") is a plain
+``QWidget`` composing the actual ``QPlainTextEdit`` (:class:`_PlainTextEditor`) together with the
+gutter/breadcrumb/minimap as ordinary, layout-managed sibling widgets, and delegates everything it
+doesn't define itself straight to that inner editor (see :meth:`TextEditorWidget.__getattr__`) --
+so every existing caller's ``editor.toPlainText()``/``.document()``/``.textCursor()``/etc. (and
+``isinstance(x, TextEditorWidget)``) keeps working exactly as before.
+
+This wasn't always the shape: gutter/breadcrumb/minimap used to be *overlay* children of the
+``QPlainTextEdit`` itself, positioned into space ``setViewportMargins()`` reserved for them.
+PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the welcome,
+things crash" -- that turned out to be a real, reproducible native access violation inside Qt's own
+internal resize handling (confirmed via a WinDbg-analyzed crash dump), triggered specifically by
+having all three margin-reserving widgets present together *and* a genuine, interactively-driven
+resize (e.g. closing a sibling split-pane tab, or dragging the pane splitter) -- never reproducible
+through any programmatic/scripted resize, only real mouse-driven interaction. Every attempt to
+patch around it from inside the ``QPlainTextEdit`` itself (temporarily zeroing the margins across
+the risky call, reentrancy guards) failed to stop it. Moving the three off ``setViewportMargins()``
+entirely, as ordinary ``QGridLayout``-managed siblings instead, sidesteps the internal Qt code path
+that bug lives in altogether, since the inner ``QPlainTextEdit`` now never has non-default viewport
+margins at all.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -36,12 +56,20 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPalette,
-    QResizeEvent,
     QTextCharFormat,
     QTextCursor,
+    QTextDocument,
     QTextFormat,
 )
-from PyQt6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QTextEdit, QToolTip, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QGridLayout,
+    QLabel,
+    QPlainTextEdit,
+    QTextEdit,
+    QToolTip,
+    QWidget,
+)
 
 from in_reach.app import indent_settings
 from in_reach.ide import indent_state, schema_check
@@ -54,7 +82,7 @@ from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
 _GUTTER_PADDING = 6
 #: Width reserved for the fold-arrow column, to the right of the line numbers.
 _FOLD_MARKER_WIDTH = 14
-#: Height of the breadcrumb strip pinned to the editor's top margin.
+#: Height of the breadcrumb strip pinned above the text.
 _BREADCRUMB_HEIGHT = 22
 #: Width reserved for the minimap, along the editor's right edge.
 _MINIMAP_WIDTH = 72
@@ -105,10 +133,17 @@ def _find_project_title(path: Path) -> str | None:
 
 class _LineNumberArea(QWidget):
     """The gutter widget itself -- just forwards sizing/painting/clicks back to the editor, which
-    owns all the actual layout math (it needs the editor's own block geometry either way)."""
+    owns all the actual layout math (it needs the editor's own block geometry either way).
 
-    def __init__(self, editor: "TextEditorWidget") -> None:
-        super().__init__(editor)
+    A plain, layout-managed sibling of the editor now (see module docstring) -- its ``sizeHint()``
+    is what the wrapper's ``QGridLayout`` uses to size the gutter's own column, so
+    :meth:`updateGeometry` (called whenever the editor's block count changes -- see
+    ``TextEditorWidget.__init__``) is what makes the column actually grow/shrink as the line-number
+    digit count does, in place of the old ``setViewportMargins()`` dance.
+    """
+
+    def __init__(self, editor: "_PlainTextEditor") -> None:
+        super().__init__()
         self._editor = editor
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -123,11 +158,11 @@ class _LineNumberArea(QWidget):
 
 
 class _BreadcrumbBar(QLabel):
-    """A single-line strip pinned to the editor's top margin -- the open file's path, plus (for
-    JSON) the live structural path to the cursor (see :meth:`TextEditorWidget._update_breadcrumb`)."""
+    """A single-line strip pinned above the text -- the open file's path, plus (for JSON) the live
+    structural path to the cursor (see :meth:`_PlainTextEditor._update_breadcrumb`)."""
 
-    def __init__(self, editor: "TextEditorWidget") -> None:
-        super().__init__(editor)
+    def __init__(self) -> None:
+        super().__init__()
         self.setAutoFillBackground(True)
         self.setBackgroundRole(QPalette.ColorRole.AlternateBase)
         self.setContentsMargins(6, 0, 6, 0)
@@ -157,20 +192,20 @@ class _Minimap(QWidget):
     the column (PROMPT.md: "if the editor file is not long, the preview does not need to fill the
     full screen vertically"). A translucent band over the top of it shows how much of that same
     stretch the main view currently shows, and a line the live schema check currently flags (see
-    :meth:`TextEditorWidget._update_schema_validation`) draws as a full-width red bar behind its own
-    text, so a problem stays visible even where it's only a page or two away (PROMPT.md: "it should
-    highlight errors as a line in colour"). Clicking or dragging inside it scrolls the editor to
-    match.
+    :meth:`_PlainTextEditor._update_schema_validation`) draws as a full-width red bar behind its
+    own text, so a problem stays visible even where it's only a page or two away (PROMPT.md: "it
+    should highlight errors as a line in colour"). Clicking or dragging inside it scrolls the
+    editor to match.
     """
 
-    def __init__(self, editor: "TextEditorWidget") -> None:
-        super().__init__(editor)
+    def __init__(self, editor: "_PlainTextEditor") -> None:
+        super().__init__()
         self._editor = editor
         #: 0-based block numbers the live schema check currently flags -- see
         #: :meth:`set_error_lines`.
         self.error_lines: set[int] = set()
         #: 0-based block number the main editor's own "Go to Line" jumped to, if any (mirrors
-        #: :attr:`TextEditorWidget._goto_highlight_block`) -- see :meth:`set_highlight_line`.
+        #: :attr:`_PlainTextEditor._goto_highlight_block`) -- see :meth:`set_highlight_line`.
         self.highlight_line: int | None = None
         #: Set for the duration of a press-drag -- ``(press_y, scrollbar_value_at_press)``, so a
         #: drag's own scroll delta is measured from where the mouse went down, not from wherever it
@@ -183,7 +218,7 @@ class _Minimap(QWidget):
 
     def set_error_lines(self, lines: set[int]) -> None:
         """Repaints only if ``lines`` (0-based block numbers) actually changed -- called on every
-        keystroke via :meth:`TextEditorWidget._update_schema_validation`, so a document with no
+        keystroke via :meth:`_PlainTextEditor._update_schema_validation`, so a document with no
         errors (the overwhelming common case) never triggers a paint over this alone."""
         if lines != self.error_lines:
             self.error_lines = lines
@@ -199,7 +234,7 @@ class _Minimap(QWidget):
 
     def _visible_block_count(self) -> int:
         """How many of the main editor's own blocks currently fit in its viewport -- walking block
-        geometry (same technique :meth:`TextEditorWidget._draw_indent_guides` already uses) rather
+        geometry (same technique :meth:`_PlainTextEditor._draw_indent_guides` already uses) rather
         than a fixed guess, so it stays correct as a block wraps across several visual lines."""
         editor = self._editor
         viewport_height = editor.viewport().height()
@@ -306,11 +341,16 @@ class _Minimap(QWidget):
             index += 1
 
 
-class TextEditorWidget(QPlainTextEdit):
-    """One text-editor tab's content.
+class _PlainTextEditor(QPlainTextEdit):
+    """The real ``QPlainTextEdit`` -- everything about editing/highlighting/folding/schema
+    validation/the breadcrumb text itself lives here, same as it always has. Never used directly
+    outside this module -- see :class:`TextEditorWidget` (the public wrapper) for why, and for
+    where the gutter/breadcrumb/minimap actually get laid out now.
 
-    Dirty tracking rides ``QTextDocument``'s own ``isModified()``/``modificationChanged`` --
-    no extra state lives here.
+    :attr:`_line_number_area`/:attr:`_breadcrumb`/:attr:`_minimap` are set by ``TextEditorWidget``
+    right after construction (it owns and lays them out, not this class) -- every method below that
+    reads them tolerates ``None`` (mid-construction, before the wrapper finishes wiring things up)
+    by simply not updating a sibling that doesn't exist yet.
     """
 
     #: PROMPT.md: "make ctrl + S a save shortcut on the keyboard when on text editor" -- emitted
@@ -318,8 +358,24 @@ class TextEditorWidget(QPlainTextEdit):
     #: fires while a text editor genuinely has focus (see TabPane's connection of this signal).
     save_requested = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None, *, path: Path | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, document: QTextDocument | None = None) -> None:
+        super().__init__()
+        # A confirmed, reproducible PyQt6/Qt6 bug (not anything about this app's own code -- an
+        # isolated, from-scratch repro with two bare, un-subclassed QPlainTextEdits and zero
+        # gutter/minimap/breadcrumb/splitter code reproduces it identically, and rules out every
+        # theory this investigation tried before it -- viewport margins, QSplitterHandle, Windows
+        # accessibility, PyQt6/Qt6/Python version): calling ``setDocument()`` *twice* on the same
+        # QPlainTextEdit -- once for whatever document it starts with, a second time to replace it
+        # with a different one -- corrupts something in Qt's own control internals that crashes (a
+        # real, native access violation, deep inside Qt's own QTextDocument/
+        # QPlainTextDocumentLayout internals) later, once *any other* view still sharing that final
+        # document repaints after the view that did the double-``setDocument()`` is destroyed. A
+        # single ``setDocument()`` call per instance -- ever -- doesn't carry that corruption, no
+        # matter how many separate views end up sharing the result. ``document``, when given (this
+        # app's split-editor duplicate view -- see ``TextEditorWidget.__init__``), is therefore the
+        # *only* document this instance is ever pointed at, from construction on -- never replaced
+        # after starting out with one of its own.
+        self.setDocument(document if document is not None else QTextDocument(self))
         self.path: Path | None = None
         self._highlighter: JsonSyntaxHighlighter | None = None
         self._fold_ranges: dict[int, int] = {}
@@ -334,28 +390,19 @@ class TextEditorWidget(QPlainTextEdit):
         #: highlight (PROMPT.md: "when going to line number, the editor should highlight the
         #: selected line").
         self._goto_highlight_block: int | None = None
-
-        self._line_number_area = _LineNumberArea(self)
-        self._breadcrumb = _BreadcrumbBar(self)
-        self._minimap = _Minimap(self)
+        #: Set by TextEditorWidget right after construction -- see this class's own docstring.
+        self._line_number_area: _LineNumberArea | None = None
+        self._breadcrumb: _BreadcrumbBar | None = None
+        self._minimap: _Minimap | None = None
+        self._project_title: str | None = None
         # Needed for mouseMoveEvent() (below) to fire on a plain hover, not just a button-down drag
         # -- how the red-underline tooltip knows to hide again once the pointer leaves the span.
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
-        self.blockCountChanged.connect(self._update_gutter_width)
-        # Plain lambdas rather than self._minimap.update directly -- QWidget.update() is overloaded
-        # (no-args, QRect, or four ints), and neither signal's own single `int` argument matches any
-        # of those, so passing the bound method straight to connect() would raise at emit time.
-        self.blockCountChanged.connect(lambda _count: self._minimap.update())
-        self.verticalScrollBar().valueChanged.connect(lambda _value: self._minimap.update())
-        self.updateRequest.connect(self._update_gutter_on_scroll)
         self.textChanged.connect(self._on_text_changed)
         self.cursorPositionChanged.connect(self._update_breadcrumb)
         self.cursorPositionChanged.connect(self._maybe_clear_goto_highlight)
-
-        self._update_gutter_width()
-        self.set_path(path)
 
     def set_path(self, path: Path | None) -> None:
         """(Re-)points this editor at ``path`` -- e.g. "Save As" giving a previously-Untitled tab
@@ -417,41 +464,6 @@ class TextEditorWidget(QPlainTextEdit):
         digits = len(str(max(1, self.blockCount())))
         numbers_width = self.fontMetrics().horizontalAdvance("9") * digits
         return _GUTTER_PADDING * 2 + numbers_width + _FOLD_MARKER_WIDTH
-
-    def _update_gutter_width(self, _new_block_count: int = 0) -> None:
-        # setViewportMargins() reserves this widget's own left/top/right edges for the gutter/
-        # breadcrumb/minimap, shrinking the text viewport by exactly that much -- every reserved
-        # child is positioned to fill its own strip in resizeEvent() below.
-        self.setViewportMargins(self.line_number_area_width(), _BREADCRUMB_HEIGHT, _MINIMAP_WIDTH, 0)
-
-    def _update_gutter_on_scroll(self, rect: QRect, dy: int) -> None:
-        if dy:
-            self._line_number_area.scroll(0, dy)
-        else:
-            self._line_number_area.update(0, rect.y(), self._line_number_area.width(), rect.height())
-        if rect.contains(self.viewport().rect()):
-            self._update_gutter_width()
-
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        contents = self.contentsRect()
-        self._breadcrumb.setGeometry(QRect(contents.left(), contents.top(), contents.width(), _BREADCRUMB_HEIGHT))
-        self._line_number_area.setGeometry(
-            QRect(
-                contents.left(),
-                contents.top() + _BREADCRUMB_HEIGHT,
-                self.line_number_area_width(),
-                contents.height() - _BREADCRUMB_HEIGHT,
-            )
-        )
-        self._minimap.setGeometry(
-            QRect(
-                contents.right() - _MINIMAP_WIDTH + 1,
-                contents.top() + _BREADCRUMB_HEIGHT,
-                _MINIMAP_WIDTH,
-                contents.height() - _BREADCRUMB_HEIGHT,
-            )
-        )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.matches(QKeySequence.StandardKey.Save):
@@ -625,7 +637,8 @@ class TextEditorWidget(QPlainTextEdit):
                 block = block.next()
         doc.markContentsDirty(0, doc.characterCount())
         self.viewport().update()
-        self._line_number_area.update()
+        if self._line_number_area is not None:
+            self._line_number_area.update()
 
     def _on_text_changed(self) -> None:
         self._fold_ranges = compute_fold_ranges(self.toPlainText())
@@ -633,6 +646,8 @@ class TextEditorWidget(QPlainTextEdit):
         self._apply_fold_visibility()
         self._update_breadcrumb()
         self._update_schema_validation()
+        if self._line_number_area is not None:
+            self._line_number_area.updateGeometry()
 
     # -- live schema validation -----------------------------------------------------------------
 
@@ -648,7 +663,8 @@ class TextEditorWidget(QPlainTextEdit):
         errors = schema_check.find_errors(self.path, self.toPlainText()) if self.path is not None else None
         if not errors:
             self._error_spans = []
-            self._minimap.set_error_lines(set())
+            if self._minimap is not None:
+                self._minimap.set_error_lines(set())
             self._apply_extra_selections([])
             return
 
@@ -664,7 +680,8 @@ class TextEditorWidget(QPlainTextEdit):
             spans.append((start, end, error.message))
             error_lines.add(doc.findBlock(start).blockNumber())
         self._error_spans = spans
-        self._minimap.set_error_lines(error_lines)
+        if self._minimap is not None:
+            self._minimap.set_error_lines(error_lines)
         self._apply_extra_selections(self._error_selections())
 
     # -- "Go to Line" highlight -----------------------------------------------------------------
@@ -676,7 +693,8 @@ class TextEditorWidget(QPlainTextEdit):
         in the side preview)". Called by ``MainWindow``'s own "Go to Line" handler right after it
         moves the cursor there."""
         self._goto_highlight_block = block_number
-        self._minimap.set_highlight_line(block_number)
+        if self._minimap is not None:
+            self._minimap.set_highlight_line(block_number)
         self._apply_extra_selections(self._error_selections())
 
     def _maybe_clear_goto_highlight(self) -> None:
@@ -689,7 +707,8 @@ class TextEditorWidget(QPlainTextEdit):
         if self.textCursor().blockNumber() == self._goto_highlight_block:
             return
         self._goto_highlight_block = None
-        self._minimap.set_highlight_line(None)
+        if self._minimap is not None:
+            self._minimap.set_highlight_line(None)
         self._apply_extra_selections(self._error_selections())
 
     def _error_selections(self) -> list[QTextEdit.ExtraSelection]:
@@ -735,6 +754,8 @@ class TextEditorWidget(QPlainTextEdit):
     # -- breadcrumb ---------------------------------------------------------------------------------
 
     def _update_breadcrumb(self) -> None:
+        if self._breadcrumb is None:
+            return
         parts: list[str] = []
         if self.path is not None:
             # PROMPT.md: "include the project name (not file dir) in the breadcrumb" -- the
@@ -747,3 +768,89 @@ class TextEditorWidget(QPlainTextEdit):
             if self.path.suffix.lower() == ".json":
                 parts.extend(json_breadcrumb_path(self.toPlainText(), self.textCursor().position()))
         self._breadcrumb.setText(" > ".join(parts))
+
+
+class TextEditorWidget(QWidget):
+    """One text-editor tab's content -- see this module's own docstring for why this is a plain
+    ``QWidget`` composing the real editor rather than being one itself.
+
+    Dirty tracking rides ``QTextDocument``'s own ``isModified()``/``modificationChanged`` --
+    no extra state lives here.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        path: Path | None = None,
+        document: QTextDocument | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # document, when given, is a split-editor duplicate's source document -- see
+        # _PlainTextEditor.__init__'s own docstring for why this has to be handed straight to its
+        # constructor rather than assigned afterward via a second setDocument() call.
+        self._edit = _PlainTextEditor(document)
+        self._line_number_area = _LineNumberArea(self._edit)
+        self._breadcrumb = _BreadcrumbBar()
+        self._minimap = _Minimap(self._edit)
+        # See _PlainTextEditor's own docstring -- it reads these back through its own instance
+        # attributes of the same names, set here rather than created there.
+        self._edit._line_number_area = self._line_number_area
+        self._edit._breadcrumb = self._breadcrumb
+        self._edit._minimap = self._minimap
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._breadcrumb, 0, 0, 1, 3)
+        layout.addWidget(self._line_number_area, 1, 0)
+        layout.addWidget(self._edit, 1, 1)
+        layout.addWidget(self._minimap, 1, 2)
+        layout.setColumnStretch(1, 1)
+        layout.setRowStretch(1, 1)
+
+        # The gutter's own column only actually grows/shrinks when something tells the layout its
+        # sizeHint() changed -- _PlainTextEditor._on_text_changed() already calls this whenever the
+        # block count (and so the digit width) might have; a scrollbar-only value change never
+        # changes that width, so nothing needs to re-trigger it from here.
+        self._edit.blockCountChanged.connect(lambda _count: self._minimap.update())
+        self._edit.verticalScrollBar().valueChanged.connect(lambda _value: self._minimap.update())
+
+        self.setFocusProxy(self._edit)
+        self._edit.set_path(path)
+
+    # -- explicit forwarding for the handful of QWidget-*native* methods QPlainTextEdit also has --
+    #
+    # __getattr__ below only ever fires once *normal* attribute lookup (this class's own __dict__/
+    # MRO) has already failed -- and since this wrapper is itself a QWidget, anything QWidget
+    # already defines (font/setFont, fontMetrics, palette) resolves to *this widget's own*
+    # (irrelevant, never-set) value without __getattr__ ever being consulted at all. Every caller
+    # that reads one of these really means the real editor's own font/metrics/palette (e.g.
+    # refresh_font_scale()'s own +10% sizing, or a test asserting against it) -- these three make
+    # that the widget-level default `.font()`/`.fontMetrics()`/`.palette()` still resolve there,
+    # the same way __getattr__ handles everything QWidget *doesn't* also define.
+    def font(self) -> QFont:
+        return self._edit.font()
+
+    def setFont(self, font: QFont) -> None:
+        self._edit.setFont(font)
+
+    def fontMetrics(self):
+        return self._edit.fontMetrics()
+
+    def palette(self) -> QPalette:
+        return self._edit.palette()
+
+    def __getattr__(self, name):
+        # Forwards anything not defined on this wrapper directly to the real QPlainTextEdit --
+        # preserves this class's long-standing "acts just like a QPlainTextEdit" contract for
+        # every caller across tabs.py/main_window.py (toPlainText, document, textCursor,
+        # setReadOnly, blockCount, save_requested, ...) without hand-enumerating its huge method
+        # surface. Only reached when normal attribute lookup (this class's own __dict__/MRO)
+        # already failed, so anything defined here (or on QWidget) always wins over the fallback --
+        # see the explicit font/fontMetrics/palette forwarding right above for the methods that
+        # need exactly that override because QWidget already defines them.
+        edit = self.__dict__.get("_edit")
+        if edit is None:
+            raise AttributeError(name)
+        return getattr(edit, name)
