@@ -64,6 +64,9 @@ _MAX_V_SPLITS = 1  # -> up to 2 panes stacked within one group
 _SPLIT_ICON_COLOR = "#808080"
 _TAB_CLOSE_ICON_COLOR = "#808080"
 _TAB_CLOSE_ICON_SIZE = 14
+# A little larger than the icon itself for a comfortable click target -- roughly matches the
+# footprint Qt's own auto-created close button used before _install_close_button() replaced it.
+_TAB_CLOSE_BUTTON_SIZE = 20
 
 
 class _SaveChoice(Enum):
@@ -224,12 +227,14 @@ class TabPane(QTabWidget):
         self.group: "_PaneGroup | None" = None  # set by _PaneGroup.add_pane()
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
         self._tab_state: dict[QWidget, _TabState] = {}
+        self._enforcing_pin_order = False
         self.currentChanged.connect(lambda _index: self.cursor_info_changed.emit())
         self.currentChanged.connect(lambda _index: self._refresh_preview_button())
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
+        self.tabBar().tabMoved.connect(self._on_tab_moved)
         self.setTabsClosable(True)
-        self.tabCloseRequested.connect(self._maybe_close)
+        self.tabCloseRequested.connect(self._handle_tab_close_requested)
         self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
         self.setAcceptDrops(True)
@@ -304,7 +309,41 @@ class TabPane(QTabWidget):
             # pair here too, not just a genuinely new tab) -- see MainPanelArea.
             # _register_document_user's own docstring for why this needs to happen at all.
             self._area._register_document_user(widget.document(), widget)
+        self._install_close_button(index, widget)
         self._update_close_icon(index)
+        # A tab tracked with pinned=True (a cross-pane drag of an already-pinned tab -- see
+        # dropEvent()) lands wherever addTab() appended it, which can leave it to the right of an
+        # unpinned tab in the destination pane -- re-enforce the same "pinned tabs are always
+        # leftmost" invariant _toggle_pin()/_on_tab_moved() keep everywhere else.
+        self._enforce_pinned_order()
+
+    def _install_close_button(self, index: int, widget: QWidget) -> None:
+        """Swaps ``setTabsClosable(True)``'s auto-created close button for a real ``QToolButton``
+        we own. Qt's own auto-created button is a private ``QTabBar::CloseButton`` whose
+        ``paintEvent`` always draws the style's built-in ``PE_IndicatorTabClose`` glyph and never
+        looks at the button's own ``icon()`` -- ``_update_close_icon``'s ``setIcon()`` calls change
+        that button's ``icon`` property without ever changing what actually gets painted, so the
+        dirty-dot/pin icon swap silently never showed (confirmed by forcing an unmistakable icon on
+        the stock button and grabbing it -- the paint never changed). A plain ``QToolButton``
+        installed via ``setTabButton`` paints its own ``icon()`` normally, so the rest of
+        ``_update_close_icon`` needs no change once this is in front of it.
+
+        A no-op once a tab already has its own button installed (idempotent, like ``_track_tab``
+        itself) -- only ever replaces Qt's own stock button the first time."""
+        bar = self.tabBar()
+        position = QTabBar.ButtonPosition.RightSide
+        existing = bar.tabButton(index, position)
+        if isinstance(existing, QToolButton):
+            return
+        button = QToolButton(bar)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedSize(_TAB_CLOSE_BUTTON_SIZE, _TAB_CLOSE_BUTTON_SIZE)
+        button.setIconSize(QSize(_TAB_CLOSE_ICON_SIZE, _TAB_CLOSE_ICON_SIZE))
+        # Resolves the tab's *current* index at click time (not whatever index was captured here)
+        # -- a pin/reorder/drag can move this tab well after this button was installed.
+        button.clicked.connect(lambda _checked=False, w=widget: self._handle_tab_close_requested(self.indexOf(w)))
+        bar.setTabButton(index, position, button)
 
     def _tab_state_for(self, widget: QWidget) -> _TabState:
         return self._tab_state.setdefault(widget, _TabState())
@@ -349,10 +388,28 @@ class TabPane(QTabWidget):
         self.tabBar().update()
         if button is None:
             return
-        name = "tab_dirty" if _is_modified(self.widget(index)) else "win_close"
+        widget = self.widget(index)
+        if self._tab_state_for(widget).pinned:
+            name = "tab_pin"
+        elif _is_modified(widget):
+            name = "tab_dirty"
+        else:
+            name = "win_close"
         button.setIcon(icons.icon(name, color=_TAB_CLOSE_ICON_COLOR, size=_TAB_CLOSE_ICON_SIZE))
 
     # -- closing, with unsaved-changes handling ---------------------------------------------
+
+    def _handle_tab_close_requested(self, index: int) -> None:
+        """The tab bar's built-in close button, clicked -- redirected to unpin instead of close
+        for a pinned tab (PROMPT.md: "when a tab is pinned it should have a pin icon instead of an
+        x icon, when the pin is clicked it should become unpinned and the pin should convert to a
+        x"), since that same button already swaps to the pin icon while pinned (see
+        :meth:`_update_close_icon`)."""
+        widget = self.widget(index)
+        if widget is not None and self._tab_state_for(widget).pinned:
+            self._toggle_pin(index)
+            return
+        self._maybe_close(index)
 
     def _close_tab(self, index: int) -> None:
         widget = self.widget(index)
@@ -649,15 +706,36 @@ class TabPane(QTabWidget):
         widget = self.widget(index)
         state = self._tab_state_for(widget)
         state.pinned = not state.pinned
-        if state.pinned:
-            pinned_before = sum(
-                1
-                for i in range(self.count())
-                if self.widget(i) is not widget and self._tab_state_for(self.widget(i)).pinned
-            )
-            current_index = self.indexOf(widget)
-            if current_index != pinned_before:
-                self.tabBar().moveTab(current_index, pinned_before)
+        self._enforce_pinned_order()
+        self._update_close_icon(self.indexOf(widget))
+
+    def _on_tab_moved(self, _from: int, _to: int) -> None:
+        """A plain drag reorder (``setMovable(True)``'s own built-in handling, see _DragTabBar's
+        docstring) has no notion of pinned tabs at all, and would happily let the user drag an
+        unpinned tab to the left of a pinned one -- re-enforce the invariant after every move,
+        whatever moved it."""
+        self._enforce_pinned_order()
+
+    def _enforce_pinned_order(self) -> None:
+        """Pinned tabs must always occupy the front of the strip, in their own existing relative
+        order, with every unpinned tab after them in *its* own existing relative order -- a stable
+        partition on the current left-to-right order, not a fixed target position, so this is
+        idempotent (a no-op once the invariant already holds, which it will after every call here)
+        and never reorders within either group on its own."""
+        if self._enforcing_pin_order:
+            return
+        self._enforcing_pin_order = True
+        try:
+            widgets = [self.widget(i) for i in range(self.count())]
+            pinned = [w for w in widgets if self._tab_state_for(w).pinned]
+            unpinned = [w for w in widgets if not self._tab_state_for(w).pinned]
+            bar = self.tabBar()
+            for target_index, widget in enumerate(pinned + unpinned):
+                current_index = self.indexOf(widget)
+                if current_index != target_index:
+                    bar.moveTab(current_index, target_index)
+        finally:
+            self._enforcing_pin_order = False
 
     # -- copy/reveal path actions -------------------------------------------------------------
 

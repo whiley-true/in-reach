@@ -83,7 +83,7 @@ def _branch_ref(name: str) -> bytes:
     return f"refs/heads/{name}".encode()
 
 
-def init(folder: Path) -> None:
+def init(folder: Path, *, stamp_message: str | None = None) -> None:
     """Creates ``folder``'s shadow history repo and takes its first snapshot.
 
     PROMPT.md: "vcs should be started when a new blank project (either blank or from template)" --
@@ -91,6 +91,14 @@ def init(folder: Path) -> None:
     writing everything else a new project starts with, so there's always at least one snapshot (a
     branch/HEAD with nothing to diff against isn't useful) and the very first files a project ever
     had are themselves traceable.
+
+    Args:
+        stamp_message: When given, the first snapshot is a real user-labelled stamp (this
+            module's own docstring on "Stamped" snapshots) carrying this message, rather than the
+            plain untraceable :data:`_AUTOSAVE_MESSAGE` every other caller gets. PROMPT.md: "when a
+            gametype is innited it should be stamped with commit 'gametype init'" --
+            :func:`~in_reach.app.new_project.create_gametype_project` passes ``"gametype init"``
+            here.
 
     A no-op if ``folder`` already has a history repo (never re-initializes over one).
     """
@@ -103,7 +111,8 @@ def init(folder: Path) -> None:
     # own DEFAULT_BRANCH so a fresh project's branch name doesn't quietly depend on dulwich's
     # default rather than this module's own documented one.
     repo.refs.set_symbolic_ref(b"HEAD", _branch_ref(DEFAULT_BRANCH))
-    record_change(folder, message=_AUTOSAVE_MESSAGE)
+    message = f"{_STAMP_PREFIX}{stamp_message}" if stamp_message else _AUTOSAVE_MESSAGE
+    record_change(folder, message=message)
     _logger.info("initialized shadow VCS history for %s", folder)
 
 

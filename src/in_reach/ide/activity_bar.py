@@ -1,19 +1,24 @@
-"""The far-left activity bar: seven reorderable icons at the top -- a compile/"Apply" action, a
-ReachVariantTool launcher action, and five sidebar-view toggles (Dashboard, Git, Scripts,
-Locations, Search), exactly one of whose views is ever active, switching the primary sidebar's
-content, VSCode-style: clicking the already-active one collapses the sidebar instead of switching
--- then, pinned at the bottom: a flame status indicator (see :meth:`ActivityBar.set_halo_status`),
-a help icon (still a no-op), and a settings cog, which opens the Settings popout (see
-:class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns actually building/showing
-it, this bar just emits :attr:`ActivityBar.settings_requested`).
+"""The far-left activity bar: ten reorderable icons at the top -- a compile/"Apply" action, a
+ReachVariantTool launcher action, and eight sidebar-view toggles (Git, Dashboard, Scripts,
+Locations, Testing, Map Files, LLM, Search), exactly one of whose views is ever active, switching
+the primary sidebar's content, VSCode-style: clicking the already-active one collapses the sidebar
+instead of switching -- then, pinned at the bottom: a flame status indicator (see
+:meth:`ActivityBar.set_halo_status`), a help icon (still a no-op), and a settings cog, which opens
+the Settings popout (see :class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns
+actually building/showing it, this bar just emits :attr:`ActivityBar.settings_requested`).
 
 PROMPT.md: "please move the panel ordering so it goes compile, dashboard, then a git symbol
 (stubbed empty panel for now (where we will implement a dulwich gui)), then a bookshelf with the
-label Scripts (also stubbed for now), then rvt, then locations, then search" -- the seven top
-icons live in a dedicated :class:`_IconStrip` that supports a real mouse-drag reorder
+label Scripts (also stubbed for now), then rvt, then locations, then search" -- the top icons live
+in a dedicated :class:`_IconStrip` that supports a real mouse-drag reorder
 (:class:`~in_reach.ide.tabs._DragTabBar`'s own pattern, adapted to a vertical icon list instead of
 a horizontal tab strip) and persists the result to the project's own ``.env``
-(``ACTIVITY_BAR_ORDER``), read back on the next launch.
+(``ACTIVITY_BAR_ORDER``), read back on the next launch. A later pass (PROMPT.md: "please move vcs
+up by default (so it comes below compile) and above search please add a map icon for 'Map Files'
+(stubbed for now)") moved git directly under compile and added the Map Files toggle (also stubbed,
+same placeholder-only treatment as Scripts/Locations) just above Search, and a further pass
+(PROMPT.md: "above maps icon, please add a stubbed entrance for Testing ... and beneath the map a
+stubbed entry for LLM") added Testing/LLM either side of it -- see :data:`_DEFAULT_ORDER`.
 """
 
 from __future__ import annotations
@@ -22,7 +27,16 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QMimeData, QObject, QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDrag, QMouseEvent
-from PyQt6.QtWidgets import QApplication, QLayout, QMenu, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QLayout,
+    QMenu,
+    QSizePolicy,
+    QSpacerItem,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from in_reach.app import env_file
 from in_reach.ide import icons
@@ -64,8 +78,23 @@ _STATUS_TOOLTIPS = {
 #: reorderable group's default top-to-bottom order, keyed the same way
 #: :data:`_buttons`/:meth:`ActivityBar._handle_click` already key the view-toggle buttons
 #: ("explorer" being the Dashboard button's own long-established internal name, see
-#: :data:`DEFAULT_VIEW`).
-_DEFAULT_ORDER = ("compile", "explorer", "git", "scripts", "rvt", "locations", "search")
+#: :data:`DEFAULT_VIEW`). PROMPT.md: "move vcs up by default (so it comes below compile) and
+#: above search please add a map icon for 'Map Files'" -- git moved directly under compile, and
+#: "maps" (Map Files, stubbed) inserted just above search. PROMPT.md: "above maps icon, please add
+#: a stubbed entrance for Testing (using a testube) and beneath the map a stubbed entry for LLM
+#: (using a Robot)" -- "testing" inserted just above "maps", "llm" just below it.
+_DEFAULT_ORDER = (
+    "compile",
+    "git",
+    "explorer",
+    "scripts",
+    "rvt",
+    "locations",
+    "testing",
+    "maps",
+    "llm",
+    "search",
+)
 ORDER_ENV_KEY = "ACTIVITY_BAR_ORDER"
 
 _REORDER_MIME = "application/x-inreach-activitybar-icon"
@@ -166,6 +195,19 @@ class _IconStrip(QWidget):
         self._drag_key: str | None = None
         self._drag_source: QToolButton | None = None
         self.setAcceptDrops(True)
+
+        # Absorbs any leftover height *within* this widget once every button (and the overflow
+        # button, if shown) is laid out -- without it, a QVBoxLayout with no stretchable item
+        # spreads its fixed-size children out evenly to fill whatever height this widget has been
+        # given (rather than leaving the extra space after the last one), which is exactly what
+        # made the icons drift apart once ActivityBar started handing this widget more room than
+        # its buttons actually need (see ActivityBar.__init__'s own comment on why *it* must be the
+        # sole stretchable item one level up). Re-appended to the end of the layout by
+        # _apply_order()/_relayout() below every time they re-add widgets, since QBoxLayout.
+        # addWidget() moves an already-present item to the end -- leaving this spacer in place
+        # would otherwise get pushed ahead of whatever's re-added next.
+        self._trailing_stretch = QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self._layout.addItem(self._trailing_stretch)
 
         self._overflow_button = QToolButton(self)
         self._overflow_button.setToolTip("More")
@@ -343,6 +385,13 @@ class _IconStrip(QWidget):
         else:
             self._overflow_button.hide()
 
+        # Must stay the layout's last item -- every addWidget() above (both here and in
+        # _apply_order()) moves its target to the end, which would otherwise leave this spacer
+        # stranded ahead of whatever just got re-added. removeItem() is a safe no-op if it's
+        # already absent (e.g. the very first call, before the constructor's own initial addItem).
+        self._layout.removeItem(self._trailing_stretch)
+        self._layout.addItem(self._trailing_stretch)
+
     def _show_overflow_menu(self) -> None:
         if not self._hidden_keys:
             return
@@ -498,6 +547,28 @@ class ActivityBar(QWidget):
         )
         self.locations_button.clicked.connect(lambda: self._handle_click("locations"))
 
+        # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using a testube)"
+        # -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind
+        # it (see MainWindow's own TestingPanel wiring), same treatment as Git/Scripts/Locations.
+        self.testing_button = _bar_button(
+            "testtube", "Testing (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.testing_button.clicked.connect(lambda: self._handle_click("testing"))
+
+        # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)" -- a
+        # real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it
+        # (see MainWindow's own MapsPanel wiring), same treatment as Git/Scripts/Locations above.
+        self.maps_button = _bar_button(
+            "map", "Map Files (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.maps_button.clicked.connect(lambda: self._handle_click("maps"))
+
+        # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)" -- a real
+        # sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it (see
+        # MainWindow's own LlmPanel wiring), same treatment as Git/Scripts/Locations above.
+        self.llm_button = _bar_button("robot", "LLM (toggle primary sidebar)", checkable=True, checked=False)
+        self.llm_button.clicked.connect(lambda: self._handle_click("llm"))
+
         self.search_button = _bar_button(
             "search", "Search (toggle primary sidebar)", checkable=True, checked=False
         )
@@ -508,6 +579,9 @@ class ActivityBar(QWidget):
             "git": self.git_button,
             "scripts": self.scripts_button,
             "locations": self.locations_button,
+            "testing": self.testing_button,
+            "maps": self.maps_button,
+            "llm": self.llm_button,
             "search": self.search_button,
         }
 
@@ -522,6 +596,9 @@ class ActivityBar(QWidget):
                     "git": self.git_button,
                     "scripts": self.scripts_button,
                     "locations": self.locations_button,
+                    "testing": self.testing_button,
+                    "maps": self.maps_button,
+                    "llm": self.llm_button,
                     "search": self.search_button,
                 }[key],
                 # PROMPT.md: "the compile icon should be stuck to the top" -- never draggable,
@@ -533,9 +610,24 @@ class ActivityBar(QWidget):
         if saved_order is not None:
             self._icon_strip.set_order(saved_order)
         self._icon_strip.order_changed.connect(lambda order: _save_order(self._env_path, order))
-        layout.addWidget(self._icon_strip)
-
-        layout.addStretch(1)
+        # Stretch factor 1, not the default 0 -- a stretch of 0 caps the strip at its own
+        # sizeHint() forever (which, once any button has gone into the "..." overflow, reflects
+        # only the *currently visible* buttons -- a hidden QWidgetItem contributes nothing to a
+        # layout's sizeHint()). Without a stretch factor here, the strip could shrink to collapse
+        # icons into overflow but could never grow back past that reduced sizeHint even once the
+        # window had room again (e.g. re-maximizing after a smaller windowed size).
+        #
+        # This must be the *only* stretchable item in the layout -- an equally-stretched
+        # addStretch(1) here used to split any leftover room 50/50 with it (matching QBoxLayout's
+        # standard equal-stretch-factor distribution), so growing the window back only ever handed
+        # the strip half of what it needed to re-show everything, leaving icons permanently stuck
+        # in "..." even once the window was plenty tall again. A plain (non-stretching) spacing gap
+        # doesn't compete for that room, so the strip alone claims 100% of it -- resizeEvent()/
+        # _relayout() (below) then uses that to re-show whatever now fits, and once every icon is
+        # visible again the strip just keeps growing itself (blank space below its last button)
+        # rather than handing the excess to a separate item, which still keeps the status/help/
+        # settings trio pinned at the very bottom.
+        layout.addWidget(self._icon_strip, 1)
 
         # PROMPT.md: "a flame icon which can be of different states depending on the status of
         # the players halo install and running detection" -- a pure status indicator (no click

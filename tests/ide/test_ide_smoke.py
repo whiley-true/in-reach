@@ -875,7 +875,18 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
 
-    assert bar._icon_strip.order == ["compile", "explorer", "git", "scripts", "rvt", "locations", "search"]
+    assert bar._icon_strip.order == [
+        "compile",
+        "git",
+        "explorer",
+        "scripts",
+        "rvt",
+        "locations",
+        "testing",
+        "maps",
+        "llm",
+        "search",
+    ]
 
 
 def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) -> None:
@@ -888,11 +899,22 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts aren't named in the saved order at all -- appended after it, in their existing
-    # (default) relative order, same as any other icon added after a user's own .env was written.
-    # "compile" is pinned (PROMPT.md: "the compile icon should be stuck to the top") -- it sorts to
-    # the front regardless of where the saved order put it.
-    assert bar._icon_strip.order == ["compile", "search", "explorer", "rvt", "locations", "git", "scripts"]
+    # git/scripts/testing/maps/llm aren't named in the saved order at all -- appended after it, in
+    # their existing (default) relative order, same as any other icon added after a user's own
+    # .env was written. "compile" is pinned (PROMPT.md: "the compile icon should be stuck to the
+    # top") -- it sorts to the front regardless of where the saved order put it.
+    assert bar._icon_strip.order == [
+        "compile",
+        "search",
+        "explorer",
+        "rvt",
+        "locations",
+        "git",
+        "scripts",
+        "testing",
+        "maps",
+        "llm",
+    ]
 
 
 def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
@@ -911,7 +933,18 @@ def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path
     order = bar._icon_strip.order
     # "compile" is pinned to the front (PROMPT.md: "the compile icon should be stuck to the top").
     assert order[:3] == ["compile", "search", "rvt"]
-    assert set(order) == {"compile", "rvt", "explorer", "git", "scripts", "locations", "search"}
+    assert set(order) == {
+        "compile",
+        "rvt",
+        "explorer",
+        "git",
+        "scripts",
+        "locations",
+        "testing",
+        "maps",
+        "llm",
+        "search",
+    }
 
 
 def test_activity_bar_with_no_env_path_does_not_persist_reordering(qtbot) -> None:
@@ -1197,6 +1230,75 @@ def test_overflow_button_menu_lists_hidden_icons_and_clicking_one_activates_it(q
     strip._buttons[hidden_key].click()
 
     assert clicked == [hidden_key]
+
+
+def test_activity_bar_icons_reappear_after_regrowing_the_window(window: MainWindow) -> None:
+    # Regression guard: layout.addWidget(self._icon_strip) used to pass the default stretch
+    # factor (0), which caps the strip at its own sizeHint() -- once any icon collapsed into the
+    # "..." overflow, that sizeHint() only reflected the *remaining visible* icons (a hidden
+    # QWidgetItem contributes nothing to a layout's sizeHint()), so all the leftover vertical room
+    # in ActivityBar's layout kept going to its addStretch(1) instead, and the strip could never
+    # grow back past that shrunken size -- matching PROMPT.md: "after windowing a ide, the icons
+    # collapse into the '...', but when maximised they dont reappear".
+    strip = window.activity_bar._icon_strip
+
+    # A generous height, not a fixed guess -- an earlier test in the same session may have left
+    # the app's live zoom scaled up (zoom.apply_zoom() sets the QApplication-wide font, so it
+    # outlives whatever test changed it), which inflates every icon button's own pixel size.
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []  # sanity: comfortably fits at this generous a height
+
+    window.resize(1600, 300)
+    QApplication.processEvents()
+    assert strip.hidden_keys != []
+
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []
+    assert strip._overflow_button.isVisibleTo(strip) is False
+
+
+def test_activity_bar_icon_strip_is_the_layouts_only_stretchable_item(window: MainWindow) -> None:
+    # Regression guard: layout.addWidget(self._icon_strip, 1) alongside an equally-stretched
+    # layout.addStretch(1) below it used to split any leftover vertical room 50/50 between the
+    # two (QBoxLayout distributes surplus proportionally to stretch factor, and neither item has a
+    # maximumHeight capping it) -- so regrowing the window after a shrink only ever handed the
+    # strip about half of what it actually needed to re-show every icon, leaving some stuck behind
+    # "..." even at window sizes that would comfortably fit everything if the strip got all of it
+    # (the previous test's window.resize(1600, 5000) was generous enough that even a 50% share
+    # still exceeded what was needed, so it never caught this). The strip must be the *only*
+    # stretchable item so it always claims the full leftover amount.
+    layout = window.activity_bar.layout()
+    stretches = [layout.stretch(i) for i in range(layout.count())]
+    assert stretches.count(0) == len(stretches) - 1
+    icon_strip_index = next(
+        i for i in range(layout.count()) if layout.itemAt(i).widget() is window.activity_bar._icon_strip
+    )
+    assert layout.stretch(icon_strip_index) > 0
+
+
+def test_activity_bar_icons_stay_packed_at_the_top_when_the_strip_has_spare_room(
+    window: MainWindow,
+) -> None:
+    # Regression guard: making the icon strip the layout's only stretchable item (previous test)
+    # means ActivityBar hands it plenty of extra height once the window is tall -- but the strip's
+    # own internal QVBoxLayout had no stretchable item of its own, and a QBoxLayout with none
+    # spreads its fixed-size children out evenly to fill whatever height it's given instead of
+    # leaving the extra space after the last one. Icons should stay tightly packed at the top
+    # (each button_height + spacing below the last), with the leftover space as blank room below
+    # the last icon, not distributed as gaps between every icon.
+    strip = window.activity_bar._icon_strip
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []
+
+    spacing = strip.layout().spacing()
+    previous_bottom = None
+    for key in strip.order:
+        button = strip._buttons[key]
+        assert button.y() == (0 if previous_bottom is None else previous_bottom + spacing)
+        previous_bottom = button.y() + button.height()
 
 
 def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path) -> None:
@@ -3868,6 +3970,48 @@ def test_git_and_scripts_buttons_switch_the_sidebar_to_their_own_panels(
     assert project_window._sidebar_stack.currentWidget() is project_window.scripts_panel
 
 
+def test_maps_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.maps_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.maps_panel
+    assert project_window.activity_bar.maps_button.isChecked() is True
+
+
+def test_testing_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using a testube)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.testing_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.testing_panel
+    assert project_window.activity_bar.testing_button.isChecked() is True
+
+
+def test_llm_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.llm_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.llm_panel
+    assert project_window.activity_bar.llm_button.isChecked() is True
+
+
 def test_settings_cog_opens_the_settings_dialog(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4142,6 +4286,27 @@ def test_open_new_window_creates_and_tracks_another_mainwindow(
     child = project_window._child_windows[0]
     assert child.root_dir == project_window.root_dir
     assert child.isMaximized() is True
+
+
+def test_open_new_window_starts_blank_even_with_a_project_already_open(
+    project_window: MainWindow, tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression test: open_new_window() used to construct the child with only root_dir, so its
+    # own __init__ fell back to restoring PROJECT_DIR_KEY from that *same* root_dir's .env --
+    # which opening a project in this window had just written -- reopening the same project in
+    # the "new" window instead of leaving it blank (same working directory, no project loaded).
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    assert project_window.explorer_panel.current_folder == folder
+
+    project_window.open_new_window()
+
+    child = project_window._child_windows[0]
+    qtbot.addWidget(child)
+    assert child.root_dir == project_window.root_dir
+    assert child.explorer_panel.current_folder is None
 
 
 def test_clicking_a_file_in_the_explorer_panel_opens_it_in_the_active_pane(

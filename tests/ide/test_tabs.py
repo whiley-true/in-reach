@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6 import sip
-from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar, QToolButton
 
 import in_reach
 from in_reach.ide import icons
@@ -384,6 +384,93 @@ def test_unpinning_leaves_the_tab_in_place(window: MainWindow) -> None:
 
     pane._toggle_pin(0)
     assert pane._tab_state_for(pane.widget(0)).pinned is False
+
+
+def test_dragging_an_unpinned_tab_cannot_land_left_of_a_pinned_one(window: MainWindow) -> None:
+    # Regression test: setMovable(True)'s own built-in drag reorder (QTabBar.moveTab under the
+    # hood, same as a real mouse drag) has no notion of pinned tabs, and used to let the user drag
+    # an unpinned tab all the way to index 0, ahead of a pinned one -- _on_tab_moved() must correct
+    # that back after every move, whatever triggered it.
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    main_panel.new_tab_in(pane)
+    welcome = pane.widget(0)
+    untitled_2 = pane.widget(2)
+    pane._toggle_pin(pane.indexOf(welcome))
+    assert pane.indexOf(welcome) == 0
+
+    # Simulates the same drag a user would perform: dragging the rightmost (unpinned) tab all the
+    # way to the front, past the pinned Welcome tab.
+    pane.tabBar().moveTab(pane.indexOf(untitled_2), 0)
+
+    assert pane.indexOf(welcome) == 0
+    assert pane._tab_state_for(welcome).pinned is True
+    assert pane._tab_state_for(untitled_2).pinned is False
+
+
+def test_pinned_tab_shows_a_pin_icon_instead_of_the_close_x(window: MainWindow) -> None:
+    # PROMPT.md: "when a tab is pinned, it should have a pin icon instead of an x icon, when the
+    # pin is clicked it should become unpinned and the pin should convert to a x."
+    pane = window.main_panel.panes[0]
+    button = pane.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide)
+
+    assert _close_icon_image(button) == _expected_icon_image("win_close")
+
+    pane._toggle_pin(0)
+    index = pane.indexOf(pane.widget(0))
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    assert _close_icon_image(button) == _expected_icon_image("tab_pin")
+
+    pane._toggle_pin(index)
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    assert _close_icon_image(button) == _expected_icon_image("win_close")
+
+
+def test_pinned_tab_close_button_actually_repaints_the_pin_icon(window: MainWindow) -> None:
+    # Regression test: setTabsClosable(True)'s auto-created close button is a private
+    # QTabBar::CloseButton whose paintEvent always draws the style's built-in close glyph and
+    # never looks at the button's own icon() -- _update_close_icon()'s setIcon() calls were
+    # silently changing that property without ever changing what got painted, so the pin/dirty
+    # icon swap never actually showed on screen despite _tab_state.pinned (and _close_icon_image,
+    # which reads icon() rather than the real paint) being correct. Asserting a real QToolButton
+    # (whose own paintEvent does honor icon()) is installed, and that its rendered pixels actually
+    # differ between states, is what would have caught that.
+    pane = window.main_panel.panes[0]
+    button = pane.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide)
+    assert type(button) is QToolButton
+    unpinned_render = button.grab().toImage()
+
+    pane._toggle_pin(0)
+    index = pane.indexOf(pane.widget(0))
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    pinned_render = button.grab().toImage()
+
+    assert pinned_render != unpinned_render
+
+
+def test_clicking_the_pin_icon_unpins_instead_of_closing_the_tab(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    before = pane.count()
+    pane._toggle_pin(0)
+    assert pane._tab_state_for(pane.widget(0)).pinned is True
+
+    pane._handle_tab_close_requested(0)
+
+    assert pane.count() == before
+    assert pane._tab_state_for(pane.widget(0)).pinned is False
+
+
+def test_clicking_the_close_x_still_closes_an_unpinned_tab(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    before = pane.count()
+
+    pane._handle_tab_close_requested(index)
+
+    assert pane.count() == before - 1
 
 
 # -- copy / reveal path actions -----------------------------------------------------------------

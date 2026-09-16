@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPalette, QTextFormat
+from PyQt6.QtCore import QMimeData, Qt
+from PyQt6.QtGui import QPalette, QTextCursor, QTextFormat
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.app import indent_settings
@@ -484,6 +484,112 @@ def test_an_untitled_tab_with_no_path_never_shows_an_error(qtbot) -> None:
     editor.setPlainText("{not even valid json")
 
     assert editor._error_spans == []
+
+
+# -- "$schema" line protection (PROMPT.md: "the schema section of the jsons should not be
+# editable") ----------------------------------------------------------------------------------
+
+_SCHEMA_TEXT = '{\n  "$schema": "../../schema/settings.schema.json",\n  "difficulty": "normal"\n}'
+
+
+def _place_cursor(editor: TextEditorWidget, pos: int) -> None:
+    cursor = editor.textCursor()
+    cursor.setPosition(pos)
+    editor.setTextCursor(cursor)
+
+
+def test_typing_inside_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index("schema.json"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_backspace_at_the_start_of_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    # Backspacing right at the line's own start would otherwise merge the previous line into it
+    # without deleting any of the line-detection's own matched text, silently defeating protection
+    # on every check afterwards -- see _blocks_schema_edit()'s own docstring.
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index('"$schema"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Backspace)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_deleting_a_selection_spanning_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_SCHEMA_TEXT.index('"$schema"') - 1)
+    cursor.setPosition(_SCHEMA_TEXT.index('"difficulty"') + 3, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Delete)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_pasting_into_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index("schema.json"))
+    mime = QMimeData()
+    mime.setText("PASTED")
+    editor._edit.insertFromMimeData(mime)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_editing_other_lines_of_a_schema_backed_file_still_works(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index('"difficulty"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() != _SCHEMA_TEXT
+    assert editor.toPlainText().count("x") == 1
+
+
+def test_a_json_file_with_no_schema_key_is_fully_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "difficulty": "normal"\n}')
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText().startswith("x")
+
+
+def test_a_non_json_file_containing_the_literal_text_is_fully_editable(qtbot) -> None:
+    path = Path("/project/script/output.txt")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    text = '"$schema": "not actually json here"'
+    editor.setPlainText(text)
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() != text
 
 
 # -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----

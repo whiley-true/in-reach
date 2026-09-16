@@ -459,7 +459,8 @@ def create_gametype_project(
     # first snapshot captures the whole thing rather than a partially-written folder.
     from in_reach.app import vcs
 
-    vcs.init(folder)
+    # PROMPT.md: "when a gametype is innited it should be stamped with commit 'gametype init'".
+    vcs.init(folder, stamp_message="gametype init")
 
     _logger.info("created gametype project %r at %s", title, folder)
     return folder, warning

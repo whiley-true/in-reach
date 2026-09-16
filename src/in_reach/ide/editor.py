@@ -65,6 +65,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QGridLayout,
     QLabel,
+    QPlainTextDocumentLayout,
     QPlainTextEdit,
     QTextEdit,
     QToolTip,
@@ -375,7 +376,13 @@ class _PlainTextEditor(QPlainTextEdit):
         # app's split-editor duplicate view -- see ``TextEditorWidget.__init__``), is therefore the
         # *only* document this instance is ever pointed at, from construction on -- never replaced
         # after starting out with one of its own.
-        self.setDocument(document if document is not None else QTextDocument(self))
+        if document is None:
+            # QPlainTextEdit requires its document to use QPlainTextDocumentLayout -- a bare
+            # QTextDocument() defaults to QTextDocumentLayout (the rich-text layout), which
+            # triggers Qt's "Document set does not support QPlainTextDocumentLayout" warning.
+            document = QTextDocument(self)
+            document.setDocumentLayout(QPlainTextDocumentLayout(document))
+        self.setDocument(document)
         self.path: Path | None = None
         self._highlighter: JsonSyntaxHighlighter | None = None
         self._fold_ranges: dict[int, int] = {}
@@ -469,6 +476,8 @@ class _PlainTextEditor(QPlainTextEdit):
         if event.matches(QKeySequence.StandardKey.Save):
             self.save_requested.emit()
             return
+        if self._blocks_schema_edit(event):
+            return
         # PROMPT.md (Quick Access Bar work): "Indent using spaces" -- a plain Tab (no modifiers, so
         # Shift+Tab's own default Qt focus-navigation behavior is untouched) inserts the project's
         # configured indent width in spaces instead of QPlainTextEdit's own literal-tab-character
@@ -479,6 +488,69 @@ class _PlainTextEditor(QPlainTextEdit):
                 self.insertPlainText(" " * width)
                 return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: ANN001 -- QMimeData
+        # Paste (also drag-drop/middle-click paste, which never reaches keyPressEvent at all) goes
+        # through here regardless of trigger -- see _blocks_schema_edit()'s own docstring.
+        cursor = self.textCursor()
+        start = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+        end = cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+        if self._range_touches_schema_line(start, end):
+            return
+        super().insertFromMimeData(source)
+
+    # -- "$schema" line protection -------------------------------------------------------------
+
+    def _schema_line_range(self) -> tuple[int, int] | None:
+        """The character span (the start of its own line through the start of the *next* line --
+        i.e. including its own trailing newline) of a top-level ``"$schema"`` key's line, for a
+        JSON document that has one -- PROMPT.md: "the schema section of the jsons should not be
+        editable". Recomputed fresh off the live text on every check rather than cached, so it
+        stays correct as edits elsewhere in the document shift it up or down. ``None`` for anything
+        that isn't JSON, or JSON with no ``"$schema"`` key at all (nothing to protect)."""
+        if self.path is None or self.path.suffix.lower() != ".json":
+            return None
+        block = self.document().firstBlock()
+        while block.isValid():
+            if block.text().lstrip().startswith('"$schema"'):
+                start = block.position()
+                next_block = block.next()
+                end = next_block.position() if next_block.isValid() else start + block.length()
+                return start, end
+            block = block.next()
+        return None
+
+    def _range_touches_schema_line(self, start: int, end: int) -> bool:
+        schema_range = self._schema_line_range()
+        if schema_range is None:
+            return False
+        schema_start, schema_end = schema_range
+        return start < schema_end and end > schema_start
+
+    def _blocks_schema_edit(self, event: QKeyEvent) -> bool:
+        """Whether ``event`` would insert into, or delete from, the "$schema" line -- checked
+        before any other key handling in :meth:`keyPressEvent`. A selection overlapping the line
+        blocks *any* key that would replace it (typing, Backspace/Delete, Cut -- checking the
+        selection alone covers all of these identically, whichever key triggered it). With a bare
+        cursor and no selection, only Backspace/Delete/plain typing are destructive at all, and
+        Backspace also blocks right at the line's own start -- otherwise it would merge the
+        previous line's text into it without deleting anything the line-detection above matches on,
+        silently defeating protection on the very next check."""
+        schema_range = self._schema_line_range()
+        if schema_range is None:
+            return False
+        schema_start, schema_end = schema_range
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return self._range_touches_schema_line(cursor.selectionStart(), cursor.selectionEnd())
+        pos = cursor.position()
+        if event.key() == Qt.Key.Key_Backspace:
+            return schema_start <= pos <= schema_end
+        if event.key() == Qt.Key.Key_Delete:
+            return schema_start <= pos < schema_end
+        if event.text():
+            return schema_start <= pos < schema_end
+        return False
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         # PROMPT.md: "where we have a ... red underlined text we are seeing the error message at

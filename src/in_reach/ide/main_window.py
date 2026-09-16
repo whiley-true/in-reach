@@ -48,13 +48,16 @@ from in_reach.ide.bottom_panel import BottomPanel
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
+from in_reach.ide.llm_panel import LlmPanel
 from in_reach.ide.locations_panel import LocationsPanel
+from in_reach.ide.maps_panel import MapsPanel
 from in_reach.ide.quick_access import Command, QuickAccessBar
 from in_reach.ide.scripts_panel import ScriptsPanel
 from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.settings_dialog import SettingsDialog
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
+from in_reach.ide.testing_panel import TestingPanel
 from in_reach.ide.theme import Theme
 from in_reach.ide.window_resize import cursor_for_edges, resize_edges
 
@@ -126,6 +129,9 @@ _VIEW_DISPLAY_NAMES = {
     "git": "Git",
     "scripts": "Scripts",
     "locations": "Locations",
+    "testing": "Testing",
+    "maps": "Map Files",
+    "llm": "LLM",
     "search": "Search",
 }
 
@@ -413,7 +419,13 @@ class _ResizableBody(QWidget):
 
 
 class MainWindow(QWidget):
-    def __init__(self, root_dir: Path | None = None, *, initial_project: Path | None = None) -> None:
+    def __init__(
+        self,
+        root_dir: Path | None = None,
+        *,
+        initial_project: Path | None = None,
+        restore_last_project: bool = True,
+    ) -> None:
         """
         Args:
             root_dir: The repo root this window's own ``.in-reach`` project folder lives under.
@@ -422,6 +434,11 @@ class MainWindow(QWidget):
                 own "Open in New Window" choice (PROMPT.md: "1 per window"), so a project already
                 open in *this* window can be handed to a fresh one without disturbing what's
                 persisted for ordinary restarts.
+            restore_last_project: Whether to fall back to reopening whatever ``PROJECT_DIR_KEY``
+                last had open when ``initial_project`` isn't given. ``True`` for the app's own
+                normal launch; :meth:`open_new_window` passes ``False`` so "File > New Window"
+                starts blank (same working directory, no project auto-loaded) instead of just
+                reopening the project already open in the window it was spawned from.
         """
         super().__init__()
         self.root_dir = root_dir or Path.cwd()
@@ -524,9 +541,11 @@ class MainWindow(QWidget):
         # in_reach.app.new_project.create_gametype_project).
         if self._initial_project is not None:
             to_open = self._initial_project if self._initial_project.is_dir() else None
-        else:
+        elif restore_last_project:
             already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
             to_open = Path(already_open) if already_open and Path(already_open).is_dir() else None
+        else:
+            to_open = None
         if to_open is not None:
             self.explorer_panel.open_project(to_open)
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
@@ -660,11 +679,17 @@ class MainWindow(QWidget):
         self.locations_panel = LocationsPanel()
         self.git_panel = GitPanel()
         self.scripts_panel = ScriptsPanel()
+        self.testing_panel = TestingPanel()
+        self.maps_panel = MapsPanel()
+        self.llm_panel = LlmPanel()
         self._sidebar_pages = {
             "explorer": self.explorer_panel,
             "git": self.git_panel,
             "scripts": self.scripts_panel,
             "locations": self.locations_panel,
+            "testing": self.testing_panel,
+            "maps": self.maps_panel,
+            "llm": self.llm_panel,
             "search": self.search_panel,
         }
         self._no_project_page = _NoProjectSidebarPage()
@@ -1067,8 +1092,10 @@ class MainWindow(QWidget):
         self.main_panel.open_welcome_tab_in(self.main_panel.active_pane)
 
     def open_new_window(self) -> None:
-        """"New Window" -- another MainWindow on the same project, independent of this one."""
-        window = MainWindow(root_dir=self.root_dir)
+        """"New Window" -- a fresh, independent MainWindow in the same working directory, starting
+        blank (Welcome tab, no project loaded) rather than reopening whatever project is already
+        open in this one."""
+        window = MainWindow(root_dir=self.root_dir, restore_last_project=False)
         window.showMaximized()
         self._child_windows.append(window)
 

@@ -38,6 +38,16 @@ def test_init_is_a_no_op_if_already_initialized(tmp_path: Path) -> None:
     assert len(vcs.history(folder)) == 1
 
 
+def test_init_with_a_stamp_message_stamps_the_first_snapshot(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+
+    vcs.init(folder, stamp_message="gametype init")
+
+    (snapshot,) = vcs.history(folder)
+    assert snapshot.is_stamp is True
+    assert snapshot.stamp_message == "gametype init"
+
+
 def test_record_change_is_a_no_op_when_nothing_changed(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)

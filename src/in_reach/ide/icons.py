@@ -93,6 +93,14 @@ _ICON_SOURCES = {
         "0 0 16 16",
         '<circle cx="8" cy="8" r="3.5"/>',
     ),
+    "tab_pin": (  # PROMPT.md: "when a tab is pinned, it should have a pin icon instead of an x
+        # icon" -- shown instead of the close 'x' on a pinned tab (see tabs.py's
+        # TabPane._update_close_icon). A plain pin: a rounded head, a body, and a point, same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"dashboard".
+        "0 0 16 16",
+        '<circle cx="8" cy="5" r="3" fill="{color}"/>'
+        '<path d="M8 8V14" stroke="{color}" stroke-width="1.6" stroke-linecap="round"/>',
+    ),
     "compass": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)",
         # later: "for locations please use a compass icon" -- a ring plus a two-tone needle
         # (the north half solid, the south half translucent, both traced as plain kite-shaped
@@ -102,6 +110,29 @@ _ICON_SOURCES = {
         '<circle cx="8" cy="8" r="6.3" fill="none" stroke="{color}" stroke-width="1.3"/>'
         '<path d="M8 3.2L9.6 8L8 8.9L6.4 8Z" fill="{color}"/>'
         '<path d="M8 12.8L6.4 8L8 7.1L9.6 8Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "testtube": (  # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using
+        # a testube)" -- a simple test tube: a neck, a rounded-bottom body, and a translucent
+        # liquid fill in the bulb, same "deliberately simple, not traced from any icon set"
+        # reasoning as "compass"/"map" above.
+        "0 0 16 16",
+        '<path d="M6 1.5H10" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
+        '<path d="M6.5 1.5V6.3L4.2 11.6C3.6 13 4.6 14.5 6.1 14.5H9.9C11.4 14.5 12.4 13 11.8 11.6'
+        'L9.5 6.3V1.5" fill="none" stroke="{color}" stroke-width="1.2" stroke-linejoin="round"/>'
+        '<path d="M4.9 10.3L4.2 11.6C3.6 13 4.6 14.5 6.1 14.5H9.9C11.4 14.5 12.4 13 11.8 11.6'
+        'L11.1 10.3Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "robot": (  # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)" -- a plain
+        # robot head (an antenna, a rounded-rect face, two eyes, a mouth line, two side arms), same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"map" above.
+        "0 0 16 16",
+        '<circle cx="8" cy="1.1" r="0.9" fill="{color}"/>'
+        '<path d="M8 2V3.3" stroke="{color}" stroke-width="1.1" stroke-linecap="round"/>'
+        '<rect x="3" y="3.3" width="10" height="9" rx="2" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<circle cx="6" cy="7.5" r="1.1" fill="{color}"/>'
+        '<circle cx="10" cy="7.5" r="1.1" fill="{color}"/>'
+        '<path d="M6 10.3H10" fill="none" stroke="{color}" stroke-width="1.1" stroke-linecap="round"/>'
+        '<path d="M1.5 6V9M14.5 6V9" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>',
     ),
     "git": (  # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a
         # dulwich gui))" -- a plain three-node branch graph (a main-line commit at top and bottom,
@@ -113,6 +144,16 @@ _ICON_SOURCES = {
         '<circle cx="12" cy="9" r="1.5" fill="{color}"/>'
         '<path d="M4 4.5V11.5" stroke="{color}" stroke-width="1.3" fill="none"/>'
         '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
+    ),
+    "map": (  # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)"
+        # -- a classic folded paper map (a zigzag-edged strip with two fold creases) plus a small
+        # location dot, same "deliberately simple, not traced from any icon set" reasoning as
+        # "compass"/"git" above.
+        "0 0 16 16",
+        '<path d="M1 3L5 1L11 3L15 1V13L11 15L5 13L1 15Z" fill="none" stroke="{color}"'
+        ' stroke-width="1.2" stroke-linejoin="round"/>'
+        '<path d="M5 1V13M11 3V15" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<circle cx="8" cy="8" r="1.1" fill="{color}"/>',
     ),
     "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
         # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"
