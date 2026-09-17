@@ -2,20 +2,25 @@
 project open at a time per window (PROMPT.md: "we now want it to be 1 per window" -- this panel
 used to hold a tab strip for several open projects at once; opening a second one while one's
 already open is now MainWindow's own "Open in this window / Open in new window" popup instead, see
-:meth:`~in_reach.ide.main_window.MainWindow._open_project_with_popup`), a row of Export/View
-Output buttons, then two boxes for the active project -- "Settings"
-pointed at its own ``settings/`` subfolder, and "Stats" summarizing its build's own space usage and
-string count (see :func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.
-strings_io.count_script_strings`). There used to be a sixth, generic "browse the whole project
+:meth:`~in_reach.ide.main_window.MainWindow._open_project_with_popup`), three boxes for the active
+project, top to bottom (PROMPT.md: "please move stats to the top of the panel") -- "Stats"
+summarizing its build's own space usage and per-subsystem (Triggers/Conditions/Actions/Forge
+Labels/Strings) counts against this project's own confirmed engine caps (see
+:func:`~in_reach.app.rvt.settings_io.load_build_stats`/:func:`~in_reach.app.rvt.strings_io.
+count_script_strings`/:data:`_MAX_TRIGGERS` et al.), "Quick Launch" (the Export File/Launch RVT/
+View Compiled button row, plus "Built-in"/"Hot Reload" buttons that open the matching
+:mod:`in_reach.app.system_verify`-resolved folder in the OS file explorer), and "Settings" pointed
+at its own ``settings/`` subfolder. There used to be a fourth, generic "browse the whole project
 folder" tree too; PROMPT.md asked for it to go now that Script/Settings cover the two subfolders
 actually worth browsing by hand -- and later, a "Script" quick-access box exactly like Settings'
 own, pointed at ``script/`` (whose only ever entry was ``output.txt``); PROMPT.md ("please also
 remove output from script") asked for that to go too, now that the button row's own "View
 Output.txt" is the supported way to look at it (see :meth:`ExplorerPanel.view_output_requested`).
 The personal game/map variant folder trees that used to live here too (PROMPT.md: "remove the
-Personal Map and Game Variants sections for now, they will later go in their own sidepanel") are
-gone for now -- :mod:`in_reach.app.system_verify` still resolves those folders for the Welcome
-tab's own Verify System Settings flow, this panel just doesn't display them anymore.
+Personal Map and Game Variants sections for now, they will later go in their own sidepanel") came
+back in a different form as Quick Launch's own "Built-in" buttons above -- :mod:`in_reach.app.
+system_verify` is still the one place their folders are actually resolved, same as the Welcome
+tab's own Verify System Settings flow.
 
 The Settings tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk
 changes for free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the
@@ -31,6 +36,7 @@ from PyQt6.QtGui import QFileSystemModel, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -41,7 +47,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import new_project
+from in_reach.app import new_project, system_verify
 from in_reach.app.rvt import settings_io, strings_io
 from in_reach.ide.file_icons import ExplorerIconProvider
 
@@ -153,6 +159,64 @@ _DASHBOARD_BUTTON_STYLE = (
 )
 
 
+#: PROMPT.md: "please then make a section 'Quick Launch' ... underneath that top row of buttons,
+#: we want a subheader saying 'Built-in' ... then a subheader saying hot reload" -- a plain bold
+#: label, one step down from a full _CollapsibleSection header (these aren't collapsible themselves,
+#: just grouping labels within the Quick Launch section's own body).
+_SUBHEADER_STYLE = "QLabel { font-weight: bold; }"
+
+
+def _subheader(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setStyleSheet(_SUBHEADER_STYLE)
+    return label
+
+
+def _folder_button(text: str) -> QToolButton:
+    """A button styled exactly like :attr:`ExplorerPanel.export_button` -- one of the "Built-in"/
+    "Hot Reload" quick-launch buttons that opens a system_verify-resolved folder in the OS file
+    explorer (MainWindow owns actually opening it, see :attr:`ExplorerPanel.
+    open_builtin_folder_requested`), same division of labor as export_button/rvt_button/
+    view_output_button above."""
+    button = QToolButton()
+    button.setText(text)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setAutoRaise(False)
+    button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+    button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    return button
+
+
+class _StatBox(QFrame):
+    """One of the Dashboard's five "sub" stats (Triggers/Conditions/Actions/Forge Labels/Strings)
+    -- PROMPT.md: "please make each the 'sub' stats have a percentage bar and a border, aligning
+    the 5 totals across two columns". A bordered frame (unlike :data:`_FLAT_PROGRESS_BAR_STYLE`'s
+    own deliberately borderless progress bar -- PROMPT.md's own "please remove the bubble outline
+    around triggers conditions actions" earlier asked for the *opposite* border-less treatment on a
+    single combined line; splitting the same five counts out into their own individually-bordered
+    boxes is a distinct, later ask, not a reversal of that one) wrapping just a progress bar, whose
+    own text carries the label/count/percent, the same "text lives on the bar" convention
+    :attr:`ExplorerPanel.stats_progress` already uses for the overall byte-usage figure.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("QFrame { border: 1px solid palette(mid); border-radius: 4px; }")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(True)
+        self.progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
+        layout.addWidget(self.progress)
+
+    def set_value(self, label: str, count: int, maximum: int) -> None:
+        percent = min(100, round(100 * count / maximum)) if maximum else 0
+        self.progress.setValue(percent)
+        self.progress.setFormat(f"{label}: {count}/{maximum} ({percent}%)")
+
+
 class _CollapsibleSection(QWidget):
     """A header (an arrow + title, click to toggle) above a divider line and a body widget that
     hides/shows with it -- VS Code's own sidebar section headers, applied to every box in this
@@ -231,6 +295,15 @@ class ExplorerPanel(QWidget):
     #: export_requested/view_output_requested above.
     launch_rvt_requested = pyqtSignal()
 
+    #: PROMPT.md: "underneath that top row of buttons, we want a subheader saying 'Built-in' and
+    #: buttons for[...] then a subheader saying hot reload[...] Open HotReload Folder" -- emitted
+    #: with the :mod:`in_reach.app.system_verify` env key each button's own folder resolves under
+    #: (e.g. :data:`~in_reach.app.system_verify.STANDARD_VARIANTS_KEY`); MainWindow owns actually
+    #: resolving and opening it (it's the one that already knows this window's own ``root_dir``,
+    #: see :meth:`~in_reach.ide.main_window.MainWindow._open_builtin_folder`), same division of
+    #: labor as export_requested/launch_rvt_requested above.
+    open_builtin_folder_requested = pyqtSignal(str)
+
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
     TEXT_SCALE = 1.1
@@ -256,9 +329,91 @@ class ExplorerPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        self._no_project_label = QLabel(_NO_PROJECT_TEXT)
+        self._no_project_label.setWordWrap(True)
+        self._no_project_label.setEnabled(False)
+        layout.addWidget(self._no_project_label)
+
+        # A hidden widget in a QVBoxLayout doesn't claim its own stretch share, so with the
+        # Stats/Quick Launch/Settings boxes below all hidden (no project open), this stands in for
+        # that -- keeping the "no project" label pinned to the top instead of the layout centering
+        # it in whatever space is left -- and collapses back to nothing the moment a project opens
+        # (see _activate()).
+        self._no_project_spacer = QWidget()
+        layout.addWidget(self._no_project_spacer, 1)
+
+        # PROMPT.md: "please also add a stats view into the dashboard" -- the active project's own
+        # build/stats.autogenerated.json (space usage + script content counts), regenerated by
+        # every decompile/resync/Apply for a multiplayer gametype (see
+        # in_reach.app.rvt.decompile's own module docstring) -- there's nothing to show for a
+        # blank/Firefight project that's never compiled, hence the placeholder. Placed first
+        # (PROMPT.md: "put the stats at the top, then settings underneath ... then Script"; later,
+        # "please move stats to the top of the panel" reconfirmed the same ordering once Quick
+        # Launch was added below it) -- stats/quick-launch/settings all take stretch=0 so they sit
+        # close together rather than each claiming a share of any extra vertical space; the trailing
+        # addStretch() below is what absorbs that space instead, keeping the three boxes anchored to
+        # the top of the panel.
+        #
+        # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%)
+        # (and with the progress bar background)" -- the byte-usage figure is the progress bar's
+        # own displayed text (QProgressBar.setFormat(), in refresh_stats()) rather than a separate
+        # label line, so it reads directly over the bar's own fill instead of next to it.
+        self.stats_progress = QProgressBar()
+        self.stats_progress.setRange(0, 100)
+        self.stats_progress.setTextVisible(True)
+        # PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge
+        # lables and strings" -- Fusion's own default QProgressBar chrome is a rounded, bordered
+        # pill sitting directly above those two lines; flattening it to a plain rectangle removes
+        # the one bordered/"bubble" element left in the Stats box.
+        self.stats_progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
+        # PROMPT.md: "please make each the 'sub' stats have a percentage bar and a border, aligning
+        # the 5 totals across two columns" -- each of Triggers/Conditions/Actions/Forge Labels/
+        # Strings gets its own bordered _StatBox (a percentage bar whose own text carries the
+        # label/count/max), laid out 2-per-row rather than the single word-wrap-off summary line
+        # this used to be (see _StatBox's own docstring for why that's not a reversal of the
+        # "remove the bubble outline" ask just above).
+        self.trigger_stat = _StatBox()
+        self.condition_stat = _StatBox()
+        self.action_stat = _StatBox()
+        self.forge_label_stat = _StatBox()
+        self.string_stat = _StatBox()
+        stats_grid = QGridLayout()
+        stats_grid.setContentsMargins(0, 0, 0, 0)
+        stats_grid.setSpacing(6)
+        stats_grid.addWidget(self.trigger_stat, 0, 0)
+        stats_grid.addWidget(self.condition_stat, 0, 1)
+        stats_grid.addWidget(self.action_stat, 1, 0)
+        stats_grid.addWidget(self.forge_label_stat, 1, 1)
+        stats_grid.addWidget(self.string_stat, 2, 0)
+        self.stats_grid_widget = QWidget()
+        self.stats_grid_widget.setLayout(stats_grid)
+        self.stats_label = QLabel(_NO_STATS_TEXT)
+        self.stats_label.setWordWrap(True)
+        stats_body = QFrame()
+        stats_layout = QVBoxLayout(stats_body)
+        stats_layout.setContentsMargins(0, 4, 0, 0)
+        stats_layout.setSpacing(4)
+        stats_layout.addWidget(self.stats_progress)
+        stats_layout.addWidget(self.stats_grid_widget)
+        stats_layout.addWidget(self.stats_label)
+        self.stats_section = _CollapsibleSection("Stats", stats_body, collapsed=False)
+        self.stats_section.hide()
+        layout.addWidget(self.stats_section)
+
+        # PROMPT.md: "please then make a section 'Quick Launch' and add our buttons underneath" --
+        # the same Export File/Launch RVT/View Compiled row this panel already had, now grouped
+        # under its own collapsible section alongside the two new "Built-in"/"Hot Reload" button
+        # grids below, rather than sitting bare at the top of the panel.
+        quick_launch_body = QWidget()
+        quick_launch_layout = QVBoxLayout(quick_launch_body)
+        quick_launch_layout.setContentsMargins(0, 4, 0, 0)
+        quick_launch_layout.setSpacing(8)
+
         # PROMPT.md: "Underneath project tabs please add the following buttons: Export RVT File
-        # (on the left) and on the right: View Output.txt" -- hidden along with the rest of the
-        # active-project chrome whenever no project is open, see _activate().
+        # (on the left) and on the right: View Output.txt"; later, "please see side_bar_sizing.png
+        # and make sure compiled is aligning next to the other buttons" -- Export File/Launch RVT on
+        # the left, View Compiled pushed to the right by the stretch between them, exactly the
+        # reference image's own row.
         button_row = QWidget()
         button_row_layout = QHBoxLayout(button_row)
         button_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -294,69 +449,57 @@ class ExplorerPanel(QWidget):
         self.view_output_button.clicked.connect(self.view_output_requested.emit)
         button_row_layout.addWidget(self.view_output_button)
         self.button_row = button_row
-        self.button_row.hide()
-        layout.addWidget(self.button_row)
+        quick_launch_layout.addWidget(self.button_row)
 
-        self._no_project_label = QLabel(_NO_PROJECT_TEXT)
-        self._no_project_label.setWordWrap(True)
-        self._no_project_label.setEnabled(False)
-        layout.addWidget(self._no_project_label)
+        # PROMPT.md: "underneath that top row of buttons, we want a subheader saying 'Built-in' and
+        # buttons for: col a: Open Game Variants/Open Hopper Variants/Open User Games, col b: Open
+        # Map Variants/Open Hopper Maps/Open User Maps" -- each resolves the matching
+        # system_verify-checked folder against this window's own project-root .env (MainWindow owns
+        # the actual lookup+open, see open_builtin_folder_requested's own docstring).
+        quick_launch_layout.addWidget(_subheader("Built-in"))
+        self.game_variants_button = _folder_button("Open Game Variants")
+        self.map_variants_button = _folder_button("Open Map Variants")
+        self.hopper_variants_button = _folder_button("Open Hopper Variants")
+        self.hopper_maps_button = _folder_button("Open Hopper Maps")
+        self.user_games_button = _folder_button("Open User Games")
+        self.user_maps_button = _folder_button("Open User Maps")
+        for button, key in (
+            (self.game_variants_button, system_verify.STANDARD_VARIANTS_KEY),
+            (self.map_variants_button, system_verify.STANDARD_MAP_VARIANTS_KEY),
+            (self.hopper_variants_button, system_verify.HOPPER_VARIANTS_KEY),
+            (self.hopper_maps_button, system_verify.HOPPER_MAP_VARIANTS_KEY),
+            (self.user_games_button, system_verify.PERSONAL_VARIANTS_KEY),
+            (self.user_maps_button, system_verify.PERSONAL_MAPS_KEY),
+        ):
+            button.clicked.connect(lambda _checked=False, k=key: self.open_builtin_folder_requested.emit(k))
+        builtin_grid = QGridLayout()
+        builtin_grid.setContentsMargins(0, 0, 0, 0)
+        builtin_grid.setSpacing(6)
+        builtin_grid.addWidget(self.game_variants_button, 0, 0)
+        builtin_grid.addWidget(self.map_variants_button, 0, 1)
+        builtin_grid.addWidget(self.hopper_variants_button, 1, 0)
+        builtin_grid.addWidget(self.hopper_maps_button, 1, 1)
+        builtin_grid.addWidget(self.user_games_button, 2, 0)
+        builtin_grid.addWidget(self.user_maps_button, 2, 1)
+        builtin_grid_widget = QWidget()
+        builtin_grid_widget.setLayout(builtin_grid)
+        quick_launch_layout.addWidget(builtin_grid_widget)
 
-        # A hidden widget in a QVBoxLayout doesn't claim its own stretch share, so with the
-        # Script/Settings/Stats boxes below all hidden (no project open), this stands in for that
-        # -- keeping the "no project" label pinned to the top instead of the layout centering it in
-        # whatever space is left -- and collapses back to nothing the moment a project opens (see
-        # _activate()).
-        self._no_project_spacer = QWidget()
-        layout.addWidget(self._no_project_spacer, 1)
+        # PROMPT.md: "then a subheader saying hot reload: col a: Open HotReload Folder".
+        quick_launch_layout.addWidget(_subheader("Hot Reload"))
+        self.hotreload_button = _folder_button("Open HotReload Folder")
+        self.hotreload_button.clicked.connect(
+            lambda: self.open_builtin_folder_requested.emit(system_verify.HOTRELOAD_KEY)
+        )
+        quick_launch_layout.addWidget(self.hotreload_button)
 
-        # PROMPT.md: "please also add a stats view into the dashboard" -- the active project's own
-        # build/stats.autogenerated.json (space usage + script content counts), regenerated by
-        # every decompile/resync/Apply for a multiplayer gametype (see
-        # in_reach.app.rvt.decompile's own module docstring) -- there's nothing to show for a
-        # blank/Firefight project that's never compiled, hence the placeholder. Placed first
-        # (PROMPT.md: "put the stats at the top, then settings underneath ... then Script") --
-        # stats/settings/script all take stretch=0 so they sit close together rather than each
-        # claiming a share of any extra vertical space; the trailing addStretch() below is what
-        # absorbs that space instead, keeping the three boxes anchored to the top of the panel.
-        #
-        # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%)
-        # (and with the progress bar background)" -- the byte-usage figure is the progress bar's
-        # own displayed text (QProgressBar.setFormat(), in refresh_stats()) rather than a separate
-        # label line, so it reads directly over the bar's own fill instead of next to it.
-        self.stats_progress = QProgressBar()
-        self.stats_progress.setRange(0, 100)
-        self.stats_progress.setTextVisible(True)
-        # PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge
-        # lables and strings" -- Fusion's own default QProgressBar chrome is a rounded, bordered
-        # pill sitting directly above those two lines; flattening it to a plain rectangle removes
-        # the one bordered/"bubble" element left in the Stats box.
-        self.stats_progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
-        # PROMPT.md: "fix the panel icon width so that trigger conditions and actions should
-        # always display on the same line" -- its own label, word-wrap off, rather than folded
-        # into stats_label's general (deliberately wrapping) prose/counts text: a wrapping QLabel
-        # word-wraps *within* each of its own "\n"-joined lines too if the panel's too narrow for
-        # one of them, which is exactly what was splitting this one over two lines. Kept from ever
-        # actually needing to overflow by _SIDEBAR_MIN_WIDTH (see main_window.py), sized against
-        # this line's own worst-case (triple-digit counts) width.
-        self.stats_counts_label = QLabel()
-        self.stats_counts_label.setWordWrap(False)
-        self.stats_label = QLabel(_NO_STATS_TEXT)
-        self.stats_label.setWordWrap(True)
-        stats_body = QFrame()
-        stats_layout = QVBoxLayout(stats_body)
-        stats_layout.setContentsMargins(0, 4, 0, 0)
-        stats_layout.setSpacing(4)
-        stats_layout.addWidget(self.stats_progress)
-        stats_layout.addWidget(self.stats_counts_label)
-        stats_layout.addWidget(self.stats_label)
-        self.stats_section = _CollapsibleSection("Stats", stats_body, collapsed=False)
-        self.stats_section.hide()
-        layout.addWidget(self.stats_section)
+        self.quick_launch_section = _CollapsibleSection("Quick Launch", quick_launch_body, collapsed=False)
+        self.quick_launch_section.hide()
+        layout.addWidget(self.quick_launch_section)
 
-        # Dedicated quick-access boxes for the active project's own script/settings subfolders,
-        # open by default since they're central to the active project. Hidden entirely with no
-        # project open (see _activate()).
+        # Dedicated quick-access box for the active project's own settings/ subfolder, open by
+        # default since it's central to the active project. Hidden entirely with no project open
+        # (see _activate()).
         self.settings_tree, self._settings_model = _new_tree()
         self.settings_section = _CollapsibleSection("Settings", self.settings_tree, collapsed=False)
         self.settings_section.hide()
@@ -391,6 +534,7 @@ class ExplorerPanel(QWidget):
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
+        self.quick_launch_section.set_header_font(header_font)
 
         settings_tree_font = QFont(font)
         settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
@@ -442,9 +586,9 @@ class ExplorerPanel(QWidget):
         ``None``."""
         self.current_folder = folder
         has_project = folder is not None and folder.is_dir()
-        self.button_row.setVisible(has_project)
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
+        self.quick_launch_section.setVisible(has_project)
         self.settings_section.setVisible(has_project)
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
@@ -490,10 +634,15 @@ class ExplorerPanel(QWidget):
             strings_path = self.current_folder / new_project.SETTINGS_DIRNAME / STRINGS_FILENAME
             strings_count = strings_io.count_script_strings(strings_path)
 
-        self.stats_progress.setVisible(stats is not None)
-        self.stats_counts_label.setVisible(stats is not None)
-        lines: list[str] = []
-        if stats is not None:
+        has_counts = stats is not None
+        self.stats_progress.setVisible(has_counts)
+        self.stats_grid_widget.setVisible(has_counts or strings_count is not None)
+        self.trigger_stat.setVisible(has_counts)
+        self.condition_stat.setVisible(has_counts)
+        self.action_stat.setVisible(has_counts)
+        self.forge_label_stat.setVisible(has_counts)
+        self.string_stat.setVisible(strings_count is not None)
+        if has_counts:
             self.stats_progress.setValue(round(stats.space.percent))
             # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 Bytes used
             # (53%) (and with the progress bar background)" -- shown as the bar's own text over its
@@ -504,17 +653,11 @@ class ExplorerPanel(QWidget):
             counts = stats.counts
             # PROMPT.md: "please also make it so that it also shows the max amount of tiggers,
             # conditions, actions, forge labels and strings (if known)" -- see _MAX_TRIGGERS et al.
-            self.stats_counts_label.setText(
-                f"Triggers: {counts.triggers}/{_MAX_TRIGGERS}   "
-                f"Conditions: {counts.conditions}/{_MAX_CONDITIONS}   "
-                f"Actions: {counts.actions}/{_MAX_ACTIONS}"
-            )
-            # PROMPT.md: "Forge labels and Strings should be on the same line"
-            forge_line = f"Forge Labels: {counts.forge_labels}/{_MAX_FORGE_LABELS}"
-            strings_line = (
-                f"Strings: {strings_count}/{_MAX_STRINGS}" if strings_count is not None else None
-            )
-            lines.append(f"{forge_line}   {strings_line}" if strings_line is not None else forge_line)
-        elif strings_count is not None:
-            lines.append(f"Strings: {strings_count}/{_MAX_STRINGS}")
-        self.stats_label.setText("\n".join(lines) if lines else _NO_STATS_TEXT)
+            self.trigger_stat.set_value("Triggers", counts.triggers, _MAX_TRIGGERS)
+            self.condition_stat.set_value("Conditions", counts.conditions, _MAX_CONDITIONS)
+            self.action_stat.set_value("Actions", counts.actions, _MAX_ACTIONS)
+            self.forge_label_stat.set_value("Forge Labels", counts.forge_labels, _MAX_FORGE_LABELS)
+        if strings_count is not None:
+            self.string_stat.set_value("Strings", strings_count, _MAX_STRINGS)
+        self.stats_label.setVisible(not has_counts and strings_count is None)
+        self.stats_label.setText(_NO_STATS_TEXT)

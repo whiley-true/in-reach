@@ -513,7 +513,7 @@ def test_typing_inside_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
 def test_backspace_at_the_start_of_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
     # Backspacing right at the line's own start would otherwise merge the previous line into it
     # without deleting any of the line-detection's own matched text, silently defeating protection
-    # on every check afterwards -- see _blocks_schema_edit()'s own docstring.
+    # on every check afterwards -- see _blocks_protected_edit()'s own docstring.
     path = tmp_path / "settings.json"
     editor = TextEditorWidget(path=path)
     qtbot.addWidget(editor)
@@ -611,6 +611,106 @@ def test_hovering_the_schema_line_shows_a_warning_elsewhere_reports_none(qtbot, 
     )
 
     cursor.setPosition(_SCHEMA_TEXT.index('"difficulty"'))
+    outside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(outside_pos) is None
+
+
+# -- forge_labels[].name protection (PROMPT.md: "entries in forge labels (in script_settings.json)
+# should instead not be changeable (the entry in the forge_labels name must always be none editable
+# in scrip_settings.json)") ------------------------------------------------------------------------
+
+_FORGE_LABELS_TEXT = (
+    "{\n"
+    '  "forge_labels": [\n'
+    '    {\n'
+    '      "name": "Blue Base",\n'
+    '      "required_number": 1\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
+
+
+def test_typing_inside_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index("Blue Base"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_backspace_at_the_start_of_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index('"Blue Base"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Backspace)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_pasting_into_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index("Blue Base"))
+    mime = QMimeData()
+    mime.setText("PASTED")
+    editor._edit.insertFromMimeData(mime)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_other_forge_label_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index('"required_number": 1') + len('"required_number": '))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _FORGE_LABELS_TEXT
+    assert '"required_number": 91' in editor.toPlainText()
+
+
+def test_a_json_file_with_no_forge_labels_array_is_fully_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "difficulty": "normal"\n}')
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText().startswith("x")
+
+
+def test_hovering_a_forge_label_name_shows_a_warning(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.resize(400, 200)
+    editor.show()
+    QApplication.processEvents()
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_FORGE_LABELS_TEXT.index("Blue Base"))
+    inside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(inside_pos) == (
+        "Forge label names are fixed and can't be edited here."
+    )
+
+    cursor.setPosition(_FORGE_LABELS_TEXT.index('"required_number"'))
     outside_pos = editor.cursorRect(cursor).center()
     assert editor._error_message_at(outside_pos) is None
 

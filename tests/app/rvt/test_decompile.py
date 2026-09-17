@@ -193,36 +193,6 @@ def test_decompile_into_project_embeds_a_relative_schema_reference(tmp_path: Pat
     assert strings_json["$schema"] == "../schemas/strings.schema.json"
 
 
-def test_decompile_into_project_notes_forge_label_strings_live_in_strings_json(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # PROMPT.md: "please add a block in script settings forge labels - explaining that forge
-    # strings have to be updated in strings.json".
-    settings = _game_settings()
-    variant = _FakeVariant(_FakeMultiplayer())
-    _patch(monkeypatch, variant, settings)
-
-    bin_path = tmp_path / "source.bin"
-    bin_path.write_bytes(b"\x00")
-    folder = tmp_path / "project"
-    folder.mkdir()
-
-    decompile.decompile_into_project(bin_path, folder)
-
-    script_settings_json = json.loads(
-        (folder / "settings" / decompile.SCRIPT_SETTINGS_FILENAME).read_text(encoding="utf-8")
-    )
-    assert script_settings_json["_comment"] == decompile.SCRIPT_SETTINGS_COMMENT
-    assert "strings.json" in decompile.SCRIPT_SETTINGS_COMMENT
-
-    # The disposable build/ snapshot is never hand-edited -- see settings_io.py's own "not meant
-    # for hand-editing" comment -- so a note aimed at an editor has nothing to say there.
-    build_script_settings_json = json.loads(
-        (folder / "build" / decompile.GENERATED_SCRIPT_SETTINGS_FILENAME).read_text(encoding="utf-8")
-    )
-    assert "_comment" not in build_script_settings_json
-
-
 def test_resync_from_bin_also_regenerates_the_schema_files(tmp_path: Path, monkeypatch) -> None:
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())

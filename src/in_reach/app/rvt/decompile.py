@@ -77,17 +77,6 @@ SETTINGS_SCHEMA_FILENAME = "settings.schema.json"
 SCRIPT_SETTINGS_SCHEMA_FILENAME = "script_settings.schema.json"
 STRINGS_SCHEMA_FILENAME = "strings.schema.json"
 
-#: PROMPT.md: "please add a block in script settings forge labels - explaining that forge strings
-#: have to be updated in strings.json" -- written as script_settings.json's own top-level
-#: "_comment" (the same schema-exempt convention settings_io.dump_*() already supports, see
-#: schema_check.find_errors()'s own "$schema"/"_comment" exclusion), since forge_labels is that
-#: file's own first and most prominent section and there's nowhere more specific to hang a comment
-#: off of in a plain JSON file's own "forge_labels" array without it looking like real data.
-SCRIPT_SETTINGS_COMMENT = (
-    "Forge label text is not set here -- the strings players actually see live in strings.json "
-    "and must be updated there instead."
-)
-
 
 @dataclass
 class _Decompiled:
@@ -527,13 +516,11 @@ def _write_generated_files(
         strings_schema_path = schema_io.dump_json_schema(StringsDocument, schema_dir / STRINGS_SCHEMA_FILENAME)
 
     settings_io.dump_game_settings(decompiled.game_settings, out_dir / settings_filename, settings_schema_path)
+    # PROMPT.md: "in script_setting.json please remove [the] '_comment'" (see git history) -- entries
+    # in forge_labels are protected directly in the editor instead (PROMPT.md: "entries in forge
+    # labels ... should instead not be changeable"), see editor.py's own forge-label-name protection.
     settings_io.dump_script_settings(
-        decompiled.script_settings,
-        out_dir / script_settings_filename,
-        script_settings_schema_path,
-        # Same "settings/'s own call, not build/'s disposable snapshot" gate as the schemas just
-        # above -- a hand-editing note has nothing to say about a file nothing hand-edits.
-        comment=SCRIPT_SETTINGS_COMMENT if write_schema else None,
+        decompiled.script_settings, out_dir / script_settings_filename, script_settings_schema_path
     )
     strings_io.write_strings_json(decompiled.strings, out_dir / strings_filename, strings_schema_path)
     if stats_filename is not None and decompiled.stats is not None:

@@ -117,7 +117,7 @@ def test_no_stats_file_shows_the_placeholder_and_hides_the_progress_bar(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is False
-    assert panel.stats_counts_label.isVisible() is False
+    assert panel.stats_grid_widget.isVisible() is False
     assert "No build stats" in panel.stats_label.text()
 
 
@@ -161,13 +161,12 @@ def test_a_real_stats_file_populates_the_progress_bar_and_counts(
     # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%) (and
     # with the progress bar background)" -- shown as the progress bar's own text, not a label line.
     assert "100" in panel.stats_progress.text() and "200" in panel.stats_progress.text()
-    assert panel.stats_counts_label.isVisible() is True
-    assert "Triggers: 3" in panel.stats_counts_label.text()
-    # PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
-    # display on the same line" -- word-wrap off is what actually guarantees that (see
-    # ExplorerPanel.__init__'s own comment); a wrapping label would still split it in two given a
-    # narrow enough panel.
-    assert panel.stats_counts_label.wordWrap() is False
+    # PROMPT.md: "please make each the 'sub' stats have a percentage bar and a border" -- each of
+    # Triggers/Conditions/Actions/Forge Labels gets its own bordered _StatBox, visible once real
+    # counts exist.
+    assert panel.stats_grid_widget.isVisible() is True
+    assert panel.trigger_stat.isVisible() is True
+    assert "Triggers: 3" in panel.trigger_stat.progress.text()
 
 
 def _write_strings_json(path: Path, entries: int) -> None:
@@ -199,8 +198,10 @@ def test_stats_box_shows_the_strings_count_even_with_no_build_stats(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is False
-    assert "Strings: 5" in panel.stats_label.text()
-    assert "No build stats" not in panel.stats_label.text()
+    assert panel.stats_grid_widget.isVisible() is True
+    assert panel.string_stat.isVisible() is True
+    assert "Strings: 5" in panel.string_stat.progress.text()
+    assert panel.stats_label.isVisible() is False
 
 
 def _write_build_stats(path: Path, *, triggers: int, conditions: int, actions: int, forge_labels: int) -> None:
@@ -248,11 +249,11 @@ def test_stats_box_shows_the_known_max_amounts_alongside_each_count(
 
     panel.open_project(folder)
 
-    assert "Triggers: 3/320" in panel.stats_counts_label.text()
-    assert "Conditions: 4/512" in panel.stats_counts_label.text()
-    assert "Actions: 5/1024" in panel.stats_counts_label.text()
-    assert "Forge Labels: 1/16" in panel.stats_label.text()
-    assert "Strings: 7/112" in panel.stats_label.text()
+    assert "Triggers: 3/320" in panel.trigger_stat.progress.text()
+    assert "Conditions: 4/512" in panel.condition_stat.progress.text()
+    assert "Actions: 5/1024" in panel.action_stat.progress.text()
+    assert "Forge Labels: 1/16" in panel.forge_label_stat.progress.text()
+    assert "Strings: 7/112" in panel.string_stat.progress.text()
 
 
 def test_stats_box_shows_the_max_string_count_even_with_no_build_stats(
@@ -263,7 +264,7 @@ def test_stats_box_shows_the_max_string_count_even_with_no_build_stats(
 
     panel.open_project(folder)
 
-    assert "Strings: 5/112" in panel.stats_label.text()
+    assert "Strings: 5/112" in panel.string_stat.progress.text()
 
 
 def test_stats_box_shows_both_build_stats_and_strings_count_together(
@@ -303,11 +304,9 @@ def test_stats_box_shows_both_build_stats_and_strings_count_together(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is True
-    assert "Triggers: 3" in panel.stats_counts_label.text()
-    # PROMPT.md: "Forge labels and Strings should be on the same line"
-    lines = panel.stats_label.text().splitlines()
-    forge_line = next(line for line in lines if "Forge Labels" in line)
-    assert "Strings: 7" in forge_line
+    assert "Triggers: 3" in panel.trigger_stat.progress.text()
+    assert "Forge Labels: 1" in panel.forge_label_stat.progress.text()
+    assert "Strings: 7" in panel.string_stat.progress.text()
 
 
 def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
@@ -356,9 +355,9 @@ def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
 
 def test_dashboard_sections_start_expanded(panel: ExplorerPanel) -> None:
     # PROMPT.md: "we then want boxes like Personal Game Variants for Script and Settings" (open by
-    # default, unlike that now-removed section) -- Stats/Settings are both central to the active
-    # project, not secondary, so they start expanded rather than collapsed.
-    for section in (panel.stats_section, panel.settings_section):
+    # default, unlike that now-removed section) -- Stats/Quick Launch/Settings are all central to
+    # the active project, not secondary, so they start expanded rather than collapsed.
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
         assert section.expanded is True
 
 
@@ -468,7 +467,7 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(panel: ExplorerPanel)
 def test_section_headers_are_10_percent_smaller_than_the_panel_font(panel: ExplorerPanel) -> None:
     panel_size = panel.font().pointSizeF()
 
-    for section in (panel.stats_section, panel.settings_section):
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
         assert section._toggle.font().pointSizeF() == pytest.approx(
             panel_size * ExplorerPanel.HEADER_TEXT_SCALE
         )
@@ -742,3 +741,61 @@ def test_dashboard_buttons_hover_with_the_theme_highlight_not_the_unthemed_light
     sheet = panel.export_button.styleSheet()
     assert "palette(light)" not in sheet
     assert "QToolButton:hover { background-color: palette(highlight)" in sheet
+
+
+# -- Quick Launch section (PROMPT.md: "please then make a section 'Quick Launch' and add our
+# buttons underneath") ---------------------------------------------------------------------------
+
+
+def test_quick_launch_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
+    assert panel.quick_launch_section.isVisible() is False
+
+
+def test_quick_launch_section_shows_once_a_project_opens(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    panel.open_project(folder)
+    assert panel.quick_launch_section.isVisible() is True
+
+    panel.close_project(folder)
+    assert panel.quick_launch_section.isVisible() is False
+
+
+def test_stats_section_sits_above_quick_launch_and_settings(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please move stats to the top of the panel".
+    layout = panel.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+    assert widgets.index(panel.stats_section) < widgets.index(panel.quick_launch_section)
+    assert widgets.index(panel.quick_launch_section) < widgets.index(panel.settings_section)
+
+
+@pytest.mark.parametrize(
+    "button_name,key",
+    [
+        ("game_variants_button", "STANDARD_VARIANTS_LOC"),
+        ("map_variants_button", "STANDARD_MAP_VARIANTS_LOC"),
+        ("hopper_variants_button", "HOPPER_VARIANTS_LOC"),
+        ("hopper_maps_button", "HOPPER_MAP_VARIANTS_LOC"),
+        ("user_games_button", "PERSONAL_VARIANTS_LOC"),
+        ("user_maps_button", "PERSONAL_MAPS_LOC"),
+        ("hotreload_button", "HOTRELOAD_DIR_LOC"),
+    ],
+)
+def test_builtin_folder_buttons_emit_open_builtin_folder_requested(
+    panel: ExplorerPanel, qtbot, button_name: str, key: str
+) -> None:
+    seen = []
+    panel.open_builtin_folder_requested.connect(seen.append)
+
+    qtbot.mouseClick(getattr(panel, button_name), Qt.MouseButton.LeftButton)
+
+    assert seen == [key]
+
+
+def test_builtin_buttons_are_laid_out_two_per_row(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "col a / col b" -- Game Variants/Map Variants, Hopper Variants/Hopper Maps, User
+    # Games/User Maps, each pair sharing a row.
+    grid = panel.game_variants_button.parentWidget().layout()
+    assert grid.rowCount() == 3
+    assert grid.columnCount() == 2

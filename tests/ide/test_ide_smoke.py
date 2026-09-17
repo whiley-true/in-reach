@@ -304,20 +304,23 @@ def test_sidebar_default_width_fits_the_dashboard_headers_without_eliding(
     # way any other VSCode-style sidebar's content does.
     for section in (
         window.explorer_panel.stats_section,
+        window.explorer_panel.quick_launch_section,
         window.explorer_panel.settings_section,
     ):
         assert section._toggle.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH
 
 
-def test_sidebar_default_width_fits_triple_digit_stats_counts_without_wrapping(
+def test_sidebar_default_width_fits_a_triple_digit_stat_box_at_half_width(
     window: MainWindow,
 ) -> None:
     # Regression guard (PROMPT.md): "fix the panel icon width so that trigger conditions and
-    # actions should always display on the same line" -- sized against the widest this line is
-    # ever realistically going to get (see explorer.py's own ExplorerPanel.__init__ comment).
-    window.explorer_panel.stats_counts_label.setText("Triggers: 999   Conditions: 999   Actions: 999")
+    # actions should always display on the same line" -- the same guarantee, now against a single
+    # _StatBox's own worst-case (triple-digit counts) width, since a later PROMPT.md pass ("please
+    # make each the 'sub' stats have a percentage bar and a border, aligning the 5 totals across two
+    # columns") replaced the old single unwrapped line with one box per stat, two per row.
+    window.explorer_panel.trigger_stat.set_value("Triggers", 999, 999)
 
-    assert window.explorer_panel.stats_counts_label.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH
+    assert window.explorer_panel.trigger_stat.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH // 2
 
 
 def test_sidebar_max_width_is_half_the_screen(window: MainWindow) -> None:
@@ -898,8 +901,8 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
         "git",
         "scripts",
         "maps",
-        "documentation",
         "testing",
+        "documentation",
         "llm",
         "search",
     ]
@@ -915,7 +918,7 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts/documentation/testing/llm aren't named in the saved order at all -- appended
+    # git/scripts/testing/documentation/llm aren't named in the saved order at all -- appended
     # after it, in their existing (default) relative order, same as any other icon added after a
     # user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should be
     # stuck to the top") -- it sorts to the front regardless of where the saved order put it.
@@ -926,8 +929,8 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
         "maps",
         "git",
         "scripts",
-        "documentation",
         "testing",
+        "documentation",
         "llm",
     ]
 
@@ -4207,7 +4210,9 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
     # to switch to the appropriate side panel (which should be in this order ...): compile,
     # dashboard, git, scripts, maps, docs, testing, ai, search ... please add an entry for view
     # logs" -- "compile"/"rvt" aren't real sidebar views (Apply is a plain action, and RVT moved to
-    # the Dashboard's own button row, see explorer.py), so they're not menu entries here.
+    # the Dashboard's own button row, see explorer.py), so they're not menu entries here. A later
+    # PROMPT.md pass moved "Documentation" below "Testing" ("move documention to come below testing
+    # in default order and in the top bar view").
     menu = project_window.top_bar.view_menu_button.menu()
     top_level = [action.text() for action in menu.actions() if not action.isSeparator()]
 
@@ -4218,8 +4223,8 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
         "Git",
         "Scripts",
         "Map Files",
-        "Documentation",
         "Testing",
+        "Documentation",
         "LLM",
         "Search",
         "View Logs",
@@ -4263,6 +4268,57 @@ def test_view_menu_view_logs_entry_opens_the_logs_tab(project_window: MainWindow
 
     assert project_window._bottom_panel_card.isVisible() is True
     assert project_window.bottom_panel.currentWidget() is project_window.bottom_panel.logs_panel
+
+
+# -- Dashboard "Quick Launch" Built-in/Hot Reload folder buttons (PROMPT.md: "underneath that top
+# row of buttons, we want a subheader saying 'Built-in' ... then a subheader saying hot reload")
+# ---------------------------------------------------------------------------------------------
+
+
+def test_open_builtin_folder_opens_the_env_resolved_path(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    real_folder = tmp_path / "game_variants"
+    real_folder.mkdir()
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.STANDARD_VARIANTS_KEY, str(real_folder))
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+
+    project_window.explorer_panel.open_builtin_folder_requested.emit(system_verify.STANDARD_VARIANTS_KEY)
+
+    assert opened == [real_folder]
+
+
+def test_open_builtin_folder_warns_instead_of_opening_when_unresolved(
+    project_window: MainWindow, monkeypatch
+) -> None:
+    from in_reach.app import system_verify
+
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(True)))
+
+    project_window.explorer_panel.open_builtin_folder_requested.emit(system_verify.STANDARD_VARIANTS_KEY)
+
+    assert opened == []
+    assert shown == [True]
+
+
+def test_builtin_folder_button_click_reaches_main_window(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    real_folder = tmp_path / "hotreload"
+    real_folder.mkdir()
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HOTRELOAD_KEY, str(real_folder))
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+
+    project_window.explorer_panel.hotreload_button.click()
+
+    assert opened == [real_folder]
 
 
 def test_edit_menu_actions_act_on_the_active_text_editor(project_window: MainWindow, tmp_path: Path) -> None:

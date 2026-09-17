@@ -12,8 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
+from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices, QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -316,8 +316,8 @@ class _ViewMenuButton(QToolButton):
             ("Git", "git_button"),
             ("Scripts", "scripts_button"),
             ("Map Files", "maps_button"),
-            ("Documentation", "documentation_button"),
             ("Testing", "testing_button"),
+            ("Documentation", "documentation_button"),
             ("LLM", "llm_button"),
             ("Search", "search_button"),
         )
@@ -649,6 +649,7 @@ class MainWindow(QWidget):
         self.explorer_panel.export_requested.connect(self.export_rvt_file)
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
         self.explorer_panel.launch_rvt_requested.connect(self.launch_rvt)
+        self.explorer_panel.open_builtin_folder_requested.connect(self._open_builtin_folder)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
@@ -2042,6 +2043,36 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", f"Couldn't export {dest.name}:\n{exc}")
             return
         _logger.info("exported %s to %s", folder, dest)
+
+    def _open_builtin_folder(self, env_key: str) -> None:
+        """Handles :attr:`~in_reach.ide.explorer.ExplorerPanel.open_builtin_folder_requested` --
+        PROMPT.md's Dashboard "Quick Launch" "Built-in"/"Hot Reload" buttons. Resolves ``env_key``
+        (one of :mod:`in_reach.app.system_verify`'s own checklist keys, e.g. ``STANDARD_VARIANTS_
+        KEY``) against this window's own project-root ``.env`` -- the same one the Welcome tab's
+        Verify System Settings flow itself writes to (:class:`~in_reach.ide.verify_dialog.
+        VerifyDialog`) -- rather than the active gametype project's own folder, since these are
+        install-wide locations (Steam's own game/map variant folders, MCC's hot-reload folder), not
+        anything scoped to a single project.
+
+        Tells the user to run Verify System Settings first rather than silently doing nothing if
+        the checklist was never run (or that particular step never resolved) for this key.
+        """
+        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        value = env_file.get_env_values(env_path).get(env_key, "")
+        if not value or not Path(value).is_dir():
+            QMessageBox.information(
+                self,
+                "in-reach",
+                "This folder hasn't been resolved yet -- run Verify System Settings from the "
+                "Welcome tab first.",
+            )
+            return
+        self.open_folder_in_os_explorer(Path(value))
+
+    def open_folder_in_os_explorer(self, path: Path) -> None:
+        """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
+        opens ``path`` in the OS's own file explorer."""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _sync_project_title(self, folder: Path) -> None:
         """Brings every cached display of ``folder``'s own title -- any already-open editor's

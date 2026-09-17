@@ -43,6 +43,7 @@ margins at all.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
@@ -78,6 +79,7 @@ from in_reach.ide.code_folding import compute_fold_ranges
 from in_reach.ide.find_replace import FindReplaceBar
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
+from in_reach.ide.json_position import find_value_span
 
 # Padding on each side of the line-number digits, so they don't sit flush against the text or the
 # panel's own edge.
@@ -104,6 +106,11 @@ _GOTO_LINE_HIGHLIGHT_ALPHA = 70
 #: _error_message_at`'s own hover tooltip while the pointer sits over the protected "$schema" line
 #: (see :meth:`_PlainTextEditor._schema_line_range`).
 _SCHEMA_LINE_WARNING = "This line is managed automatically and can't be edited."
+#: PROMPT.md: "entries in forge labels (in script_settings.json) should instead not be changeable
+#: (the entry in the forge_labels name must always be none editable in scrip_settings.json)" --
+#: same hover-tooltip treatment as _SCHEMA_LINE_WARNING, shown over a protected forge_labels[].name
+#: value (see :meth:`_PlainTextEditor._forge_label_name_spans`).
+_FORGE_LABEL_NAME_WARNING = "Forge label names are fixed and can't be edited here."
 
 #: PROMPT.md: "please increase the font size of the 3 setting json files by 10%" -- the project's
 #: own hand-relevant settings files (see :mod:`in_reach.app.new_project`'s own module docstring:
@@ -483,7 +490,7 @@ class _PlainTextEditor(QPlainTextEdit):
         if event.matches(QKeySequence.StandardKey.Save):
             self.save_requested.emit()
             return
-        if self._blocks_schema_edit(event):
+        if self._blocks_protected_edit(event):
             return
         # PROMPT.md (Quick Access Bar work): "Indent using spaces" -- a plain Tab (no modifiers, so
         # Shift+Tab's own default Qt focus-navigation behavior is untouched) inserts the project's
@@ -498,15 +505,56 @@ class _PlainTextEditor(QPlainTextEdit):
 
     def insertFromMimeData(self, source) -> None:  # noqa: ANN001 -- QMimeData
         # Paste (also drag-drop/middle-click paste, which never reaches keyPressEvent at all) goes
-        # through here regardless of trigger -- see _blocks_schema_edit()'s own docstring.
+        # through here regardless of trigger -- see _blocks_protected_edit()'s own docstring.
         cursor = self.textCursor()
         start = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
         end = cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
-        if self._range_touches_schema_line(start, end):
+        if self._range_touches_protected(start, end):
             return
         super().insertFromMimeData(source)
 
-    # -- "$schema" line protection -------------------------------------------------------------
+    # -- protected-span editing (the "$schema" line, forge_labels[].name values) ----------------
+
+    def _protected_spans(self) -> list[tuple[int, int, str]]:
+        """Every character span in the current document that can't be edited, each paired with the
+        hover-warning message explaining why. Started as a single "$schema"-line special case (see
+        :meth:`_schema_line_range`'s own docstring) before PROMPT.md asked for a second,
+        structurally different protected span: "entries in forge labels (in script_settings.json)
+        should instead not be changeable (the entry in the forge_labels name must always be none
+        editable in scrip_settings.json)" -- see :meth:`_forge_label_name_spans`."""
+        spans: list[tuple[int, int, str]] = []
+        schema_range = self._schema_line_range()
+        if schema_range is not None:
+            spans.append((schema_range[0], schema_range[1], _SCHEMA_LINE_WARNING))
+        for start, end in self._forge_label_name_spans():
+            spans.append((start, end, _FORGE_LABEL_NAME_WARNING))
+        return spans
+
+    def _forge_label_name_spans(self) -> list[tuple[int, int]]:
+        """Character spans of every top-level ``forge_labels[].name`` value, for a
+        ``script_settings.json`` document that has a ``forge_labels`` array -- uses the same
+        loc-path-to-span machinery as schema_check's own validation-error underlining
+        (:func:`find_value_span`), so a span stays correct as edits elsewhere shift the labels
+        around. Empty (not ``None``) for anything that isn't JSON, isn't valid JSON right now, or
+        has no ``forge_labels`` array -- nothing to protect."""
+        if self.path is None or self.path.suffix.lower() != ".json":
+            return []
+        text = self.toPlainText()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        forge_labels = data.get("forge_labels") if isinstance(data, dict) else None
+        if not isinstance(forge_labels, list):
+            return []
+        spans: list[tuple[int, int]] = []
+        for index, label in enumerate(forge_labels):
+            if not isinstance(label, dict) or "name" not in label:
+                continue
+            span = find_value_span(text, ("forge_labels", index, "name"))
+            if span is not None:
+                spans.append(span)
+        return spans
 
     def _schema_line_range(self) -> tuple[int, int] | None:
         """The character span (the start of its own line through the start of the *next* line --
@@ -527,36 +575,35 @@ class _PlainTextEditor(QPlainTextEdit):
             block = block.next()
         return None
 
-    def _range_touches_schema_line(self, start: int, end: int) -> bool:
-        schema_range = self._schema_line_range()
-        if schema_range is None:
-            return False
-        schema_start, schema_end = schema_range
-        return start < schema_end and end > schema_start
+    def _range_touches_protected(self, start: int, end: int) -> bool:
+        return any(
+            start < span_end and end > span_start
+            for span_start, span_end, _ in self._protected_spans()
+        )
 
-    def _blocks_schema_edit(self, event: QKeyEvent) -> bool:
-        """Whether ``event`` would insert into, or delete from, the "$schema" line -- checked
-        before any other key handling in :meth:`keyPressEvent`. A selection overlapping the line
-        blocks *any* key that would replace it (typing, Backspace/Delete, Cut -- checking the
-        selection alone covers all of these identically, whichever key triggered it). With a bare
-        cursor and no selection, only Backspace/Delete/plain typing are destructive at all, and
-        Backspace also blocks right at the line's own start -- otherwise it would merge the
-        previous line's text into it without deleting anything the line-detection above matches on,
-        silently defeating protection on the very next check."""
-        schema_range = self._schema_line_range()
-        if schema_range is None:
-            return False
-        schema_start, schema_end = schema_range
+    def _blocks_protected_edit(self, event: QKeyEvent) -> bool:
+        """Whether ``event`` would insert into, or delete from, a protected span (the "$schema"
+        line, or a forge label's ``name`` value) -- checked before any other key handling in
+        :meth:`keyPressEvent`. A selection overlapping a span blocks *any* key that would replace
+        it (typing, Backspace/Delete, Cut -- checking the selection alone covers all of these
+        identically, whichever key triggered it). With a bare cursor and no selection, only
+        Backspace/Delete/plain typing are destructive at all, and Backspace also blocks right at a
+        span's own start -- otherwise it would merge the preceding text into it without deleting
+        anything the span itself covers, silently defeating protection on the very next check."""
         cursor = self.textCursor()
         if cursor.hasSelection():
-            return self._range_touches_schema_line(cursor.selectionStart(), cursor.selectionEnd())
+            return self._range_touches_protected(cursor.selectionStart(), cursor.selectionEnd())
         pos = cursor.position()
-        if event.key() == Qt.Key.Key_Backspace:
-            return schema_start <= pos <= schema_end
-        if event.key() == Qt.Key.Key_Delete:
-            return schema_start <= pos < schema_end
-        if event.text():
-            return schema_start <= pos < schema_end
+        for span_start, span_end, _ in self._protected_spans():
+            if event.key() == Qt.Key.Key_Backspace:
+                if span_start <= pos <= span_end:
+                    return True
+            elif event.key() == Qt.Key.Key_Delete:
+                if span_start <= pos < span_end:
+                    return True
+            elif event.text():
+                if span_start <= pos < span_end:
+                    return True
         return False
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -579,7 +626,7 @@ class _PlainTextEditor(QPlainTextEdit):
     def _error_message_at(self, pos: QPoint) -> str | None:
         """The schema-error message covering the character under ``pos`` (viewport coordinates),
         if any -- what the red wavy underline's own hover tooltip shows. Falls back to
-        :meth:`_schema_line_warning_at` (PROMPT.md: "add a helper text when a user hovers over
+        :meth:`_protected_span_warning_at` (PROMPT.md: "add a helper text when a user hovers over
         schema in settings that warns the user they cannot edit that section of the jsons") once
         there's no actual validation error to report -- the two never really overlap in practice
         (the "$schema" key itself is excluded from validation, see schema_check.find_errors), but
@@ -588,14 +635,13 @@ class _PlainTextEditor(QPlainTextEdit):
         for start, end, message in self._error_spans:
             if start <= char_pos < end:
                 return message
-        return self._schema_line_warning_at(char_pos)
+        return self._protected_span_warning_at(char_pos)
 
-    def _schema_line_warning_at(self, char_pos: int) -> str | None:
-        schema_range = self._schema_line_range()
-        if schema_range is None:
-            return None
-        start, end = schema_range
-        return _SCHEMA_LINE_WARNING if start <= char_pos < end else None
+    def _protected_span_warning_at(self, char_pos: int) -> str | None:
+        for start, end, message in self._protected_spans():
+            if start <= char_pos < end:
+                return message
+        return None
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)

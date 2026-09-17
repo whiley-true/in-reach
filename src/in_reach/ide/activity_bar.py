@@ -82,15 +82,17 @@ _STATUS_TOOLTIPS = {
 #: top-to-bottom order, keyed the same way :data:`_buttons`/:meth:`ActivityBar._handle_click`
 #: already key the view-toggle buttons ("explorer" being the Dashboard button's own long-
 #: established internal name, see :data:`DEFAULT_VIEW`; "docs"/"ai" in that PROMPT.md quote are the
-#: existing "documentation"/"llm" keys, not a rename -- see this module's own docstring).
+#: existing "documentation"/"llm" keys, not a rename -- see this module's own docstring). A later
+#: PROMPT.md pass moved "documentation" below "testing": "move documention to come below testing in
+#: default order and in the top bar view".
 _DEFAULT_ORDER = (
     "compile",
     "explorer",
     "git",
     "scripts",
     "maps",
-    "documentation",
     "testing",
+    "documentation",
     "llm",
     "search",
 )
