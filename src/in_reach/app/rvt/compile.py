@@ -248,13 +248,60 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 folder,
             )
         else:
+            fallback_reason = None
             try:
                 megalo_compiler.compile_script(rvt, variant, source)
+                # A successful compile_script() call isn't, on its own, proof that `variant` is
+                # actually a valid, reloadable game variant -- confirmed a real, if rare, case: a
+                # large, deeply-nested real script (RCC Onslaught v13.bin's own full script) compiled
+                # without error but produced a `variant` that `save()` would write successfully yet
+                # the game (and even this same native module's own `load()`) could not parse back.
+                # Root-caused (not a mystery any more, see megalo_compiler's own module docstring):
+                # the compiled script exceeded Megalo::Limits::max_actions/max_conditions, which the
+                # native save() path never checks (only the fixed aggregate bit budget) -- and
+                # megalo_compiler.py's own compile() now checks this proactively and raises
+                # UnsupportedConstruct for it, the same way it already does for Limits::max_triggers,
+                # so this probe should no longer be the thing that catches that *specific* case. It
+                # stays as a real, if now mostly redundant, defense-in-depth: verifying the actual
+                # round trip here -- before this compile is ever trusted -- is what PROMPT.md's own
+                # "I want a working compiler/decompiler we can rely on" requires: never ship a build
+                # neither this app nor the game itself can load back, silently, for *any* reason,
+                # including ones not yet discovered.
+                probe_fd, probe_path_str = tempfile.mkstemp(suffix=".bin")
+                os.close(probe_fd)  # mkstemp's own fd must be closed before anything else opens this
+                # path on Windows, or save()/load() below (and the unlink() in `finally`) can fail
+                # with a spurious WinError 32 "used by another process" -- confirmed a real bug,
+                # caught by this very verification: an open handle on `probe_path` its own self
+                # leaked here once made every compile through this path fall back to the native
+                # compiler unconditionally, regardless of whether the actual compile was fine.
+                probe_path = Path(probe_path_str)
+                try:
+                    variant.save(str(probe_path))
+                    rvt.load(str(probe_path))
+                except Exception as exc:  # noqa: BLE001 -- any failure here means "don't trust this build"
+                    fallback_reason = f"compiled build failed its own save/reload verification: {exc}"
+                finally:
+                    probe_path.unlink(missing_ok=True)
             except megalo_compiler.UnsupportedConstruct as exc:
-                _logger.info(
-                    "megalo_compiler doesn't cover this script yet (%s) -- falling back to the "
-                    "native compiler for %s",
+                fallback_reason = f"megalo_compiler doesn't cover this script yet: {exc}"
+            except Exception as exc:  # noqa: BLE001 -- an unexpected native-layer failure, not a
+                # recognized "outside this compiler's supported subset" case -- still falls back
+                # rather than taking the whole compile down, but logged distinctly (warning, not
+                # info) since this represents a real bug in megalo_compiler.py or its native
+                # bindings worth investigating, not an expected/understood gap.
+                _logger.warning(
+                    "megalo_compiler hit an unexpected error compiling %s -- falling back to the "
+                    "native compiler: %s",
+                    folder,
                     exc,
+                    exc_info=True,
+                )
+                fallback_reason = f"unexpected megalo_compiler error: {exc}"
+
+            if fallback_reason is not None:
+                _logger.info(
+                    "%s -- falling back to the native compiler for %s",
+                    fallback_reason,
                     folder,
                 )
                 # megalo_compiler may have already appended partially-built triggers before hitting

@@ -766,6 +766,66 @@ def test_forge_label_argument_set_value_wires_a_real_label(juggernaut) -> None:
     assert label_arg.value is mp.forge_label(0)
 
 
+def _find_literal_scalar(rvt, variant, mp):
+    for ti in range(mp.trigger_count):
+        t = mp.trigger(ti)
+        for oi in range(t.opcode_count):
+            op = t.opcode(oi)
+            for ai in range(op.argument_count):
+                arg = op.argument(ai)
+                inner = arg.variable if hasattr(arg, "variable") else arg
+                if isinstance(inner, rvt.ScalarVariable) and inner.scope is not None and inner.scope.format == "%i":
+                    return inner
+    raise AssertionError("no real integer-literal ScalarVariable found in juggernaut.bin")
+
+
+def test_variable_copy_from_populates_an_embedded_scope_none_variable(juggernaut) -> None:
+    """ShapeArgument.radius/.length/.top/.bottom (PROMPT.md: "we want a fromm scratch compiler
+    then") are each a live ScalarVariable& reference into the ShapeArgument's own storage, not a
+    standalone value that could be cloned-and-reassigned -- freshly create()'d, they start
+    scope=None (unusable, empty decompile) with no way to populate them: Variable.scope has no
+    setter, and ShapeArgument.radius itself has no setter either (confirmed: assigning a clone to it
+    raises "property has no setter"). copy_from() is the fix -- copies scope/which/index/object from
+    a real Variable of the exact same concrete type directly into the live embedded member."""
+    rvt, variant, mp = juggernaut
+    literal = _find_literal_scalar(rvt, variant, mp)
+    set_shape = _find_action_function(rvt, "Set Object Shape")
+    shape = set_shape.arguments[1].typeinfo.create()
+    shape.shape_type = rvt.ShapeType.sphere
+    assert shape.radius.decompile(variant) == ""
+
+    shape.radius.copy_from(literal)
+    shape.radius.index = 15
+    assert shape.radius.decompile(variant) == "15"
+
+
+def _find_object_variable(rvt, mp):
+    for ti in range(mp.trigger_count):
+        t = mp.trigger(ti)
+        for oi in range(t.opcode_count):
+            op = t.opcode(oi)
+            for ai in range(op.argument_count):
+                arg = op.argument(ai)
+                inner = arg.variable if hasattr(arg, "variable") else arg
+                if isinstance(inner, rvt.ObjectVariable):
+                    return inner
+    raise AssertionError("no real ObjectVariable found in juggernaut.bin")
+
+
+def test_variable_copy_from_does_not_guard_against_a_mismatched_concrete_type_in_release_builds(juggernaut) -> None:
+    """The native ``Variable::copy()`` this wraps only checks its "same concrete type" invariant via
+    a plain C++ ``assert()`` (see its own docstring in ``bindings.cpp``) -- compiled out entirely in
+    this Release build, confirmed directly: copying a ScalarVariable's state into a live
+    ObjectVariable does NOT raise. copy_from() itself is unsafe with a mismatched type in this build
+    -- callers (in_reach.app.rvt.megalo_compiler in particular) must only ever pass a source of the
+    exact same concrete type, never rely on this method to catch a mistake."""
+    rvt, variant, mp = juggernaut
+    literal = _find_literal_scalar(rvt, variant, mp)
+    object_var = _find_object_variable(rvt, mp)
+
+    object_var.copy_from(literal)  # does not raise -- see this test's own docstring
+
+
 def test_max_triggers_limit_raises(juggernaut) -> None:
     # Limits::max_triggers is 320 -- juggernaut.bin already has 25, so this is well within reach
     # without needing to hardcode the exact limit here.
