@@ -23,7 +23,6 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import (
     QDialog,
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -38,7 +37,7 @@ from PyQt6.QtWidgets import (
 
 import in_reach
 from in_reach.app import env_file, new_project, project, recent, system_verify
-from in_reach.ide import icons
+from in_reach.ide import file_dialogs, icons
 from in_reach.ide.new_project_dialog import NewProjectDialog
 from in_reach.ide.settings_info_dialog import SettingsInfoDialog
 from in_reach.ide.verify_dialog import VerifyDialog
@@ -432,4 +431,4 @@ class WelcomeTab(QWidget):
 
     def ask_project_folder(self) -> str:
         """Kept as its own method purely as a test seam (see ``tabs.py``'s ``_ask_save_path``)."""
-        return QFileDialog.getExistingDirectory(self, "Load Project", str(self.root_dir))
+        return file_dialogs.get_existing_directory(self, "Load Project", str(self.root_dir))

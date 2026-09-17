@@ -32,6 +32,22 @@ def test_list_project_files_for_a_nonexistent_folder_is_empty(tmp_path: Path) ->
     assert quick_open.list_project_files(tmp_path / "does-not-exist") == []
 
 
+def test_list_project_files_excludes_the_vcs_history_folder(tmp_path: Path) -> None:
+    # PROMPT.md: "in the top search bar do not include files in history - otherwise it gets too
+    # long" -- every VCS snapshot lives under .in-reach/history as loose git objects, which would
+    # otherwise vastly outnumber a project's own real files.
+    (tmp_path / "settings").mkdir()
+    (tmp_path / "settings" / "settings.json").write_text("{}", encoding="utf-8")
+    history_objects = tmp_path / ".in-reach" / "history" / "objects" / "ab"
+    history_objects.mkdir(parents=True)
+    (history_objects / "cdef0123456789").write_text("", encoding="utf-8")
+    (tmp_path / ".in-reach" / "history" / "HEAD").write_text("", encoding="utf-8")
+
+    files = quick_open.list_project_files(tmp_path)
+
+    assert files == [tmp_path / "settings" / "settings.json"]
+
+
 def test_filter_files_matches_on_relative_path_case_insensitively(tmp_path: Path) -> None:
     (tmp_path / "settings").mkdir()
     settings_json = tmp_path / "settings" / "settings.json"

@@ -565,7 +565,8 @@ def test_context_menu_lists_the_expected_actions_in_order(window: MainWindow, mo
 
     labels = [action.text() for action in captured["menu"].actions() if not action.isSeparator()]
     assert labels == [
-        "Close",
+        "Save\tCtrl+S",
+        "Close\tCtrl+F4",
         "Close Others",
         "Close to the Right",
         "Close Saved",
@@ -577,10 +578,14 @@ def test_context_menu_lists_the_expected_actions_in_order(window: MainWindow, mo
         "Pin",
         "Split Right",
         "Split Down",
+        "Move to Window",
     ]
     by_text = {action.text(): action for action in captured["menu"].actions()}
+    # The first tab is the Welcome tab -- nothing to save, and no file path behind it yet.
+    assert by_text["Save\tCtrl+S"].isEnabled() is False
     assert by_text["Copy Path"].isEnabled() is False
     assert by_text["Reveal in File Explorer"].isEnabled() is False
+    assert by_text["Move to Window"].isEnabled() is True
 
 
 def test_context_menu_enables_path_actions_once_a_tab_has_a_file(
@@ -627,6 +632,250 @@ def test_context_menu_split_actions_grey_out_once_maxed(window: MainWindow, monk
 
     by_text = {action.text(): action for action in captured["menu"].actions()}
     assert by_text["Split Right"].isEnabled() is False
+
+
+def _actions_from_context_menu(pane: TabPane, index: int, monkeypatch) -> list:
+    captured = {}
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a, **k: captured.setdefault("menu", self))
+    pane._show_tab_context_menu(pane.tabBar().tabRect(index).center())
+    return list(captured["menu"].actions())
+
+
+def test_context_menu_save_action_is_enabled_for_a_text_editor_tab(
+    window: MainWindow, monkeypatch
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)  # a fresh Untitled-*.txt TextEditorWidget tab
+    index = pane.currentIndex()
+
+    by_text = {
+        action.text(): action for action in _actions_from_context_menu(pane, index, monkeypatch)
+    }
+
+    assert by_text["Save\tCtrl+S"].isEnabled() is True
+
+
+def test_context_menu_save_action_saves_the_right_clicked_tab(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "notes.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: target)
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    pane.widget(index).setPlainText("hello")
+
+    menu_action = next(
+        action
+        for action in _actions_from_context_menu(pane, index, monkeypatch)
+        if action.text() == "Save\tCtrl+S"
+    )
+    menu_action.trigger()
+
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+# -- "Move to Window" (PROMPT.md: "please also add a move to window option - this should move the
+# tab to a popout window where other tabs can also be dragged to") -------------------------------
+
+
+def test_move_to_window_creates_a_popout_with_the_tab(window: MainWindow, monkeypatch, tmp_path: Path) -> None:
+    from in_reach.ide.tabs import _PopoutWindow
+
+    pane = window.main_panel.panes[0]
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("hi", encoding="utf-8")
+    pane.open_file(file_path)
+    index = pane.indexOf(pane.widget(pane.currentIndex()))
+    content_widget = pane.widget(index)
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert isinstance(popout, _PopoutWindow)
+    assert popout.pane.count() == 1
+    assert popout.pane.widget(0) is content_widget
+    assert popout.pane in window.main_panel.panes
+    assert popout.pane.group is None
+
+
+def test_move_to_window_title_is_the_active_project_name(qtbot, tmp_path: Path) -> None:
+    from in_reach.app import new_project
+
+    # Its own isolated root_dir (rather than the shared `window` fixture's, which defaults to the
+    # real repo cwd) -- _adopt_project() below persists "last opened project" to root_dir's own
+    # .env, which would otherwise leak into every other test's fresh MainWindow() the same way a
+    # real user's own install state would.
+    isolated_window = MainWindow(root_dir=tmp_path / "root", restore_last_project=False)
+    qtbot.addWidget(isolated_window)
+    folder = tmp_path / "project"
+    (folder / "settings").mkdir(parents=True)
+    (folder / "settings" / "settings.json").write_text(
+        '{"meta": {"title": "Slayer Plus"}}', encoding="utf-8"
+    )
+    isolated_window._adopt_project(folder)
+    pane = isolated_window.main_panel.active_pane
+    isolated_window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = isolated_window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.windowTitle() == new_project.read_project_title(folder)
+
+
+def test_move_to_window_with_no_project_open_titles_it_in_reach(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.windowTitle() == "in-reach"
+
+
+def test_move_to_window_removes_the_tab_from_the_source_pane(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    count_before = pane.count()
+
+    window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert pane.count() == count_before - 1
+
+
+def test_moved_tab_hides_split_buttons(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.pane.split_button.isVisible() is False
+    assert popout.pane.vsplit_button.isVisible() is False
+
+
+def test_a_tab_can_be_dragged_from_the_main_window_into_a_popout(window: MainWindow) -> None:
+    # The core "other tabs can also be dragged to" guarantee: a popout's pane is a fully ordinary
+    # TabPane registered in MainPanelArea.panes, so the exact same cross-pane drop logic every
+    # other pane already uses (TabPane.dropEvent, keyed by MainPanelArea.find_pane) works unchanged.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)  # a tab to move into the popout
+    window.main_panel.new_tab_in(pane)  # a tab to drag in afterward
+    moved_index = 1
+    popout = window.main_panel.move_tab_to_new_window(pane, moved_index)
+    remaining_index = pane.currentIndex()
+    dragged_widget = pane.widget(remaining_index)
+
+    from PyQt6.QtCore import QMimeData
+    from in_reach.ide.tabs import _MIME_TYPE
+
+    class _FakeDropEvent:
+        def __init__(self, mime):
+            self._mime = mime
+
+        def mimeData(self):
+            return self._mime
+
+        def acceptProposedAction(self):
+            pass
+
+    mime = QMimeData()
+    mime.setData(_MIME_TYPE, f"{id(pane)}:{remaining_index}".encode("utf-8"))
+    popout.pane.dropEvent(_FakeDropEvent(mime))
+
+    assert popout.pane.count() == 2
+    assert dragged_widget.parentWidget() is not None
+    assert any(popout.pane.widget(i) is dragged_widget for i in range(popout.pane.count()))
+
+
+def test_closing_the_last_tab_in_a_popout_closes_the_window(qtbot, window: MainWindow) -> None:
+    # PROMPT.md: "we have a bug where if a the last tab in a popped out window is closed, it stays
+    # open. please fix this (on last tab close window should close)".
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    popout_pane = popout.pane
+
+    popout_pane._close_tab(0)
+    # on_pane_emptied()'s own removal is deferred one event-loop tick, and force_close()'s own
+    # deleteLater() can land within that same wait -- either "hidden" or "actually deleted" proves
+    # the fix (the exact bug: it used to just sit there, visibly still open, neither ever happening).
+    qtbot.waitUntil(lambda: sip.isdeleted(popout) or not popout.isVisible(), timeout=2000)
+
+    assert popout_pane not in window.main_panel.panes
+
+
+def test_clicking_the_popouts_own_close_button_with_the_last_tab_closes_it(
+    qtbot, window: MainWindow
+) -> None:
+    # PROMPT.md: "also the close icon is not closing the close window" -- the native titlebar 'X'
+    # (Alt+F4, etc.), not a tab's own close button.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    popout_pane = popout.pane
+
+    popout.close()
+    qtbot.wait(50)  # the tab closes synchronously; on_pane_emptied()'s own teardown is deferred
+
+    # force_close()'s own deleteLater() has actually run by now -- sip.isdeleted(), not
+    # isVisible(), is the real assertion that the C++ object (not just the Python bookkeeping) is
+    # actually gone, matching the exact bug: it used to just sit there, visibly still open.
+    assert sip.isdeleted(popout)
+    assert popout_pane not in window.main_panel.panes
+
+
+def test_clicking_the_popouts_own_close_button_prompts_for_a_dirty_tab(
+    window: MainWindow, monkeypatch
+) -> None:
+    from in_reach.ide.tabs import _SaveChoice
+
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    pane.widget(index).document().setModified(True)
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    monkeypatch.setattr(TabPane, "_ask_save_choice", lambda self, label: _SaveChoice.CANCEL)
+
+    popout.close()
+
+    assert sip.isdeleted(popout) is False
+    assert popout.isVisible() is True
+    assert popout.pane.count() == 1
+
+
+def test_split_actions_are_disabled_in_a_popouts_own_context_menu(
+    window: MainWindow, monkeypatch
+) -> None:
+    # A floating pane can't split at all (there's no second slot in a popout window's own layout
+    # to split into) -- Split Right/Split Down must read disabled from its own context menu too.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    by_text = {
+        action.text(): action
+        for action in _actions_from_context_menu(popout.pane, 0, monkeypatch)
+    }
+    assert by_text["Split Right"].isEnabled() is False
+    assert by_text["Split Down"].isEnabled() is False
+
+
+def test_split_from_and_vsplit_from_are_no_ops_for_a_floating_pane(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    group_count_before = len(window.main_panel.groups)
+
+    window.main_panel.split_from(popout.pane)
+    window.main_panel.vsplit_from(popout.pane)
+
+    assert len(window.main_panel.groups) == group_count_before
 
 
 # -- drag/drop preserves per-tab state ------------------------------------------------------------

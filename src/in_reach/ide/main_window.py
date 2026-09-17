@@ -16,7 +16,6 @@ from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -33,13 +32,14 @@ from in_reach.app import (
     halo_status,
     indent_settings,
     logging_setup,
+    mcc_launcher,
     new_project,
     project,
     recent,
     rvt_launcher,
     system_verify,
 )
-from in_reach.ide import icons, style
+from in_reach.ide import file_dialogs, icons, style
 from in_reach.ide import indent_state
 from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
@@ -134,6 +134,10 @@ _SHORTCUT_FIND = "Ctrl+F"
 _SHORTCUT_REPLACE = "Ctrl+R"
 _SHORTCUT_SELECT_ALL = "Ctrl+A"
 _SHORTCUT_COMMAND_PALETTE = "Ctrl+Shift+P"
+#: PROMPT.md: "also in the top bar next to view please add Launch with options - Launch Halo MCC
+#: (greyed unless verified), Launch RVT (when available), both with shortcuts".
+_SHORTCUT_LAUNCH_MCC = "Ctrl+Shift+M"
+_SHORTCUT_LAUNCH_RVT = "Ctrl+Shift+L"
 
 #: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
 #: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
@@ -329,6 +333,49 @@ class _ViewMenuButton(QToolButton):
         self.setMenu(menu)
 
 
+class _LaunchMenuButton(QToolButton):
+    """Top bar, next to View (PROMPT.md: "also in the top bar next to view please add Launch with
+    options - Launch Halo MCC (greyed unless verified), Launch RVT (when available), both with
+    shortcuts").
+
+    Both actions' *keyboard* shortcuts stay genuinely live at all times, not just while this menu
+    happens to be open -- :meth:`MainWindow.launch_mcc_from_menu`/:meth:`~MainWindow.
+    launch_rvt_from_menu` (what the shortcuts and the menu entries alike actually trigger) each
+    carry their own "not actually available" no-op guard, the same rule the Dashboard's own
+    rvt_button already enforces by simply being disabled (PROMPT.md: "rvt should not be launchable
+    if no project is open"). The *visual* greyed-out state shown here, by contrast, is only ever
+    refreshed right as the menu is about to open (:meth:`_refresh_enabled`) -- cosmetic, and cheap
+    to recompute fresh every time, rather than a second copy of "is this available" tracked as
+    stored state that could quietly drift out of sync with a project open/close or a Verify System
+    Settings run elsewhere.
+    """
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__(window)
+        self.setText("Launch")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        self.mcc_action = menu.addAction("Launch Halo MCC", window.launch_mcc_from_menu)
+        self.mcc_action.setShortcut(QKeySequence(_SHORTCUT_LAUNCH_MCC))
+        self.rvt_action = menu.addAction("Launch RVT", window.launch_rvt_from_menu)
+        self.rvt_action.setShortcut(QKeySequence(_SHORTCUT_LAUNCH_RVT))
+        # Starts disabled (the safe "unavailable" default) rather than querying window.
+        # explorer_panel here -- MainWindow hasn't built it yet at this point in its own
+        # construction (_TopBar is built before it, same ordering constraint documented on
+        # QuickAccessBar's own construction just above). _refresh_enabled() gets the real answer
+        # the first time the menu is actually opened.
+        self.mcc_action.setEnabled(False)
+        self.rvt_action.setEnabled(False)
+        menu.aboutToShow.connect(lambda: self._refresh_enabled(window))
+        self.setMenu(menu)
+
+    def _refresh_enabled(self, window: "MainWindow") -> None:
+        self.mcc_action.setEnabled(window.halo_mcc_verified())
+        self.rvt_action.setEnabled(window.explorer_panel.current_folder is not None)
+
+
 class _TopBar(QWidget):
     """The custom title-bar row: a small mark and dropdown menus on the left, sidebar/panel
     toggles and window controls on the right. Dragging empty space moves the (frameless) window;
@@ -378,6 +425,8 @@ class _TopBar(QWidget):
         layout.addWidget(self.selection_menu_button)
         self.view_menu_button = _ViewMenuButton(window, self.quick_access)
         layout.addWidget(self.view_menu_button)
+        self.launch_menu_button = _LaunchMenuButton(window)
+        layout.addWidget(self.launch_menu_button)
         layout.addStretch(1)
 
         # Two equal stretches around the pill center it in the gap between the left content
@@ -608,6 +657,7 @@ class MainWindow(QWidget):
             reveal_in_explorer=self._reveal_in_explorer_view,
             on_project_opened=self._on_project_opened,
             on_file_saved=self._on_file_saved,
+            project_title=self._active_project_title,
         )
         self._main_splitter.addWidget(self.main_panel)
 
@@ -1208,13 +1258,13 @@ class MainWindow(QWidget):
             self._adopt_project(Path(chosen))
 
     def ask_open_folder(self) -> str:
-        return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
+        return file_dialogs.get_existing_directory(self, "Open Folder", str(self.root_dir))
 
     def ask_export_path(self, default_path: Path) -> str:
         """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
         "Export File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's own
         bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
-        chosen, _selected_filter = QFileDialog.getSaveFileName(
+        chosen, _selected_filter = file_dialogs.get_save_file_name(
             self, "Export File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
         )
         return chosen
@@ -1528,6 +1578,32 @@ class MainWindow(QWidget):
         _logger.info("launched ReachVariantTool (pid=%s, folder=%s)", getattr(process, "pid", None), folder)
         if folder is not None:
             self._rvt_processes[folder] = process
+
+    def launch_rvt_from_menu(self) -> None:
+        """"Launch RVT" (the top bar's own Launch menu, PROMPT.md: "Launch RVT (when available)")
+        -- a no-op with no project open, the same rule the Dashboard's own rvt_button already
+        enforces by being disabled then (PROMPT.md: "rvt should not be launchable if no project is
+        open"). Kept as its own guard rather than trusting the menu action's own enabled state
+        alone, which only reflects reality right when the menu was last opened -- see
+        :class:`_LaunchMenuButton`'s own docstring for why that alone can't gate the matching
+        keyboard shortcut too."""
+        if self.explorer_panel.current_folder is None:
+            return
+        self.launch_rvt()
+
+    def halo_mcc_verified(self) -> bool:
+        """Whether the Welcome tab's own Verify System Settings checklist has resolved the "Halo
+        MCC Install" step for this window's project-root ``.env`` -- what :class:`_LaunchMenuButton`
+        greys "Launch Halo MCC" against (PROMPT.md: "Launch Halo MCC (greyed unless verified)")."""
+        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        return bool(env_file.get_env_values(env_path).get(system_verify.HALO_MCC_KEY, ""))
+
+    def launch_mcc_from_menu(self) -> None:
+        """"Launch Halo MCC" (the top bar's own Launch menu) -- a no-op unless
+        :meth:`halo_mcc_verified`, same reasoning as :meth:`launch_rvt_from_menu`'s own guard."""
+        if not self.halo_mcc_verified():
+            return
+        mcc_launcher.launch_mcc()
 
     def _rvt_synced_json_paths(self, folder: Path) -> list[Path]:
         """``folder``'s own settings.json/script_settings.json/strings.json paths -- the three
@@ -2095,6 +2171,17 @@ class MainWindow(QWidget):
         """
         self.main_panel.refresh_project_titles()
         self._update_quick_access_label(folder)
+
+    def _active_project_title(self) -> str:
+        """The active gametype project's own title, or a plain fallback with none open -- what a
+        "Move to Window" popout's own title bar shows (PROMPT.md: "the top of the popout window
+        should be called the gametype name (so that if multiple projects with multiple popouts are
+        open it doesnt get confusing)"), same source :meth:`_sync_project_title` itself refreshes
+        every other cached display of a project's title from."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return "in-reach"
+        return new_project.read_project_title(folder)
 
     def _rewatch_project_bin(self, _folder: Path | None) -> None:
         """Re-points :attr:`_bin_watcher` at the newly-active project's own freshly-*compiled*

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame
+from PyQt6.QtWidgets import QFrame, QLabel
 
 from in_reach.ide.explorer import ExplorerPanel
 
@@ -251,6 +251,8 @@ def test_stats_box_shows_the_known_max_amounts_alongside_each_count(
 
     assert "Triggers: 3/320" in panel.trigger_stat.progress.text()
     assert "Conditions: 4/512" in panel.condition_stat.progress.text()
+    # A real compile once confirmed this directly: "The compiled script contains 1052 actions, but
+    # only a maximum of 1024 are allowed" -- 1024 is a plain confirmed cap, same as the other four.
     assert "Actions: 5/1024" in panel.action_stat.progress.text()
     assert "Forge Labels: 1/16" in panel.forge_label_stat.progress.text()
     assert "Strings: 7/112" in panel.string_stat.progress.text()
@@ -799,3 +801,24 @@ def test_builtin_buttons_are_laid_out_two_per_row(panel: ExplorerPanel) -> None:
     grid = panel.game_variants_button.parentWidget().layout()
     assert grid.rowCount() == 3
     assert grid.columnCount() == 2
+
+
+# -- heading/subheading emphasis (PROMPT.md: "please update dashbaord so headings are bold and
+# subheadings are italic") -----------------------------------------------------------------------
+
+
+def test_section_headers_are_bold(panel: ExplorerPanel) -> None:
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
+        assert section._toggle.font().bold() is True
+
+
+def test_subheaders_are_italic_not_bold(panel: ExplorerPanel) -> None:
+    labels = [
+        child
+        for child in panel.quick_launch_section.body.findChildren(QLabel)
+        if child.text() in ("Built-in", "Hot Reload")
+    ]
+    assert len(labels) == 2
+    for label in labels:
+        assert label.font().italic() is True
+        assert label.font().bold() is False

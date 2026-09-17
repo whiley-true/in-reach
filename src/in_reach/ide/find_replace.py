@@ -144,6 +144,20 @@ class FindReplaceBar(QWidget):
         # -- find row ---------------------------------------------------------------------------
         find_row = QHBoxLayout()
         find_row.setSpacing(4)
+
+        # PROMPT.md: "when using find and replace, there should be an arrow dropdwon to hide/
+        # unhide replace" -- VSCode's own chevron, leftmost in the find row, toggling the replace
+        # row independently of however the bar was originally opened (Ctrl+F vs Ctrl+R, see
+        # :meth:`open`'s own docstring).
+        self.expand_replace_button = QToolButton()
+        self.expand_replace_button.setCheckable(True)
+        self.expand_replace_button.setAutoRaise(True)
+        self.expand_replace_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.expand_replace_button.setToolTip("Toggle Replace")
+        self.expand_replace_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.expand_replace_button.toggled.connect(self.set_replace_visible)
+        find_row.addWidget(self.expand_replace_button)
+
         self.find_input = _FindLineEdit(self, is_replace=False)
         self.find_input.setPlaceholderText("Find")
         self.find_input.textChanged.connect(self._refresh_matches)
@@ -239,6 +253,8 @@ class FindReplaceBar(QWidget):
 
     def set_replace_visible(self, visible: bool) -> None:
         self._replace_row.setVisible(visible)
+        self.expand_replace_button.setChecked(visible)
+        self.expand_replace_button.setArrowType(Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow)
 
     def close_bar(self) -> None:
         self.hide()

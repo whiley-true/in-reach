@@ -10,9 +10,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from in_reach.app.vcs import HISTORY_DIRNAME
+
 
 def list_project_files(root: Path) -> list[Path]:
-    """Every file under ``root``, sorted by its path relative to ``root``.
+    """Every file under ``root``, sorted by its path relative to ``root`` -- excluding the shadow
+    VCS's own ``.in-reach/history`` bare repo (PROMPT.md: "in the top search bar do not include
+    files in history - otherwise it gets too long") -- every snapshot :mod:`in_reach.app.vcs` ever
+    records lives there as loose git objects, easily outnumbering a project's own real files many
+    times over and drowning out an actual "go to file" match.
 
     Args:
         root: The gametype project's own folder to walk.
@@ -22,7 +28,15 @@ def list_project_files(root: Path) -> list[Path]:
     """
     if not root.is_dir():
         return []
-    return sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: str(p.relative_to(root)).lower())
+    history_dir = root / HISTORY_DIRNAME
+    return sorted(
+        (
+            p
+            for p in root.rglob("*")
+            if p.is_file() and p != history_dir and history_dir not in p.parents
+        ),
+        key=lambda p: str(p.relative_to(root)).lower(),
+    )
 
 
 def filter_files(files: list[Path], query: str, *, root: Path) -> list[Path]:

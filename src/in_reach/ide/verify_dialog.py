@@ -20,7 +20,6 @@ from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -32,6 +31,7 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app import system_verify
 from in_reach.app.system_verify import STEPS, Outcome, StepResult, VerifyRun, VerifyStep
+from in_reach.ide import file_dialogs
 
 # Long enough that a run of self-resolving steps reads as a checklist ticking over rather than as
 # one instantaneous jump, short enough that twelve of them don't feel like waiting.
@@ -276,8 +276,8 @@ class VerifyDialog(QDialog):
     # _ask_save_path for the same pattern) -------------------------------------------------------
 
     def ask_directory(self, start_at: str) -> str:
-        return QFileDialog.getExistingDirectory(self, "Select folder", start_at)
+        return file_dialogs.get_existing_directory(self, "Select folder", start_at)
 
     def ask_file(self, start_at: str) -> str:
-        chosen, _selected_filter = QFileDialog.getOpenFileName(self, "Select file", start_at)
+        chosen, _selected_filter = file_dialogs.get_open_file_name(self, "Select file", start_at)
         return chosen

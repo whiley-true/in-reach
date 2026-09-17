@@ -108,6 +108,48 @@ def test_open_in_replace_mode_shows_the_replace_row_and_focuses_it(qtbot) -> Non
     qtbot.waitUntil(lambda: bar.replace_input.hasFocus(), timeout=2000)
 
 
+# -- expand/collapse Replace (PROMPT.md: "when using find and replace, there should be an arrow
+# dropdwon to hide/unhide replace") ----------------------------------------------------------
+
+
+def test_expand_replace_button_starts_matching_the_open_mode(qtbot) -> None:
+    bar, _edit = _bar(qtbot)
+    bar.show()
+
+    bar.open(replace=False)
+    assert bar.expand_replace_button.isChecked() is False
+
+    bar.open(replace=True)
+    assert bar.expand_replace_button.isChecked() is True
+
+
+def test_toggling_the_expand_button_shows_and_hides_the_replace_row(qtbot) -> None:
+    bar, _edit = _bar(qtbot)
+    bar.show()
+    bar.open(replace=False)
+    assert bar._replace_row.isVisible() is False
+
+    bar.expand_replace_button.setChecked(True)
+    assert bar._replace_row.isVisible() is True
+
+    bar.expand_replace_button.setChecked(False)
+    assert bar._replace_row.isVisible() is False
+
+
+def test_set_replace_visible_keeps_the_expand_button_in_sync(qtbot) -> None:
+    from PyQt6.QtCore import Qt as _Qt
+
+    bar, _edit = _bar(qtbot)
+
+    bar.set_replace_visible(True)
+    assert bar.expand_replace_button.isChecked() is True
+    assert bar.expand_replace_button.arrowType() == _Qt.ArrowType.DownArrow
+
+    bar.set_replace_visible(False)
+    assert bar.expand_replace_button.isChecked() is False
+    assert bar.expand_replace_button.arrowType() == _Qt.ArrowType.RightArrow
+
+
 def test_close_bar_hides_it_and_returns_focus_to_the_editor(qtbot) -> None:
     bar, edit = _bar(qtbot)
     edit.show()

@@ -157,16 +157,17 @@ _ICON_SOURCES = {
         '<path d="M4 4.5V11.5" stroke="{color}" stroke-width="1.3" fill="none"/>'
         '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
     ),
-    "map": (  # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)",
-        # later swapped for a globe (PROMPT.md: "also in the side panel please change the map icon
-        # to be a globe instead") -- an outer circle plus a curved "equator" and two meridian arcs,
-        # same "deliberately simple, not traced from any icon set" reasoning as "compass"/"git"
-        # above.
+    "map": (  # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)"
+        # -- a classic folded paper map (a zigzag-edged strip with two fold creases) plus a small
+        # location dot, same "deliberately simple, not traced from any icon set" reasoning as
+        # "compass"/"git" above. Went through a globe, then a folded-map-plus-pin, then a redraw off
+        # a user-supplied reference (map_sample.png) after this -- brought back on request ("please
+        # try the first map svg you had at the start").
         "0 0 16 16",
-        '<circle cx="8" cy="8" r="6.5" fill="none" stroke="{color}" stroke-width="1.2"/>'
-        '<path d="M1.5 8H14.5" fill="none" stroke="{color}" stroke-width="1.1"/>'
-        '<path d="M8 1.5C5.5 4 5.5 12 8 14.5" fill="none" stroke="{color}" stroke-width="1.1"/>'
-        '<path d="M8 1.5C10.5 4 10.5 12 8 14.5" fill="none" stroke="{color}" stroke-width="1.1"/>',
+        '<path d="M1 3L5 1L11 3L15 1V13L11 15L5 13L1 15Z" fill="none" stroke="{color}"'
+        ' stroke-width="1.2" stroke-linejoin="round"/>'
+        '<path d="M5 1V13M11 3V15" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<circle cx="8" cy="8" r="1.1" fill="{color}"/>',
     ),
     "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
         # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"

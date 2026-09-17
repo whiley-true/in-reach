@@ -65,6 +65,11 @@ _NO_STATS_TEXT = "No build stats yet -- Apply (or launch RVT) once this gametype
 #: against, as opposed to ``max_string_ids``, a separate bytecode-level reference-index cap).
 _MAX_TRIGGERS = 320
 _MAX_CONDITIONS = 512
+#: Briefly bumped to 1064 with an "unconfirmed" note (PROMPT.md: "increase max actions to 1064 ...
+#: but we know its more than 1024") -- reverted the moment a real compile actually confirmed the
+#: opposite: "The compiled script contains 1052 actions, but only a maximum of 1024 are allowed."
+#: (the engine's own error text). 1024 was correct all along; back to a plain confirmed cap like
+#: the other four, no asterisk/tooltip needed.
 _MAX_ACTIONS = 1024
 _MAX_FORGE_LABELS = 16
 _MAX_STRINGS = 112
@@ -128,7 +133,10 @@ def _point_tree_at(tree: QTreeView, model: QFileSystemModel, folder: Path | None
 #: strips the checkable QToolButton's own default raised/"pill" background (shown whenever a
 #: section is expanded, since it's ``checked`` then -- see _CollapsibleSection.__init__) so the
 #: header reads as plain text-plus-arrow, not a button.
-_SECTION_HEADER_STYLE = "QToolButton { border: none; background-color: transparent; }"
+#: PROMPT.md: "please update dashbaord so headings are bold and subheadings are italic" -- applies
+#: to every _CollapsibleSection header (Stats/Quick Launch/Settings), on top of the plain-text/no-
+#: background treatment above.
+_SECTION_HEADER_STYLE = "QToolButton { border: none; background-color: transparent; font-weight: bold; }"
 
 #: PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge lables
 #: and strings" -- Fusion's own default QProgressBar is a rounded, bordered pill; this flattens it
@@ -160,10 +168,13 @@ _DASHBOARD_BUTTON_STYLE = (
 
 
 #: PROMPT.md: "please then make a section 'Quick Launch' ... underneath that top row of buttons,
-#: we want a subheader saying 'Built-in' ... then a subheader saying hot reload" -- a plain bold
-#: label, one step down from a full _CollapsibleSection header (these aren't collapsible themselves,
-#: just grouping labels within the Quick Launch section's own body).
-_SUBHEADER_STYLE = "QLabel { font-weight: bold; }"
+#: we want a subheader saying 'Built-in' ... then a subheader saying hot reload" -- a plain label,
+#: one step down from a full _CollapsibleSection header (these aren't collapsible themselves, just
+#: grouping labels within the Quick Launch section's own body). Later, PROMPT.md: "please update
+#: dashbaord so headings are bold and subheadings are italic" -- italic distinguishes it from a
+#: full section header's own bold treatment (see _SECTION_HEADER_STYLE) without it reading as just
+#: as prominent.
+_SUBHEADER_STYLE = "QLabel { font-style: italic; }"
 
 
 def _subheader(text: str) -> QLabel:

@@ -188,6 +188,28 @@ def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(t
     assert before_script_settings == after_script_settings
 
 
+@_NEEDS_NATIVE_RVT
+def test_run_compile_of_an_unedited_script_reproduces_the_original_action_counts(tmp_path: Path) -> None:
+    """Round-trip fidelity regression guard (PROMPT.md: "we want to make sure when we compile or
+    decompile a script it processes the code correctly ... i want a working compiler/decompiler we
+    can rely on"). A real, playable .bin can sit close enough to a budget cap (one seen in practice:
+    1013/1024 actions per RVT's own display) that decompiling it and immediately recompiling that
+    *unedited* text -- exactly what every Apply/Export/Launch RVT does -- must reproduce the same
+    trigger/condition/action/forge-label counts as the original, not silently inflate them. This
+    fixture (juggernaut.bin) is the regression guard for that property in CI.
+    """
+    from in_reach.app.rvt.decompile import GENERATED_STATS_FILENAME
+
+    project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
+    original_stats = json.loads((folder / "build" / GENERATED_STATS_FILENAME).read_text(encoding="utf-8"))
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+
+    assert result.success is True, compile_module.format_build_result(result)
+    compiled_stats = json.loads((folder / "build" / GENERATED_STATS_FILENAME).read_text(encoding="utf-8"))
+    assert compiled_stats["counts"] == original_stats["counts"]
+
+
 # -- isolated child process (see compile.py's own module docstring for why compiling runs here) --
 
 

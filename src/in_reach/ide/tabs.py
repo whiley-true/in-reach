@@ -37,7 +37,6 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QMenu,
     QMessageBox,
@@ -52,7 +51,7 @@ from PyQt6.QtWidgets import (
 )
 
 from in_reach.app.new_project import is_generated_file
-from in_reach.ide import icons, schema_check, style
+from in_reach.ide import file_dialogs, icons, schema_check, style
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.markdown_preview import MarkdownPreviewWidget
@@ -67,6 +66,17 @@ _TAB_CLOSE_ICON_SIZE = 14
 # A little larger than the icon itself for a comfortable click target -- roughly matches the
 # footprint Qt's own auto-created close button used before _install_close_button() replaced it.
 _TAB_CLOSE_BUTTON_SIZE = 20
+#: PROMPT.md: "When right clicking a tab there should be shortcuts for actions" -- shown as plain
+#: (non-interactive) hint text next to the two context-menu entries that already have a real,
+#: permanent global shortcut elsewhere (``main_window.py``'s own File menu, ``_SHORTCUT_CLOSE_
+#: EDITOR``/``_SHORTCUT_SAVE``). Duplicated as plain strings rather than imported -- main_window.py
+#: itself imports this module, so importing back from it here would be circular -- and appended
+#: straight into the action's own label text (a QMenu right-aligns text after a literal tab
+#: character) rather than via ``QAction.setShortcut()``, which would register a second *live*
+#: accelerator for the same key sequence and immediately go ambiguous with the File menu's already-
+#: registered one the moment this context menu is open.
+_SHORTCUT_HINT_CLOSE = "Ctrl+F4"
+_SHORTCUT_HINT_SAVE = "Ctrl+S"
 
 
 class _SaveChoice(Enum):
@@ -377,7 +387,8 @@ class TabPane(QTabWidget):
         is_editable_markdown = (
             isinstance(widget, TextEditorWidget) and widget.path is not None and widget.path.suffix.lower() == ".md"
         )
-        self.preview_button.setVisible(is_editable_markdown)
+        # A floating (popout-window) pane can't split at all -- see split_from's own docstring.
+        self.preview_button.setVisible(is_editable_markdown and self.group is not None)
 
     def _update_close_icon(self, index: int) -> None:
         button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
@@ -452,7 +463,7 @@ class TabPane(QTabWidget):
 
     def _ask_save_path(self, default_dir: Path, suggested_name: str) -> Path | None:
         """Also its own method for the same test-seam reason as ``_ask_save_choice``."""
-        chosen, _selected_filter = QFileDialog.getSaveFileName(
+        chosen, _selected_filter = file_dialogs.get_save_file_name(
             self, "Save As", str(default_dir / suggested_name)
         )
         return Path(chosen) if chosen else None
@@ -786,7 +797,16 @@ class TabPane(QTabWidget):
         has_path = state.path is not None
 
         menu = QMenu(self)
-        menu.addAction("Close", lambda: self._maybe_close(index))
+        # PROMPT.md: "Please also add a save option (for the jsons (other tab types may later have
+        # other options))" -- only ever meaningful for a real TextEditorWidget tab (a Markdown
+        # preview/the Welcome tab has no source buffer to write back out, see _save_tab's own
+        # guard), so it's disabled rather than shown for every other tab type.
+        menu.addAction(
+            f"Save\t{_SHORTCUT_HINT_SAVE}", lambda: self._save_tab(index)
+        ).setEnabled(isinstance(widget, TextEditorWidget))
+        menu.addSeparator()
+
+        menu.addAction(f"Close\t{_SHORTCUT_HINT_CLOSE}", lambda: self._maybe_close(index))
         menu.addAction("Close Others", lambda: self._close_others(index))
         menu.addAction("Close to the Right", lambda: self._close_to_the_right(index))
         menu.addAction("Close Saved", self._close_saved)
@@ -806,10 +826,17 @@ class TabPane(QTabWidget):
         menu.addAction("Unpin" if state.pinned else "Pin", lambda: self._toggle_pin(index))
         menu.addSeparator()
 
-        can_hsplit = self._area.split_count < _MAX_H_SPLITS
-        can_vsplit = self.group is None or self.group.vsplit_count < _MAX_V_SPLITS
+        can_hsplit = self.group is not None and self._area.split_count < _MAX_H_SPLITS
+        can_vsplit = self.group is not None and self.group.vsplit_count < _MAX_V_SPLITS
         menu.addAction("Split Right", lambda: self._split_tab(index, vertical=False)).setEnabled(can_hsplit)
         menu.addAction("Split Down", lambda: self._split_tab(index, vertical=True)).setEnabled(can_vsplit)
+        menu.addSeparator()
+
+        # PROMPT.md: "please also add a move to window option - this should move the tab to a
+        # popout window where other tabs can also be dragged to" -- see
+        # MainPanelArea.move_tab_to_new_window's own docstring for how the popout window shares
+        # this same area's drag-and-drop/document-lifetime machinery.
+        menu.addAction("Move to Window", lambda: self._area.move_tab_to_new_window(self, index))
 
         menu.exec(self.tabBar().mapToGlobal(pos))
 
@@ -904,6 +931,60 @@ class _PaneGroup(QWidget):
         self.splitter.setSizes([total // count] * count)
 
 
+class _PopoutWindow(QWidget):
+    """A floating top-level window for a single tab moved out via "Move to Window" (PROMPT.md,
+    see :meth:`MainPanelArea.move_tab_to_new_window`'s own docstring) -- hosts exactly one
+    :class:`TabPane`, which other tabs (from this window or the main one) can be dragged into just
+    like any other pane.
+
+    Closing this window (its own titlebar close button, Alt+F4, etc.) never destroys it directly --
+    it instead runs every tab in :attr:`pane` through the same prompt-if-dirty close path a single
+    tab's own close button uses (cancellable, same as closing any other tab), then ignores that
+    *particular* close event itself. Once :attr:`pane` is genuinely empty, ``on_pane_emptied``'s own
+    (deliberately one-event-loop-tick-deferred, see its own docstring) teardown calls
+    :meth:`force_close` -- the *only* place this window is ever really torn down, whether it emptied
+    by every tab being closed this way or by the last one being dragged back out into another pane
+    instead. Routing both through the same path avoids re-introducing the exact class of reentrant-
+    teardown crash ``on_pane_emptied`` was written to fix in the first place (PROMPT.md: "if i have
+    two tabs open ... and i close the welcome, things crash").
+
+    PROMPT.md: "we have a bug where if a the last tab in a popped out window is closed, it stays
+    open ... also the close icon is not closing the close window" -- :meth:`force_close` needs its
+    own ``_closing`` flag rather than just calling :meth:`close` a second time, because ``close()``
+    re-enters this exact :meth:`closeEvent` -- and by the time :meth:`force_close` runs, ``pane`` is
+    already empty, so the ``while`` loop below no-ops and execution falls straight through to the
+    same unconditional ``event.ignore()`` the first (real, tab-still-open) close used, permanently
+    refusing to ever actually close the window. ``_closing`` is what tells this *second* pass to
+    accept instead.
+    """
+
+    def __init__(self, pane: TabPane, *, title: str) -> None:
+        super().__init__(None)  # no parent -- a real top-level window, movable/closable on its own
+        self.pane = pane
+        self._closing = False
+        self.setWindowTitle(title)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(style.wrap_tab_widget(pane, flush_top=True))
+        self.resize(900, 650)
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001 -- QCloseEvent
+        if self._closing:
+            event.accept()
+            return
+        while self.pane.count() > 0:
+            if not self.pane._maybe_close(0):
+                event.ignore()
+                return
+        event.ignore()  # see this class's own docstring -- force_close() closes it for real
+
+    def force_close(self) -> None:
+        """The only real way this window ever actually closes -- see this class's own docstring
+        for why plain :meth:`close` can't do it once :attr:`pane` is already empty."""
+        self._closing = True
+        self.close()
+
+
 class MainPanelArea(QWidget):
     """Holds one or more :class:`_PaneGroup` instances side by side in a horizontal splitter, up
     to :data:`_MAX_H_SPLITS` horizontal splits, each in turn holding up to one vertical split."""
@@ -926,6 +1007,7 @@ class MainPanelArea(QWidget):
         on_project_opened: Callable[[Path], None] | None = None,
         on_settings_changed: Callable[[], None] | None = None,
         on_file_saved: Callable[[Path], None] | None = None,
+        project_title: Callable[[], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.root_dir = root_dir or Path.cwd()
@@ -933,6 +1015,12 @@ class MainPanelArea(QWidget):
         self.on_project_opened = on_project_opened
         self.on_settings_changed = on_settings_changed
         self.on_file_saved = on_file_saved
+        #: PROMPT.md: "the top of the popout window should be called the gametype name (so that if
+        #: multiple projects with multiple popouts are open it doesnt get confusing)" -- injectable
+        #: (MainWindow passes the active project's own title, see :meth:`move_tab_to_new_window`),
+        #: same reasoning as ``reveal_in_explorer``/``on_project_opened`` above: this widget stays
+        #: framework-agnostic about what "the active project" even means.
+        self.project_title = project_title
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -961,6 +1049,15 @@ class MainPanelArea(QWidget):
         self._parked_owners: dict[QTextDocument, TextEditorWidget] = {}
 
         self.groups: list[_PaneGroup] = []
+        #: Panes living in a popout window (PROMPT.md: "move to window") rather than any
+        #: _PaneGroup/the main splitter -- see :meth:`move_tab_to_new_window`. Kept separate from
+        #: ``groups`` (rather than e.g. a group-of-one with no splitter) since a popout is a
+        #: completely different top-level window, not another slot in this widget's own layout.
+        self._floating_panes: list[TabPane] = []
+        #: The popout window hosting each of :attr:`_floating_panes`, keyed by pane -- a plain
+        #: Python reference is also what keeps a parent-less top-level QWidget alive at all.
+        self._popout_windows: dict[TabPane, "_PopoutWindow"] = {}
+
         first_group = self._new_group()
         first_pane = self._new_pane()
         welcome = self._new_welcome_tab()
@@ -973,7 +1070,7 @@ class MainPanelArea(QWidget):
 
     @property
     def panes(self) -> list[TabPane]:
-        return [pane for group in self.groups for pane in group.panes]
+        return [pane for group in self.groups for pane in group.panes] + self._floating_panes
 
     @property
     def active_pane(self) -> TabPane:
@@ -1224,8 +1321,10 @@ class MainPanelArea(QWidget):
 
     def split_from(self, source: TabPane) -> None:
         """Horizontal split: adds a new pane-group beside ``source``'s own group, seeded with a
-        duplicate of ``source``'s current tab."""
-        if self.split_count >= _MAX_H_SPLITS:
+        duplicate of ``source``'s current tab. A no-op for a floating (popout-window) pane --
+        see :meth:`move_tab_to_new_window`'s own docstring -- since a popout doesn't participate in
+        this area's own splitter layout at all."""
+        if source.group is None or self.split_count >= _MAX_H_SPLITS:
             return
         new_group = self._new_group()
         new_pane = self._new_pane()
@@ -1257,7 +1356,7 @@ class MainPanelArea(QWidget):
         is_editable_markdown = (
             isinstance(widget, TextEditorWidget) and path is not None and path.suffix.lower() == ".md"
         )
-        if not is_editable_markdown or self.split_count >= _MAX_H_SPLITS:
+        if not is_editable_markdown or source.group is None or self.split_count >= _MAX_H_SPLITS:
             return
         label = source.tabText(index)
         preview = MarkdownPreviewWidget(path=path)
@@ -1348,6 +1447,19 @@ class MainPanelArea(QWidget):
         if pane.count() != 0 or pane not in self.panes or len(self.panes) <= 1:
             return
 
+        if pane.group is None:
+            # A floating (popout-window) pane -- see move_tab_to_new_window's own docstring. Never
+            # subject to the main splitter's group-removal bookkeeping below; this is the one place
+            # a popout window is actually torn down, whether it emptied by its last tab closing or
+            # by that tab being dragged out into another pane (see _PopoutWindow.closeEvent's own
+            # docstring for why closing the window itself funnels through here too).
+            self._floating_panes.remove(pane)
+            window = self._popout_windows.pop(pane, None)
+            if window is not None:
+                window.force_close()
+                window.deleteLater()
+            return
+
         group = pane.group
         group.remove_pane(pane)
         if group.panes:
@@ -1359,3 +1471,47 @@ class MainPanelArea(QWidget):
             group.deleteLater()
             self._equalize_groups()
         self._update_split_buttons()
+
+    def move_tab_to_new_window(self, source: TabPane, index: int) -> "_PopoutWindow":
+        """"Move to Window" (the tab context menu) -- PROMPT.md: "please also add a move to window
+        option - this should move the tab to a popout window where other tabs can also be dragged
+        to[; t]he top of the popout window should be called the gametype name".
+
+        The new pane is a fully ordinary :class:`TabPane` sharing this same :class:`MainPanelArea`
+        (registered in :attr:`_floating_panes` rather than any :class:`_PaneGroup`) -- so dragging a
+        tab between it and any other pane, in this window or the main one, needs no special-casing
+        at all: :class:`TabPane`'s own drag/drop only ever looks a source pane up by id via
+        :meth:`find_pane`, which walks :attr:`panes` (already extended to include floating ones),
+        indifferent to which top-level window either pane actually lives in -- Qt's own drag-and-
+        drop already works across top-level windows in the same process for free. Shared documents
+        (a split Markdown/text tab), the active-pane tracker, and every dirty-tab-by-path lookup
+        used elsewhere all keep working the same way for the same reason.
+
+        Split buttons are hidden on the new pane -- see :meth:`split_from`'s own docstring for why a
+        floating pane can never actually split (there's no second slot in a popout window's own
+        layout to split into).
+        """
+        label = source.tabText(index)
+        icon = source.tabIcon(index)
+        content = source.widget(index)
+        state = source._tab_state.pop(content, _TabState())
+        source.removeTab(index)
+
+        new_pane = self._new_pane()
+        new_pane.split_button.hide()
+        new_pane.vsplit_button.hide()
+        if icon is not None and not icon.isNull():
+            new_index = new_pane.addTab(content, icon, label)
+        else:
+            new_index = new_pane.addTab(content, label)
+        new_pane._track_tab(new_index, content, state=state)
+        new_pane.setCurrentIndex(new_index)
+        self._floating_panes.append(new_pane)
+
+        title = self.project_title() if self.project_title is not None else "in-reach"
+        window = _PopoutWindow(new_pane, title=title)
+        self._popout_windows[new_pane] = window
+        window.show()
+
+        self.on_pane_emptied(source)
+        return window

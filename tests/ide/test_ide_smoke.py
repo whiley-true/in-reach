@@ -4270,6 +4270,103 @@ def test_view_menu_view_logs_entry_opens_the_logs_tab(project_window: MainWindow
     assert project_window.bottom_panel.currentWidget() is project_window.bottom_panel.logs_panel
 
 
+# -- top bar "Launch" menu (PROMPT.md: "also in the top bar next to view please add Launch with
+# options - Launch Halo MCC (greyed unless verified), Launch RVT (when available), both with
+# shortcuts") --------------------------------------------------------------------------------
+
+
+def test_launch_menu_has_mcc_and_rvt_entries_with_shortcuts(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+    assert launch_button.text() == "Launch"
+    assert launch_button.mcc_action.text() == "Launch Halo MCC"
+    assert launch_button.mcc_action.shortcut().toString() == "Ctrl+Shift+M"
+    assert launch_button.rvt_action.text() == "Launch RVT"
+    assert launch_button.rvt_action.shortcut().toString() == "Ctrl+Shift+L"
+
+
+def test_launch_menu_actions_start_disabled(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+    assert launch_button.mcc_action.isEnabled() is False
+    assert launch_button.rvt_action.isEnabled() is False
+
+
+def test_launch_menu_rvt_action_greys_out_with_no_project_open(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+
+    launch_button.menu().aboutToShow.emit()
+
+    assert launch_button.rvt_action.isEnabled() is False
+
+
+def test_launch_menu_rvt_action_enables_once_a_project_opens(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    launch_button = project_window.top_bar.launch_menu_button
+
+    launch_button.menu().aboutToShow.emit()
+
+    assert launch_button.rvt_action.isEnabled() is True
+
+
+def test_launch_rvt_from_menu_is_a_no_op_with_no_project_open(window: MainWindow, monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(window, "launch_rvt", lambda: called.append(True))
+
+    window.launch_rvt_from_menu()
+
+    assert called == []
+
+
+def test_launch_rvt_from_menu_launches_once_a_project_opens(
+    project_window: MainWindow, tmp_path: Path, monkeypatch
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    called = []
+    monkeypatch.setattr(project_window, "launch_rvt", lambda: called.append(True))
+
+    project_window.launch_rvt_from_menu()
+
+    assert called == [True]
+
+
+def test_halo_mcc_verified_reflects_the_project_root_env(project_window: MainWindow) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    assert project_window.halo_mcc_verified() is False
+
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HALO_MCC_KEY, r"C:\Games\MCC")
+
+    assert project_window.halo_mcc_verified() is True
+
+
+def test_launch_mcc_from_menu_is_a_no_op_unless_verified(window: MainWindow, monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr("in_reach.ide.main_window.mcc_launcher.launch_mcc", lambda: called.append(True))
+
+    window.launch_mcc_from_menu()
+
+    assert called == []
+
+
+def test_launch_mcc_from_menu_launches_once_verified(project_window: MainWindow, monkeypatch) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HALO_MCC_KEY, r"C:\Games\MCC")
+    called = []
+    monkeypatch.setattr("in_reach.ide.main_window.mcc_launcher.launch_mcc", lambda: called.append(True))
+
+    project_window.launch_mcc_from_menu()
+
+    assert called == [True]
+
+
 # -- Dashboard "Quick Launch" Built-in/Hot Reload folder buttons (PROMPT.md: "underneath that top
 # row of buttons, we want a subheader saying 'Built-in' ... then a subheader saying hot reload")
 # ---------------------------------------------------------------------------------------------
