@@ -1,11 +1,11 @@
-"""The far-left activity bar: ten reorderable icons at the top -- a compile/"Apply" action, a
-ReachVariantTool launcher action, and eight sidebar-view toggles (Git, Dashboard, Scripts,
-Locations, Testing, Map Files, LLM, Search), exactly one of whose views is ever active, switching
-the primary sidebar's content, VSCode-style: clicking the already-active one collapses the sidebar
-instead of switching -- then, pinned at the bottom: a flame status indicator (see
-:meth:`ActivityBar.set_halo_status`), a help icon (still a no-op), and a settings cog, which opens
-the Settings popout (see :class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns
-actually building/showing it, this bar just emits :attr:`ActivityBar.settings_requested`).
+"""The far-left activity bar: nine reorderable icons at the top -- a compile/"Apply" action and
+eight sidebar-view toggles (Dashboard, Git, Scripts, Map Files, Documentation, Testing, LLM,
+Search), exactly one of whose views is ever active, switching the primary sidebar's content,
+VSCode-style: clicking the already-active one collapses the sidebar instead of switching -- then,
+pinned at the bottom: a flame status indicator (see :meth:`ActivityBar.set_halo_status`), a help
+icon (still a no-op), and a settings cog, which opens the Settings popout (see
+:class:`~in_reach.ide.settings_dialog.SettingsDialog`; MainWindow owns actually building/showing
+it, this bar just emits :attr:`ActivityBar.settings_requested`).
 
 PROMPT.md: "please move the panel ordering so it goes compile, dashboard, then a git symbol
 (stubbed empty panel for now (where we will implement a dulwich gui)), then a bookshelf with the
@@ -13,12 +13,15 @@ label Scripts (also stubbed for now), then rvt, then locations, then search" -- 
 in a dedicated :class:`_IconStrip` that supports a real mouse-drag reorder
 (:class:`~in_reach.ide.tabs._DragTabBar`'s own pattern, adapted to a vertical icon list instead of
 a horizontal tab strip) and persists the result to the project's own ``.env``
-(``ACTIVITY_BAR_ORDER``), read back on the next launch. A later pass (PROMPT.md: "please move vcs
-up by default (so it comes below compile) and above search please add a map icon for 'Map Files'
-(stubbed for now)") moved git directly under compile and added the Map Files toggle (also stubbed,
-same placeholder-only treatment as Scripts/Locations) just above Search, and a further pass
-(PROMPT.md: "above maps icon, please add a stubbed entrance for Testing ... and beneath the map a
-stubbed entry for LLM") added Testing/LLM either side of it -- see :data:`_DEFAULT_ORDER`.
+(``ACTIVITY_BAR_ORDER``), read back on the next launch. Two later passes (PROMPT.md: "please move
+vcs up by default ... please add a map icon for 'Map Files'"; "move documentation to be its own
+panel ... a stubbed entrance for Testing ... a stubbed entry for LLM") added the Map Files/
+Documentation/Testing/LLM toggles, all stubbed the same placeholder-only way as Scripts. A further
+pass (PROMPT.md: "we are removing locations, and rvt ... please add a button in between Export File
+and View Compiled ... for Launch RVT") retired the RVT launcher icon here (see
+:mod:`in_reach.ide.explorer`'s own "Launch RVT" dashboard button instead) and the Locations toggle
+entirely, and reordered the remaining icons to compile, dashboard, git, scripts, maps, documentation,
+testing, llm, search -- see :data:`_DEFAULT_ORDER`.
 """
 
 from __future__ import annotations
@@ -73,25 +76,21 @@ _STATUS_TOOLTIPS = {
     icons.STATUS_RUNNING: "Halo: MCC is running",
 }
 
-#: PROMPT.md: "please move the panel ordering so it goes compile, dashboard, then a git symbol
-#: ..., then a bookshelf ... Scripts ..., then rvt, then locations, then search" -- the
-#: reorderable group's default top-to-bottom order, keyed the same way
-#: :data:`_buttons`/:meth:`ActivityBar._handle_click` already key the view-toggle buttons
-#: ("explorer" being the Dashboard button's own long-established internal name, see
-#: :data:`DEFAULT_VIEW`). PROMPT.md: "move vcs up by default (so it comes below compile) and
-#: above search please add a map icon for 'Map Files'" -- git moved directly under compile, and
-#: "maps" (Map Files, stubbed) inserted just above search. PROMPT.md: "above maps icon, please add
-#: a stubbed entrance for Testing (using a testube) and beneath the map a stubbed entry for LLM
-#: (using a Robot)" -- "testing" inserted just above "maps", "llm" just below it.
+#: PROMPT.md: "then options to switch to the appropriate side panel (which should be in this order
+#: (please re-order default icon order too): compile, dashboard, git, scripts, maps, docs, testing,
+#: ai, search[;] please note we are removing locations, and rvt" -- the reorderable group's default
+#: top-to-bottom order, keyed the same way :data:`_buttons`/:meth:`ActivityBar._handle_click`
+#: already key the view-toggle buttons ("explorer" being the Dashboard button's own long-
+#: established internal name, see :data:`DEFAULT_VIEW`; "docs"/"ai" in that PROMPT.md quote are the
+#: existing "documentation"/"llm" keys, not a rename -- see this module's own docstring).
 _DEFAULT_ORDER = (
     "compile",
-    "git",
     "explorer",
+    "git",
     "scripts",
-    "rvt",
-    "locations",
-    "testing",
     "maps",
+    "documentation",
+    "testing",
     "llm",
     "search",
 )
@@ -448,26 +447,21 @@ class _IconStrip(QWidget):
 class ActivityBar(QWidget):
     """Fixed-width vertical bar on the far left of the IDE window."""
 
-    # Emitted with "explorer"/"locations"/"search" when a view button switches the sidebar to
-    # that view (opening it if it was closed). Emitted with no args when the already-active view's
+    # Emitted with "explorer"/"git"/.../"search" when a view button switches the sidebar to that
+    # view (opening it if it was closed). Emitted with no args when the already-active view's
     # button is clicked again, requesting the sidebar collapse instead.
     view_selected = pyqtSignal(str)
     view_collapsed = pyqtSignal()
-    # A plain action, not a view switch -- MainWindow resolves/launches RVT itself.
-    launch_rvt_requested = pyqtSignal()
-    # Ditto -- MainWindow owns what "apply" actually does.
+    # MainWindow owns what "apply" actually does.
     apply_requested = pyqtSignal()
     # Ditto -- MainWindow owns building/showing the settings popout itself.
     settings_requested = pyqtSignal()
 
-    #: Tracked purely so set_rvt_enabled() can re-render the RVT icon at the *current* scale
-    #: without needing its own scale argument threaded through every caller.
     _icon_scale = 1.0
 
     def __init__(self, parent: QWidget | None = None, *, env_path: Path | None = None) -> None:
         super().__init__(parent)
         self._env_path = env_path
-        self._rvt_enabled = True
         self._apply_enabled = False
         self.setFixedWidth(WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -475,7 +469,7 @@ class ActivityBar(QWidget):
         # A full rounded/bordered card, matching every other top-level panel -- see
         # in_reach.ide.style's module docstring. PROMPT.md: "the text help background needs to
         # have contrast to the text help colour" -- scoped to #activityBar specifically, not a
-        # bare declaration, or every tooltip shown by this bar's own buttons (Dashboard, RVT,
+        # bare declaration, or every tooltip shown by this bar's own buttons (Dashboard, Git,
         # Compile, ...) would render with #activityBar's own dark background instead of the
         # theme's actual tooltip colors, regardless of what theme.py's own app-level QToolTip
         # stylesheet says -- see style.TOOLTIP_STYLE's own docstring for the confirmed mechanism.
@@ -503,18 +497,6 @@ class ActivityBar(QWidget):
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested.emit)
 
-        # A full-color PNG (the real RVT icon, see icons.rvt_icon()'s own docstring), not one of
-        # this bar's other monochrome codicon-derived glyphs -- built directly rather than via
-        # _bar_button(), which always renders through icons.icon()'s SVG glyph path.
-        self.rvt_button = QToolButton()
-        self.rvt_button.setIcon(icons.rvt_icon())
-        self.rvt_button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-        self.rvt_button.setToolTip("Launch ReachVariantTool")
-        self.rvt_button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-        self.rvt_button.setAutoRaise(True)
-        self.rvt_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.rvt_button.clicked.connect(self.launch_rvt_requested.emit)
-
         # Checked by default -- the primary sidebar starts open on the Explorer view, matching
         # vscode's own default.
         # PROMPT.md: "file explorer is renamed to dashboard (and the icon is changed to be a svg
@@ -538,18 +520,19 @@ class ActivityBar(QWidget):
         )
         self.scripts_button.clicked.connect(lambda: self._handle_click("scripts"))
 
-        # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
-        # expanded view for now" (later: "for locations please use a compass icon") -- a real
-        # sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it (see
-        # MainWindow's own LocationsPanel wiring).
-        self.locations_button = _bar_button(
-            "compass", "Locations (toggle primary sidebar)", checkable=True, checked=False
+        # PROMPT.md: "move documentation to be its own panel. it should have a symbol of a book
+        # ... make it a stub entry that should come before locations" -- a real sidebar-view toggle
+        # (like Explorer/Search), just with a placeholder view behind it (see MainWindow's own
+        # DocumentationPanel wiring), same treatment as Git/Scripts above; replaces the Dashboard's
+        # old Documentation section (see in_reach.ide.explorer's own history).
+        self.documentation_button = _bar_button(
+            "book", "Documentation (toggle primary sidebar)", checkable=True, checked=False
         )
-        self.locations_button.clicked.connect(lambda: self._handle_click("locations"))
+        self.documentation_button.clicked.connect(lambda: self._handle_click("documentation"))
 
         # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using a testube)"
         # -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind
-        # it (see MainWindow's own TestingPanel wiring), same treatment as Git/Scripts/Locations.
+        # it (see MainWindow's own TestingPanel wiring), same treatment as Git/Scripts above.
         self.testing_button = _bar_button(
             "testtube", "Testing (toggle primary sidebar)", checkable=True, checked=False
         )
@@ -557,7 +540,7 @@ class ActivityBar(QWidget):
 
         # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)" -- a
         # real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it
-        # (see MainWindow's own MapsPanel wiring), same treatment as Git/Scripts/Locations above.
+        # (see MainWindow's own MapsPanel wiring), same treatment as Git/Scripts above.
         self.maps_button = _bar_button(
             "map", "Map Files (toggle primary sidebar)", checkable=True, checked=False
         )
@@ -565,7 +548,7 @@ class ActivityBar(QWidget):
 
         # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)" -- a real
         # sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it (see
-        # MainWindow's own LlmPanel wiring), same treatment as Git/Scripts/Locations above.
+        # MainWindow's own LlmPanel wiring), same treatment as Git/Scripts above.
         self.llm_button = _bar_button("robot", "LLM (toggle primary sidebar)", checkable=True, checked=False)
         self.llm_button.clicked.connect(lambda: self._handle_click("llm"))
 
@@ -578,7 +561,7 @@ class ActivityBar(QWidget):
             "explorer": self.explorer_button,
             "git": self.git_button,
             "scripts": self.scripts_button,
-            "locations": self.locations_button,
+            "documentation": self.documentation_button,
             "testing": self.testing_button,
             "maps": self.maps_button,
             "llm": self.llm_button,
@@ -591,11 +574,10 @@ class ActivityBar(QWidget):
                 key,
                 {
                     "compile": self.apply_button,
-                    "rvt": self.rvt_button,
                     "explorer": self.explorer_button,
                     "git": self.git_button,
                     "scripts": self.scripts_button,
-                    "locations": self.locations_button,
+                    "documentation": self.documentation_button,
                     "testing": self.testing_button,
                     "maps": self.maps_button,
                     "llm": self.llm_button,
@@ -651,8 +633,6 @@ class ActivityBar(QWidget):
         self.settings_button.clicked.connect(self.settings_requested.emit)
         layout.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self.set_rvt_enabled(False)
-
     def _handle_click(self, view: str) -> None:
         if self._active_view == view:
             self._active_view = None
@@ -680,18 +660,7 @@ class ActivityBar(QWidget):
     def active_view(self) -> str | None:
         return self._active_view
 
-    # -- RVT / Apply enablement ---------------------------------------------------------------------
-
-    def set_rvt_enabled(self, enabled: bool) -> None:
-        """PROMPT.md: "rvt should not be launchable if no project is open (the icon should have a
-        dash in front of it)" -- disables the button (Qt already dims a disabled QToolButton's icon
-        on its own) and swaps in :func:`~in_reach.ide.icons.rvt_icon`'s own "blocked" badge on top
-        of that, since this icon's own artwork is already fairly muted/grey and doesn't read as
-        clearly disabled from Qt's automatic dimming alone."""
-        self._rvt_enabled = enabled
-        self.rvt_button.setEnabled(enabled)
-        self.rvt_button.setIcon(icons.rvt_icon(enabled=enabled))
-        self.rvt_button.setIconSize(QSize(round(_ICON_SIZE * self._icon_scale), round(_ICON_SIZE * self._icon_scale)))
+    # -- Apply enablement -----------------------------------------------------------------------
 
     def set_apply_enabled(self, enabled: bool) -> None:
         """Whether ``settings/`` currently has changes worth applying -- see
@@ -734,10 +703,6 @@ class ActivityBar(QWidget):
             button.setIcon(icons.icon(button.property("_icon_name"), color=_ICON_COLOR, size=icon_size))
             button.setIconSize(QSize(icon_size, icon_size))
             button.setFixedSize(button_size, button_size)
-
-        self.rvt_button.setIcon(icons.rvt_icon(enabled=self._rvt_enabled))
-        self.rvt_button.setIconSize(QSize(icon_size, icon_size))
-        self.rvt_button.setFixedSize(button_size, button_size)
 
         self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, icon_size, enabled=self._apply_enabled))
         self.apply_button.setIconSize(QSize(icon_size, icon_size))

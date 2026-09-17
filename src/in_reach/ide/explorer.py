@@ -48,6 +48,21 @@ from in_reach.ide.file_icons import ExplorerIconProvider
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
 _NO_STATS_TEXT = "No build stats yet -- Apply (or launch RVT) once this gametype compiles."
 
+#: PROMPT.md: "in the dashboard please also make it so that it also shows the max amount of
+#: tiggers, conditions, actions, forge labels and strings (if known)" -- these five are "known":
+#: confirmed (not guessed) hard engine caps read directly out of the vendored ReachVariantTool C++
+#: source (``game_variants/components/megalo/limits.h``) during this project's own prior research
+#: (see ``TO_IMPLEMENT_(LATEST).md``'s "Engine-resource / counter caps" table) -- ``max_triggers``/
+#: ``max_conditions``/``max_actions``/``max_script_labels`` ("script label" being the engine's own
+#: internal name for a Forge label)/``max_variant_strings`` (the compiled string *table*'s own
+#: capacity -- what :func:`~in_reach.app.rvt.strings_io.count_script_strings` counts entries
+#: against, as opposed to ``max_string_ids``, a separate bytecode-level reference-index cap).
+_MAX_TRIGGERS = 320
+_MAX_CONDITIONS = 512
+_MAX_ACTIONS = 1024
+_MAX_FORGE_LABELS = 16
+_MAX_STRINGS = 112
+
 
 def _new_tree() -> tuple[QTreeView, QFileSystemModel]:
     model = QFileSystemModel()
@@ -209,10 +224,12 @@ class ExplorerPanel(QWidget):
     export_requested = pyqtSignal()
     view_output_requested = pyqtSignal()
 
-    #: The Documentation section's "Notes" button (PROMPT.md) -- MainWindow owns opening the
-    #: right file (``Notes.txt`` or ``Notes.md``, per :mod:`in_reach.app.notes_settings`) into the
-    #: active pane, same division of labor as export_requested/view_output_requested above.
-    notes_requested = pyqtSignal()
+    #: PROMPT.md: "we are removing locations, and rvt ... please add a button in between Export
+    #: File and View Compiled ... for Launch RVT" -- replaces the activity bar's own former RVT
+    #: launcher icon (see activity_bar.py's own history); MainWindow owns actually launching it
+    #: (:meth:`~in_reach.ide.main_window.MainWindow.launch_rvt`), same division of labor as
+    #: export_requested/view_output_requested above.
+    launch_rvt_requested = pyqtSignal()
 
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
@@ -246,16 +263,30 @@ class ExplorerPanel(QWidget):
         button_row_layout = QHBoxLayout(button_row)
         button_row_layout.setContentsMargins(0, 0, 0, 0)
         self.export_button = QToolButton()
-        self.export_button.setText("Export RVT File")
+        # PROMPT.md: "rename export RVT file to be 'Export File'".
+        self.export_button.setText("Export File")
         self.export_button.setToolTip("Compile and save this gametype as a .bin or .mglo file")
         self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.export_button.setAutoRaise(False)
         self.export_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
         self.export_button.clicked.connect(self.export_requested.emit)
         button_row_layout.addWidget(self.export_button)
+        # PROMPT.md: "please add a button in between Export File and View Compiled ... for Launch
+        # RVT" -- disabled with no project open, same as the activity bar's own former RVT icon
+        # (see MainWindow.launch_rvt's own docstring for why).
+        self.rvt_button = QToolButton()
+        self.rvt_button.setText("Launch RVT")
+        self.rvt_button.setToolTip("Launch ReachVariantTool")
+        self.rvt_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.rvt_button.setAutoRaise(False)
+        self.rvt_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.rvt_button.setEnabled(False)
+        self.rvt_button.clicked.connect(self.launch_rvt_requested.emit)
+        button_row_layout.addWidget(self.rvt_button)
         button_row_layout.addStretch(1)
         self.view_output_button = QToolButton()
-        self.view_output_button.setText("View Compiled.txt")
+        # PROMPT.md: "View Compiled (renamed from View Compiled.txt)".
+        self.view_output_button.setText("View Compiled")
         self.view_output_button.setToolTip("Open a read-only view of this project's compiled Megalo script")
         self.view_output_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.view_output_button.setAutoRaise(False)
@@ -323,33 +354,6 @@ class ExplorerPanel(QWidget):
         self.stats_section.hide()
         layout.addWidget(self.stats_section)
 
-        # PROMPT.md: "in the dashboard please add a section above Settings for Documentation --
-        # its dropdown should have 2 buttons" -- "Notes" (a freeform scratch pad, opens
-        # Notes.txt/Notes.md per in_reach.app.notes_settings) and a second, stubbed "Documentation"
-        # button (PROMPT.md: "later we will implement better doc practice and articles here"),
-        # disabled until that lands.
-        doc_body = QWidget()
-        doc_layout = QHBoxLayout(doc_body)
-        doc_layout.setContentsMargins(0, 4, 0, 0)
-        self.notes_button = QToolButton()
-        self.notes_button.setText("Notes")
-        self.notes_button.setToolTip("Open this project's own freeform notes file")
-        self.notes_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.notes_button.setAutoRaise(False)
-        self.notes_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
-        self.notes_button.clicked.connect(self.notes_requested.emit)
-        doc_layout.addWidget(self.notes_button)
-        self.documentation_button = QToolButton()
-        self.documentation_button.setText("Documentation")
-        self.documentation_button.setToolTip("Coming soon")
-        self.documentation_button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
-        self.documentation_button.setEnabled(False)
-        doc_layout.addWidget(self.documentation_button)
-        doc_layout.addStretch(1)
-        self.documentation_section = _CollapsibleSection("Documentation", doc_body, collapsed=False)
-        self.documentation_section.hide()
-        layout.addWidget(self.documentation_section)
-
         # Dedicated quick-access boxes for the active project's own script/settings subfolders,
         # open by default since they're central to the active project. Hidden entirely with no
         # project open (see _activate()).
@@ -387,7 +391,6 @@ class ExplorerPanel(QWidget):
         header_font.setPointSizeF(font.pointSizeF() * self.HEADER_TEXT_SCALE)
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
-        self.documentation_section.set_header_font(header_font)
 
         settings_tree_font = QFont(font)
         settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
@@ -443,7 +446,6 @@ class ExplorerPanel(QWidget):
         self._no_project_label.setVisible(not has_project)
         self._no_project_spacer.setVisible(not has_project)
         self.settings_section.setVisible(has_project)
-        self.documentation_section.setVisible(has_project)
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
         )
@@ -500,12 +502,19 @@ class ExplorerPanel(QWidget):
                 f"{stats.space.bytes_used:,} / {stats.space.bytes_max:,} Bytes used ({stats.space.percent:.0f}%)"
             )
             counts = stats.counts
+            # PROMPT.md: "please also make it so that it also shows the max amount of tiggers,
+            # conditions, actions, forge labels and strings (if known)" -- see _MAX_TRIGGERS et al.
             self.stats_counts_label.setText(
-                f"Triggers: {counts.triggers}   Conditions: {counts.conditions}   Actions: {counts.actions}"
+                f"Triggers: {counts.triggers}/{_MAX_TRIGGERS}   "
+                f"Conditions: {counts.conditions}/{_MAX_CONDITIONS}   "
+                f"Actions: {counts.actions}/{_MAX_ACTIONS}"
             )
             # PROMPT.md: "Forge labels and Strings should be on the same line"
-            forge_line = f"Forge Labels: {counts.forge_labels}"
-            lines.append(f"{forge_line}   Strings: {strings_count}" if strings_count is not None else forge_line)
+            forge_line = f"Forge Labels: {counts.forge_labels}/{_MAX_FORGE_LABELS}"
+            strings_line = (
+                f"Strings: {strings_count}/{_MAX_STRINGS}" if strings_count is not None else None
+            )
+            lines.append(f"{forge_line}   {strings_line}" if strings_line is not None else forge_line)
         elif strings_count is not None:
-            lines.append(f"Strings: {strings_count}")
+            lines.append(f"Strings: {strings_count}/{_MAX_STRINGS}")
         self.stats_label.setText("\n".join(lines) if lines else _NO_STATS_TEXT)

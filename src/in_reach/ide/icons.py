@@ -101,6 +101,18 @@ _ICON_SOURCES = {
         '<circle cx="8" cy="5" r="3" fill="{color}"/>'
         '<path d="M8 8V14" stroke="{color}" stroke-width="1.6" stroke-linecap="round"/>',
     ),
+    "book": (  # PROMPT.md: "move documentation to be its own panel. it should have a symbol of a
+        # book" -- a closed book (a cover outline, a spine fold near the left edge, and a few
+        # horizontal "text line" strokes standing in for pages), same "deliberately simple, not
+        # traced from any icon set" reasoning as "compass"/"map" above. Deliberately distinct from
+        # "bookshelf" (Scripts' own icon, a row of book spines standing on a shelf) so the two never
+        # get confused for each other.
+        "0 0 16 16",
+        '<rect x="3" y="2" width="10" height="12" rx="1" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<path d="M5.5 2V14" stroke="{color}" stroke-width="1.1"/>'
+        '<path d="M7.7 4.8H11M7.7 7.3H11M7.7 9.8H9.6" stroke="{color}" stroke-width="0.9"'
+        ' stroke-linecap="round"/>',
+    ),
     "compass": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)",
         # later: "for locations please use a compass icon" -- a ring plus a two-tone needle
         # (the north half solid, the south half translucent, both traced as plain kite-shaped

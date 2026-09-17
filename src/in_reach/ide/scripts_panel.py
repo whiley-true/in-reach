@@ -1,6 +1,6 @@
 """Stub primary-sidebar view behind the activity bar's bookshelf icon (PROMPT.md: "a bookshelf
 with the label Scripts (also stubbed for now)"). No real content yet -- same placeholder-only
-treatment as :mod:`in_reach.ide.locations_panel`.
+treatment as :mod:`in_reach.ide.documentation_panel`.
 """
 
 from __future__ import annotations

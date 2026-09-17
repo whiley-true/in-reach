@@ -1,6 +1,6 @@
 """Stub primary-sidebar view behind the activity bar's test-tube icon (PROMPT.md: "above maps icon,
 please add a stubbed entrance for Testing (using a testube)"). No real content yet -- same
-placeholder-only treatment as :mod:`in_reach.ide.scripts_panel`/:mod:`in_reach.ide.locations_panel`.
+placeholder-only treatment as :mod:`in_reach.ide.scripts_panel`.
 """
 
 from __future__ import annotations

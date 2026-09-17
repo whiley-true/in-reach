@@ -5,9 +5,8 @@ An application-wide font scale rather than anything more surgical: nearly every 
 itself off font metrics rather than a fixed pixel dimension, so scaling the font scales practically
 everything drawn from it, text and component alike, for free.
 
-Persisted to the project's own ``.env`` (the same file ``FIRST_USE`` already lives in -- see
-``ide/app.py``) under :data:`ZOOM_KEY`, so it survives between runs of the same project rather than
-resetting to :data:`DEFAULT_ZOOM` every time the IDE reopens.
+Persisted to the project's own ``.env`` under :data:`ZOOM_KEY`, so it survives between runs of the
+same project rather than resetting to :data:`DEFAULT_ZOOM` every time the IDE reopens.
 """
 
 from __future__ import annotations

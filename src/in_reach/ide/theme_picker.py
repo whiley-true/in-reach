@@ -1,7 +1,6 @@
-"""A row of Light/Dark/Whiley toggle buttons that live-apply the chosen theme app-wide -- the one
-"click a button, apply the theme, keep exactly one checked" mechanism shared by the first-run
-dialog's own theme picker (:mod:`in_reach.ide.first_run_dialog`) and the Settings dialog's Theme
-tab (:mod:`in_reach.ide.settings_dialog`), rather than each carrying its own copy of it.
+"""A row of Light/Dark/Whiley toggle buttons that live-apply the chosen theme app-wide -- the
+"click a button, apply the theme, keep exactly one checked" mechanism behind the Settings dialog's
+Theme tab (:mod:`in_reach.ide.settings_dialog`), kept as its own module rather than inlined there.
 """
 
 from __future__ import annotations

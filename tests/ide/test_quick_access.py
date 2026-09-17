@@ -247,6 +247,22 @@ def test_pill_defaults_to_twelve_times_its_natural_width(qtbot) -> None:
     assert bar.button.width() == bar.button.sizeHint().width() * 12
 
 
+def test_set_label_updates_the_pills_own_text(qtbot) -> None:
+    # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+    # bar, we want to replace with the game file name and in brackets its uuid".
+    bar = QuickAccessBar(
+        get_project_folder=lambda: None,
+        open_file=lambda p: None,
+        build_root_commands=lambda: [],
+        label="workspace",
+    )
+    qtbot.addWidget(bar)
+
+    bar.set_label("Slayer Plus (abcd1234)")
+
+    assert bar.button.text() == "Slayer Plus (abcd1234)"
+
+
 def test_opening_the_overlay_hides_the_pill_so_only_one_box_shows_at_once(qtbot, tmp_path: Path) -> None:
     # PROMPT.md: "when clicking on the search bar behaviour is unexpected, we are seeing a drop
     # down is spawned containing a text entry box (underneath the search box) ... we want them to

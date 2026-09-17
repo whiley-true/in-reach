@@ -592,6 +592,29 @@ def test_a_non_json_file_containing_the_literal_text_is_fully_editable(qtbot) ->
     assert editor.toPlainText() != text
 
 
+def test_hovering_the_schema_line_shows_a_warning_elsewhere_reports_none(qtbot, tmp_path) -> None:
+    # PROMPT.md: "add a helper text when a user hovers over schema in settings that warns the user
+    # they cannot edit that section of the jsons".
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.resize(400, 200)
+    editor.show()
+    QApplication.processEvents()
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_SCHEMA_TEXT.index("schema.json"))
+    inside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(inside_pos) == (
+        "This line is managed automatically and can't be edited."
+    )
+
+    cursor.setPosition(_SCHEMA_TEXT.index('"difficulty"'))
+    outside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(outside_pos) is None
+
+
 # -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----
 
 

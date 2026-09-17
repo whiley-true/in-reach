@@ -544,9 +544,9 @@ class TabPane(QTabWidget):
                 :meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`).
             editable_markdown: Opens a ``.md`` file as a real, editable
                 :class:`~in_reach.ide.editor.TextEditorWidget` instead of the usual read-only
-                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, the
-                Documentation section's "Notes" button when Notes format is Markdown: "editor
-                should be .md" -- with the magnifying-glass split-to-live-preview icon, see
+                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, "Notes"
+                when Notes format is Markdown: "editor should be .md" -- with the magnifying-glass
+                split-to-live-preview icon, see
                 :meth:`_refresh_preview_button`, this is where an editable Markdown source and its
                 live rendered preview both come from). Ignored for any other suffix.
         """

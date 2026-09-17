@@ -1,6 +1,6 @@
 """Stub primary-sidebar view behind the activity bar's robot icon (PROMPT.md: "beneath the map a
 stubbed entry for LLM (using a Robot)"). No real content yet -- same placeholder-only treatment as
-:mod:`in_reach.ide.scripts_panel`/:mod:`in_reach.ide.locations_panel`.
+:mod:`in_reach.ide.scripts_panel`.
 """
 
 from __future__ import annotations

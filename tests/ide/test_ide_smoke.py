@@ -12,8 +12,7 @@ from in_reach.ide import icons, style, theme
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.editor import TextEditorWidget
-from in_reach.ide.first_run_dialog import FirstRunDialog
-from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_MIN_WIDTH, MainWindow
+from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_DEFAULT_WIDTH, MainWindow
 from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 from in_reach.ide.welcome import WelcomeTab
@@ -295,16 +294,19 @@ def test_adjust_zoom_refreshes_explorer_and_search_panel_fonts(
 def test_sidebar_default_width_fits_the_dashboard_headers_without_eliding(
     window: MainWindow,
 ) -> None:
-    # Regression guard (PROMPT.md): the sidebar's default/minimum width used to be narrow enough
-    # that a section header's own text middle-elided. sizeHint() is exactly the width QToolButton
-    # itself says it needs to show the whole label unelided, so the sidebar must never be narrower
-    # than that.
-    assert window.primary_sidebar.width() == _SIDEBAR_MIN_WIDTH
+    # Regression guard (PROMPT.md): the sidebar's default width used to be narrow enough that a
+    # section header's own text middle-elided. sizeHint() is exactly the width QToolButton itself
+    # says it needs to show the whole label unelided, so _SIDEBAR_DEFAULT_WIDTH (the sidebar's own
+    # initial/opening width -- see _build_primary_sidebar()) must never be narrower than that.
+    # This is *not* a drag-floor guarantee any more (PROMPT.md: "the side panel needs to be
+    # resiziable to be much smaller" -- see _SIDEBAR_MIN_DRAG_WIDTH's own comment): a user who
+    # deliberately drags it narrower than this is expected to see this same text elide, the same
+    # way any other VSCode-style sidebar's content does.
     for section in (
         window.explorer_panel.stats_section,
         window.explorer_panel.settings_section,
     ):
-        assert section._toggle.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+        assert section._toggle.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH
 
 
 def test_sidebar_default_width_fits_triple_digit_stats_counts_without_wrapping(
@@ -315,21 +317,22 @@ def test_sidebar_default_width_fits_triple_digit_stats_counts_without_wrapping(
     # ever realistically going to get (see explorer.py's own ExplorerPanel.__init__ comment).
     window.explorer_panel.stats_counts_label.setText("Triggers: 999   Conditions: 999   Actions: 999")
 
-    assert window.explorer_panel.stats_counts_label.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+    assert window.explorer_panel.stats_counts_label.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH
 
 
-def test_sidebar_max_width_is_a_quarter_of_the_screen(window: MainWindow) -> None:
+def test_sidebar_max_width_is_half_the_screen(window: MainWindow) -> None:
     # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width",
-    # later revised to 1/4 -- checked against the same constant main_window.py's own
+    # revised to 1/4, then 1/5, then (PROMPT.md: "the side panel needs to be resiziable to be ...
+    # wider") 1/2 -- checked against the same constant main_window.py's own
     # _build_primary_sidebar() divides by, not a hardcoded fraction, so a later revision to that
     # constant doesn't leave this test silently checking the wrong ratio. Floored at
-    # _SIDEBAR_MIN_WIDTH: a small enough screen (a headless CI display, e.g.) would otherwise let
-    # the fraction-of-screen ceiling undercut the fixed minimum width, a self-contradictory
-    # min > max on the same widget -- see _build_primary_sidebar()'s own comment.
-    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION, _SIDEBAR_MIN_WIDTH
+    # _SIDEBAR_MIN_DRAG_WIDTH: an extreme (sub-400px) screen would otherwise let the fraction-of-
+    # screen ceiling undercut the minimum width, a self-contradictory min > max -- see
+    # _build_primary_sidebar()'s own comment.
+    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION, _SIDEBAR_MIN_DRAG_WIDTH
 
     screen = QApplication.primaryScreen()
-    expected = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+    expected = max(_SIDEBAR_MIN_DRAG_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
     assert window.primary_sidebar.maximumWidth() == expected
 
 
@@ -340,6 +343,52 @@ def test_dragging_the_sidebar_wider_than_the_max_width_is_clamped(window: MainWi
     QApplication.processEvents()
 
     assert window.primary_sidebar.width() <= max_width
+
+
+def test_sidebar_min_drag_width_is_a_flat_floor(window: MainWindow) -> None:
+    # PROMPT.md: "the side panel needs to be resiziable to be much smaller" -- flat (not
+    # fraction-of-screen -- "genuinely narrow" means the same thing on any size screen), unlike
+    # the max side.
+    from in_reach.ide.main_window import _SIDEBAR_MIN_DRAG_WIDTH
+
+    assert window.primary_sidebar.minimumWidth() == _SIDEBAR_MIN_DRAG_WIDTH
+
+
+def test_dragging_the_sidebar_narrower_than_the_min_width_is_clamped(window: MainWindow) -> None:
+    min_width = window.primary_sidebar.minimumWidth()
+
+    window._side_splitter.setSizes([max(0, min_width - 500), 1000])
+    QApplication.processEvents()
+
+    assert window.primary_sidebar.width() >= min_width
+
+
+def test_dragging_the_sidebar_to_a_midrange_width_actually_lands_there(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # Regression guard (PROMPT.md): "the side panel needs to be resiziable to be much smaller or
+    # wider" -- the sidebar is hidden (and so takes no real space in the splitter, regardless of
+    # what setSizes() requests) until a project is open, which the bare `window` fixture's own
+    # no-project-open tests above can't actually exercise -- opens one here specifically so a drag
+    # to some ordinary value strictly between the floor and ceiling is checked against the real
+    # thing, not just the two extremes (which a sidebar stuck at its own floor would also satisfy).
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    QApplication.processEvents()
+    assert project_window.primary_sidebar.isVisible() is True
+
+    project_window._side_splitter.setSizes([300, 1000])
+    QApplication.processEvents()
+
+    assert project_window.primary_sidebar.width() == 300
+
+
+def test_side_splitter_uses_non_opaque_resize(window: MainWindow) -> None:
+    # PROMPT.md: "the dragging behaviour is jerky. please fix" -- see _TopBar.__init__'s own
+    # comment (main_window.py) for why non-opaque resize is the fix: it stops the sidebar's own
+    # (potentially expensive) content from relayouting on every mouse-move event during the drag.
+    assert window._side_splitter.opaqueResize() is False
 
 
 def test_toggle_maximize_restores_to_half_screen_centered(window: MainWindow) -> None:
@@ -438,11 +487,34 @@ def test_activating_a_search_result_opens_the_file_at_that_line(
 
 
 def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
+    # PROMPT.md: "in the bottom panel please make the first tab logs".
     bottom = window.bottom_panel
     labels = [bottom.tabText(i) for i in range(bottom.count())]
-    assert labels == ["text1", "text2", "text3"]
+    assert labels == ["Logs", "text2", "text3"]
     bottom.setCurrentIndex(1)
     assert bottom.tabText(bottom.currentIndex()) == "text2"
+
+
+def test_show_logs_switches_the_bottom_panel_to_the_logs_tab(window: MainWindow) -> None:
+    bottom = window.bottom_panel
+    bottom.setCurrentIndex(1)
+
+    bottom.show_logs()
+
+    assert bottom.currentWidget() is bottom.logs_panel
+
+
+def test_view_logs_reveals_the_panel_and_switches_to_logs(window: MainWindow) -> None:
+    # PROMPT.md: "please add an entry for view logs".
+    window.top_bar.panel_toggle.setChecked(False)
+    window.bottom_panel.setCurrentIndex(1)
+    assert window._bottom_panel_card.isVisible() is False
+
+    window.view_logs()
+
+    assert window._bottom_panel_card.isVisible() is True
+    assert window.top_bar.panel_toggle.isChecked() is True
+    assert window.bottom_panel.currentWidget() is window.bottom_panel.logs_panel
 
 
 # -- gating the sidebar views on a project being open --------------------------------------------
@@ -451,23 +523,23 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
 def test_sidebar_starts_collapsed_but_its_views_stay_clickable_with_no_project_open(
     window: MainWindow,
 ) -> None:
-    # Dashboard/Locations/Search all have nothing but a "no project opened yet" placeholder to
+    # Dashboard/Map Files/Search all have nothing but a "no project opened yet" placeholder to
     # show without one, so the sidebar starts collapsed -- but the view buttons (and the top bar's
     # own sidebar toggle) stay clickable, since clicking one still pops the sidebar open onto an
     # "Open a Project to use ..." placeholder (see the test below).
     assert window.primary_sidebar.isVisible() is False
     assert window.activity_bar.explorer_button.isEnabled() is True
-    assert window.activity_bar.locations_button.isEnabled() is True
+    assert window.activity_bar.maps_button.isEnabled() is True
     assert window.activity_bar.search_button.isEnabled() is True
     assert window.top_bar.sidebar_toggle.isEnabled() is True
 
 
 def test_clicking_a_view_with_no_project_open_pops_out_a_blank_placeholder(window: MainWindow) -> None:
-    window.activity_bar.locations_button.click()
+    window.activity_bar.maps_button.click()
 
     assert window.primary_sidebar.isVisible() is True
     assert window._sidebar_stack.currentWidget() is window._no_project_page
-    assert window._no_project_page._label.text() == "Open a Project to use Locations"
+    assert window._no_project_page._label.text() == "Open a Project to use Map Files"
 
     window.activity_bar.search_button.click()
 
@@ -499,7 +571,7 @@ def test_opening_the_first_project_reveals_the_dashboard(
     project_window._on_project_opened(folder)
 
     assert project_window.activity_bar.explorer_button.isEnabled() is True
-    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.maps_button.isEnabled() is True
     assert project_window.activity_bar.search_button.isEnabled() is True
     assert project_window.top_bar.sidebar_toggle.isEnabled() is True
     # The panels were just unlocked -- reveals the Dashboard automatically rather than leaving the
@@ -536,7 +608,7 @@ def test_closing_the_last_project_collapses_the_sidebar_but_leaves_the_views_cli
 
     assert project_window.primary_sidebar.isVisible() is False
     assert project_window.activity_bar.explorer_button.isEnabled() is True
-    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.maps_button.isEnabled() is True
     assert project_window.activity_bar.search_button.isEnabled() is True
     assert project_window.top_bar.sidebar_toggle.isEnabled() is True
 
@@ -593,24 +665,6 @@ def test_clicking_a_different_view_icon_switches_the_sidebar(
     assert project_window.activity_bar.search_button.isChecked() is True
     assert project_window.activity_bar.explorer_button.isChecked() is False
     assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["search"]
-
-
-def test_clicking_the_locations_icon_switches_the_sidebar_to_the_stub_panel(
-    project_window: MainWindow, tmp_path: Path
-) -> None:
-    # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
-    # expanded view for now" -- a real sidebar-view toggle, same as Explorer/Search.
-    folder = tmp_path / "project"
-    folder.mkdir()
-    project_window._on_project_opened(folder)
-
-    project_window.activity_bar.locations_button.click()
-
-    assert project_window.primary_sidebar.isVisible() is True
-    assert project_window.activity_bar.locations_button.isChecked() is True
-    assert project_window.activity_bar.explorer_button.isChecked() is False
-    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["locations"]
-    assert project_window._sidebar_stack.currentWidget() is project_window.locations_panel
 
 
 def test_topbar_toggle_also_drives_the_sidebar_and_stays_synced(window: MainWindow) -> None:
@@ -691,31 +745,6 @@ def test_activity_bar_clicking_switches_and_collapses(qtbot) -> None:
     assert bar.search_button.isChecked() is False
 
 
-def test_rvt_button_is_a_plain_action_not_a_sidebar_view(qtbot) -> None:
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-    bar.set_rvt_enabled(True)  # starts disabled -- see test_rvt_button_starts_disabled below
-    launched = []
-    selected = []
-    bar.launch_rvt_requested.connect(lambda: launched.append(True))
-    bar.view_selected.connect(selected.append)
-
-    bar.rvt_button.click()
-
-    assert launched == [True]
-    assert selected == []
-    assert bar.rvt_button.isCheckable() is False
-
-
-def test_rvt_button_starts_disabled(qtbot) -> None:
-    # PROMPT.md: "rvt should not be launchable if no project is open" -- true from construction,
-    # before MainWindow ever gets a chance to enable it once a project opens.
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-
-    assert bar.rvt_button.isEnabled() is False
-
-
 def test_apply_button_starts_disabled(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
@@ -733,12 +762,12 @@ def test_refresh_icon_scale_resizes_the_bar_and_every_button(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
     assert bar.width() == WIDTH
-    assert bar.rvt_button.width() == _BUTTON_SIZE
+    assert bar.apply_button.width() == _BUTTON_SIZE
 
     bar.refresh_icon_scale(2.0)
 
     assert bar.width() == WIDTH * 2
-    for button in (bar.explorer_button, bar.search_button, bar.rvt_button, bar.apply_button, bar.settings_button):
+    for button in (bar.explorer_button, bar.search_button, bar.apply_button, bar.settings_button):
         assert button.width() == _BUTTON_SIZE * 2
         assert button.iconSize().width() == round(28 * 2)
 
@@ -770,18 +799,6 @@ def test_refresh_icon_scale_keeps_the_dashboard_icon_not_the_old_explorer_one(qt
     icon_size = round(28 * 1.5)
     expected = icons.icon("dashboard", color="#cccccc", size=icon_size).pixmap(icon_size, icon_size).toImage()
     assert bar.explorer_button.icon().pixmap(icon_size, icon_size).toImage() == expected
-
-
-def test_refresh_icon_scale_preserves_the_rvt_disabled_badge(qtbot) -> None:
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-    assert bar.rvt_button.isEnabled() is False
-
-    bar.refresh_icon_scale(1.5)
-
-    # Still disabled after a rescale -- the icon (and its "blocked" badge) gets re-rendered at the
-    # new size, but the enabled state itself isn't touched by a zoom change.
-    assert bar.rvt_button.isEnabled() is False
 
 
 def test_refresh_icon_scale_preserves_the_apply_disabled_badge(qtbot) -> None:
@@ -877,13 +894,12 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
 
     assert bar._icon_strip.order == [
         "compile",
-        "git",
         "explorer",
+        "git",
         "scripts",
-        "rvt",
-        "locations",
-        "testing",
         "maps",
+        "documentation",
+        "testing",
         "llm",
         "search",
     ]
@@ -894,52 +910,51 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     from in_reach.ide.activity_bar import ORDER_ENV_KEY
 
     env_path = tmp_path / ".env"
-    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,explorer,rvt,locations,compile")
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,explorer,maps,compile")
 
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts/testing/maps/llm aren't named in the saved order at all -- appended after it, in
-    # their existing (default) relative order, same as any other icon added after a user's own
-    # .env was written. "compile" is pinned (PROMPT.md: "the compile icon should be stuck to the
-    # top") -- it sorts to the front regardless of where the saved order put it.
+    # git/scripts/documentation/testing/llm aren't named in the saved order at all -- appended
+    # after it, in their existing (default) relative order, same as any other icon added after a
+    # user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should be
+    # stuck to the top") -- it sorts to the front regardless of where the saved order put it.
     assert bar._icon_strip.order == [
         "compile",
         "search",
         "explorer",
-        "rvt",
-        "locations",
+        "maps",
         "git",
         "scripts",
+        "documentation",
         "testing",
-        "maps",
         "llm",
     ]
 
 
 def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
-    # A key that no longer names a real button (renamed/removed icon) is dropped rather than
-    # crashing; any real button missing from the saved list (a newly-added icon, or one added
-    # after the .env entry was written) is appended rather than just vanishing.
+    # A key that no longer names a real button (renamed/removed icon -- "rvt" and "locations" are
+    # real past examples, see activity_bar.py's own history) is dropped rather than crashing; any
+    # real button missing from the saved list (a newly-added icon, or one added after the .env
+    # entry was written) is appended rather than just vanishing.
     from in_reach.app import env_file
     from in_reach.ide.activity_bar import ORDER_ENV_KEY
 
     env_path = tmp_path / ".env"
-    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,not-a-real-icon,rvt")
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,not-a-real-icon,rvt,locations")
 
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
     order = bar._icon_strip.order
     # "compile" is pinned to the front (PROMPT.md: "the compile icon should be stuck to the top").
-    assert order[:3] == ["compile", "search", "rvt"]
+    assert order[:2] == ["compile", "search"]
     assert set(order) == {
         "compile",
-        "rvt",
         "explorer",
         "git",
         "scripts",
-        "locations",
+        "documentation",
         "testing",
         "maps",
         "llm",
@@ -1338,7 +1353,7 @@ def test_adjust_zoom_keeps_an_open_settings_json_tab_at_110_percent(
 def test_rvt_button_is_disabled_with_no_project_open(window: MainWindow) -> None:
     # PROMPT.md: "rvt should not be launchable if no project is open (the icon should have a dash
     # in front of it)".
-    assert window.activity_bar.rvt_button.isEnabled() is False
+    assert window.explorer_panel.rvt_button.isEnabled() is False
 
 
 def test_rvt_button_is_enabled_once_a_project_opens(project_window: MainWindow, tmp_path: Path) -> None:
@@ -1347,7 +1362,7 @@ def test_rvt_button_is_enabled_once_a_project_opens(project_window: MainWindow, 
 
     project_window._on_project_opened(folder)
 
-    assert project_window.activity_bar.rvt_button.isEnabled() is True
+    assert project_window.explorer_panel.rvt_button.isEnabled() is True
 
 
 def test_rvt_button_is_disabled_again_once_the_project_closes(
@@ -1359,7 +1374,7 @@ def test_rvt_button_is_disabled_again_once_the_project_closes(
 
     project_window.explorer_panel.close_active_project()
 
-    assert project_window.activity_bar.rvt_button.isEnabled() is False
+    assert project_window.explorer_panel.rvt_button.isEnabled() is False
 
 
 def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
@@ -1367,11 +1382,11 @@ def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
 ) -> None:
     from in_reach.app import rvt_launcher
 
-    window.activity_bar.set_rvt_enabled(True)
+    window.explorer_panel.rvt_button.setEnabled(True)
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: calls.append((a, k)))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert len(calls) == 1
 
@@ -1384,7 +1399,7 @@ def test_clicking_the_disabled_rvt_button_does_not_launch_anything(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()  # disabled -- no project open
+    window.explorer_panel.rvt_button.click()  # disabled -- no project open
 
     assert calls == []
 
@@ -1615,7 +1630,7 @@ def test_rvt_and_export_buttons_are_disabled_for_the_compile_call_too(
         apply_settings,
         "apply_settings_changes",
         lambda pd, f: observed.setdefault(
-            "rvt_enabled_during_compile", project_window.activity_bar.rvt_button.isEnabled()
+            "rvt_enabled_during_compile", project_window.explorer_panel.rvt_button.isEnabled()
         )
         or BuildResult(success=True),
     )
@@ -1623,7 +1638,7 @@ def test_rvt_and_export_buttons_are_disabled_for_the_compile_call_too(
     project_window.launch_rvt()
 
     assert observed["rvt_enabled_during_compile"] is False
-    assert project_window.activity_bar.rvt_button.isEnabled() is True  # restored after
+    assert project_window.explorer_panel.rvt_button.isEnabled() is True  # restored after
 
     compiled_bin = new_project.compiled_variant_path(folder)
 
@@ -1665,7 +1680,7 @@ def test_clicking_apply_syncs_a_hand_edited_title_to_the_status_bar(
     from in_reach.app import new_project
 
     assert new_project.read_project_title(folder) == "Hand-Edited Title"
-    assert project_window.status_bar._project_label.text() == f"Hand-Edited Title ({folder.name})"
+    assert project_window.quick_access.button.text() == f"Hand-Edited Title ({folder.name})"
 
 
 def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
@@ -2532,20 +2547,20 @@ def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
     assert [a.text() for a in actions] == ["New Title"]
 
 
-def test_status_bar_shows_the_active_projects_title_and_folder_id(
+def test_quick_access_shows_the_active_projects_title_and_folder_id(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
-    # PROMPT.md: "please remove the dir location string (under the tabs section) and move that
-    # information into the bottom bar (in the centre): it should read test (uuid)"
+    # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+    # bar, we want to replace with the game file name and in brackets its uuid"
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Slayer Plus"}}', encoding="utf-8")
 
     project_window._on_project_opened(folder)
 
-    assert project_window.status_bar._project_label.text() == f"Slayer Plus ({folder.name})"
+    assert project_window.quick_access.button.text() == f"Slayer Plus ({folder.name})"
 
 
-def test_status_bar_clears_the_project_label_once_the_project_closes(
+def test_quick_access_label_reverts_to_the_workspace_name_once_the_project_closes(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     folder = _make_project_with_settings(tmp_path)
@@ -2553,10 +2568,10 @@ def test_status_bar_clears_the_project_label_once_the_project_closes(
 
     project_window.close_project()
 
-    assert project_window.status_bar._project_label.text() == ""
+    assert project_window.quick_access.button.text() == project_window.root_dir.name
 
 
-def test_status_bar_project_label_updates_after_a_rename(project_window: MainWindow, tmp_path: Path) -> None:
+def test_quick_access_label_updates_after_a_rename(project_window: MainWindow, tmp_path: Path) -> None:
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Old Title"}}', encoding="utf-8")
     project_window._on_project_opened(folder)
@@ -2564,7 +2579,7 @@ def test_status_bar_project_label_updates_after_a_rename(project_window: MainWin
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
     project_window._sync_project_title(folder)
 
-    assert project_window.status_bar._project_label.text() == f"New Title ({folder.name})"
+    assert project_window.quick_access.button.text() == f"New Title ({folder.name})"
 
 
 def test_clicking_apply_shows_an_error_dialog_and_leaves_the_button_alone_on_failure(
@@ -2639,7 +2654,7 @@ def test_launch_rvt_with_a_project_open_passes_its_compiled_bin_as_the_target(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [bin_path]
 
@@ -2675,7 +2690,7 @@ def test_launch_rvt_opens_the_compiled_bin_not_the_frozen_source_one(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [compiled_bin]
     assert calls[0] != source_bin
@@ -2712,7 +2727,7 @@ def test_launch_rvt_falls_back_to_the_source_variant_when_the_compile_fails(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [source_bin]
 
@@ -2736,7 +2751,7 @@ def test_launch_rvt_opens_nothing_when_neither_compiled_nor_source_variant_exist
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [None]
 
@@ -2768,7 +2783,7 @@ def test_launch_rvt_applies_present_settings_before_launching(
         lambda pd, f: calls.append((pd, f)) or BuildResult(success=True),
     )
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [(project_dir, folder)]
 
@@ -2913,7 +2928,7 @@ def test_launch_rvt_swallows_a_compile_failure_and_still_launches(
     launched = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launched.append(target))
 
-    window.activity_bar.rvt_button.click()  # should not raise, should still launch
+    window.explorer_panel.rvt_button.click()  # should not raise, should still launch
 
     assert launched == [bin_path]
 
@@ -2931,7 +2946,7 @@ def test_launch_rvt_with_a_project_open_but_no_compiled_bin_passes_no_target(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [None]
 
@@ -3092,7 +3107,7 @@ def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     assert "description" not in calls[0][2]
 
 
-def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_status_bar(
+def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_quick_access_label(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import new_project, project
@@ -3119,7 +3134,7 @@ def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_status_bar(
     window._on_watched_bin_changed(str(bin_path))
 
     assert new_project.read_project_title(folder) == "RVT Renamed"
-    assert window.status_bar._project_label.text() == f"RVT Renamed ({folder.name})"
+    assert window.quick_access.button.text() == f"RVT Renamed ({folder.name})"
 
 
 def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
@@ -3295,14 +3310,14 @@ def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(
     def _raise(*args, **kwargs):
         raise OSError("access denied")
 
-    window.activity_bar.set_rvt_enabled(True)
+    window.explorer_panel.rvt_button.setEnabled(True)
     monkeypatch.setattr(rvt_launcher, "launch_rvt", _raise)
     shown: list[str] = []
     monkeypatch.setattr(
         "in_reach.ide.main_window.QMessageBox.critical", lambda *a, **k: shown.append(a[2])
     )
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert len(shown) == 1
     assert "access denied" in shown[0]
@@ -3545,19 +3560,6 @@ def test_status_bar_reports_no_edges_when_maximized(window: MainWindow) -> None:
     assert status_bar._edges_at(QPoint(0, status_bar.height() - 1)) == Qt.Edge(0)
 
 
-def test_status_bar_set_project_label_updates_and_clears_the_centered_text(window: MainWindow) -> None:
-    status_bar = window.status_bar
-    assert status_bar._project_label.text() == ""
-
-    status_bar.set_project_label("Slayer Plus (abcd1234)")
-
-    assert status_bar._project_label.text() == "Slayer Plus (abcd1234)"
-
-    status_bar.set_project_label("")
-
-    assert status_bar._project_label.text() == ""
-
-
 # -- bottom status bar: Ln/Col/Spaces (PROMPT.md: Quick Access Bar work) -------------------------
 
 
@@ -3647,6 +3649,20 @@ def test_status_bar_clear_vcs_status_hides_the_segment(window: MainWindow) -> No
     window.status_bar.clear_vcs_status()
 
     assert window.status_bar.vcs_label.isVisible() is False
+
+
+def test_status_bar_vcs_label_sits_centered_where_the_project_label_used_to(window: MainWindow) -> None:
+    # PROMPT.md: "so what we have in the middle of the bottom bar, we now want in the quick access
+    # bar[;] please then move the git information to the middle of the bottom bar" -- vcs_label now
+    # occupies the centered slot (stretch, widget, stretch) the old project label used to, rather
+    # than sitting flush at the far left.
+    layout = window.status_bar.layout()
+    vcs_index = next(
+        i for i in range(layout.count()) if layout.itemAt(i).widget() is window.status_bar.vcs_label
+    )
+    assert layout.itemAt(vcs_index - 1).spacerItem() is not None
+    assert layout.itemAt(vcs_index + 1).spacerItem() is not None
+    assert not hasattr(window.status_bar, "_project_label")
 
 
 def test_opening_a_txt_file_shows_the_cursor_segments(project_window: MainWindow, tmp_path: Path) -> None:
@@ -3869,50 +3885,6 @@ def test_main_tab_style_flattens_the_scroll_tear_indicator() -> None:
     assert "QTabBar::tear" in style.MAIN_TAB_STYLE
 
 
-def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
-    notified = []
-    dialog = FirstRunDialog(on_theme_changed=lambda applied: notified.append(applied.name))
-    qtbot.addWidget(dialog)
-
-    dialog._apply_theme("Whiley")
-
-    assert notified == ["Whiley"]
-    assert dialog._theme_buttons["Whiley"].isChecked() is True
-    assert dialog._theme_buttons["Light"].isChecked() is False
-
-
-def test_first_run_dialog_centers_on_the_parent_windows_screen_not_always_primary(
-    qtbot, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # BUG (PROMPT.md): "the select theme welcome dialog is not always appearing on the same screen
-    # as the in-reach ide" -- it used to always center on QApplication.primaryScreen(), which is
-    # wrong whenever the IDE's own main window lives on a different monitor.
-    from PyQt6.QtCore import QRect
-    from PyQt6.QtWidgets import QWidget
-
-    class _FakeScreen:
-        def __init__(self, rect: QRect) -> None:
-            self._rect = rect
-
-        def availableGeometry(self) -> QRect:
-            return self._rect
-
-    parent_screen = _FakeScreen(QRect(2000, 0, 1000, 800))
-    primary_screen = _FakeScreen(QRect(0, 0, 1000, 800))
-
-    parent = QWidget()
-    qtbot.addWidget(parent)
-    monkeypatch.setattr(QWidget, "screen", lambda self: parent_screen)
-    monkeypatch.setattr(QApplication, "primaryScreen", staticmethod(lambda: primary_screen))
-
-    dialog = FirstRunDialog(parent)
-    qtbot.addWidget(dialog)
-
-    dialog.show()
-
-    assert dialog.frameGeometry().center() == parent_screen.availableGeometry().center()
-
-
 # -- Halo install/running status (PROMPT.md: "a flame icon which can be of different states
 # depending on the status of the players halo install and running detection") --------------------
 
@@ -3968,6 +3940,20 @@ def test_git_and_scripts_buttons_switch_the_sidebar_to_their_own_panels(
 
     project_window.activity_bar.scripts_button.click()
     assert project_window._sidebar_stack.currentWidget() is project_window.scripts_panel
+
+
+def test_documentation_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "move documentation to be its own panel. it should have a symbol of a book".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.documentation_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.documentation_panel
+    assert project_window.activity_bar.documentation_button.isChecked() is True
 
 
 def test_maps_button_switches_the_sidebar_to_its_own_panel(
@@ -4050,41 +4036,6 @@ def test_settings_dialog_theme_change_updates_the_main_window_chrome(
     assert "#700000" in window.status_bar.styleSheet()
 
 
-def test_first_run_flag_defaults_to_true_and_flips_to_false_after_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    env_path = project_dir / ".env"
-    env_path.write_text("FIRST_USE=true\n")
-
-    assert ide_app._is_first_use(env_path) is True
-
-    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
-    monkeypatch.setattr(FirstRunDialog, "exec", lambda self: 0)
-
-    ide_app.run(project_dir)
-
-    assert ide_app._is_first_use(env_path) is False
-
-
-def test_second_run_skips_the_first_run_dialog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    env_path = project_dir / ".env"
-    env_path.write_text("FIRST_USE=false\n")
-
-    shown = []
-    monkeypatch.setattr(FirstRunDialog, "exec", lambda self: shown.append(True))
-    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
-
-    ide_app.run(project_dir)
-
-    assert shown == []
-
-
 def test_install_crash_logging_logs_the_exception_and_chains_to_the_previous_hook(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -4144,7 +4095,6 @@ def test_run_shows_the_restore_icon_since_it_launches_maximized(
     # too, or the maximize button stays stuck showing win_maximize despite already being maximized.
     project_dir = tmp_path / ".in-reach"
     project_dir.mkdir()
-    (project_dir / ".env").write_text("FIRST_USE=false\n")
     monkeypatch.setattr(QApplication, "exec", lambda self: 0)
 
     def existing_windows() -> set[int]:
@@ -4216,7 +4166,7 @@ def test_edit_menu_has_undo_redo_cut_copy_paste_with_shortcuts(project_window: M
     menu = project_window.top_bar.edit_menu_button.menu()
     actions = [action for action in menu.actions() if not action.isSeparator()]
 
-    assert [action.text() for action in actions] == ["Undo", "Redo", "Cut", "Copy", "Paste"]
+    assert [action.text() for action in actions] == ["Undo", "Redo", "Cut", "Copy", "Paste", "Find", "Replace"]
     shortcuts = {action.text(): action.shortcut().toString() for action in actions}
     assert shortcuts == {
         "Undo": "Ctrl+Z",
@@ -4224,7 +4174,95 @@ def test_edit_menu_has_undo_redo_cut_copy_paste_with_shortcuts(project_window: M
         "Cut": "Ctrl+X",
         "Copy": "Ctrl+C",
         "Paste": "Ctrl+V",
+        "Find": "Ctrl+F",
+        "Replace": "Ctrl+R",
     }
+
+
+def test_selection_menu_has_select_all_with_its_shortcut(project_window: MainWindow) -> None:
+    # PROMPT.md: "Under Selection, please add Select All (ctrl A)".
+    menu = project_window.top_bar.selection_menu_button.menu()
+    actions = menu.actions()
+
+    assert [action.text() for action in actions] == ["Select All"]
+    assert actions[0].shortcut().toString() == "Ctrl+A"
+
+
+def test_select_all_highlights_the_active_tabs_full_text(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello world", encoding="utf-8")
+    project_window.open_quick_access_file(path)
+    editor = project_window._active_text_editor()
+    assert editor is not None
+
+    project_window.select_all()
+
+    assert editor.textCursor().selectedText() == "hello world"
+
+
+def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_in_order(
+    project_window: MainWindow,
+) -> None:
+    # PROMPT.md: "Under View, please add Command Palette, a sub menu for appearance, then options
+    # to switch to the appropriate side panel (which should be in this order ...): compile,
+    # dashboard, git, scripts, maps, docs, testing, ai, search ... please add an entry for view
+    # logs" -- "compile"/"rvt" aren't real sidebar views (Apply is a plain action, and RVT moved to
+    # the Dashboard's own button row, see explorer.py), so they're not menu entries here.
+    menu = project_window.top_bar.view_menu_button.menu()
+    top_level = [action.text() for action in menu.actions() if not action.isSeparator()]
+
+    assert top_level == [
+        "Command Palette",
+        "Appearance",
+        "Dashboard",
+        "Git",
+        "Scripts",
+        "Map Files",
+        "Documentation",
+        "Testing",
+        "LLM",
+        "Search",
+        "View Logs",
+    ]
+    command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")
+    assert command_palette_action.shortcut().toString() == "Ctrl+Shift+P"
+
+
+def test_view_menu_appearance_submenu_has_set_theme_and_set_ui_scale(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.view_menu_button.menu()
+    appearance = next(a for a in menu.actions() if a.text() == "Appearance").menu()
+
+    assert [a.text() for a in appearance.actions()] == ["Set Theme", "Set UI Scale"]
+    theme_names = [a.text() for a in appearance.actions()[0].menu().actions()]
+    assert theme_names == list(theme.list_themes())
+    scale_actions = [a.text() for a in appearance.actions()[1].menu().actions()]
+    assert scale_actions == ["Increase", "Decrease"]
+
+
+def test_view_menu_panel_entries_click_the_matching_activity_bar_button(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    menu = project_window.top_bar.view_menu_button.menu()
+    maps_action = next(a for a in menu.actions() if a.text() == "Map Files")
+
+    maps_action.trigger()
+
+    assert project_window.activity_bar.maps_button.isChecked() is True
+    assert project_window._sidebar_stack.currentWidget() is project_window.maps_panel
+
+
+def test_view_menu_view_logs_entry_opens_the_logs_tab(project_window: MainWindow) -> None:
+    project_window.top_bar.panel_toggle.setChecked(False)
+    menu = project_window.top_bar.view_menu_button.menu()
+    view_logs_action = next(a for a in menu.actions() if a.text() == "View Logs")
+
+    view_logs_action.trigger()
+
+    assert project_window._bottom_panel_card.isVisible() is True
+    assert project_window.bottom_panel.currentWidget() is project_window.bottom_panel.logs_panel
 
 
 def test_edit_menu_actions_act_on_the_active_text_editor(project_window: MainWindow, tmp_path: Path) -> None:

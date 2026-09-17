@@ -18,7 +18,12 @@ from pathlib import Path
 from in_reach.app import env_file
 
 _ENV_NAME = ".env"
-_LOGGER_NAME = "in_reach"
+#: Public (unlike the rest of this module's constants) -- in_reach.ide.logs_panel's own live Logs
+#: tab attaches a handler straight to this same logger by name, and formats records the same way
+#: this module's own file/stream handlers do, so the two never drift apart.
+LOGGER_NAME = "in_reach"
+LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+_LOGGER_NAME = LOGGER_NAME
 _DEFAULT_LEVEL = "INFO"
 _DEFAULT_MAX_LINES = 1000
 _CRASH_FILE_NAME = "crash.log"
@@ -36,8 +41,6 @@ _LEVELS = {
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
 }
-
-_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
 
 class _LineCappedFileHandler(logging.Handler):
@@ -103,7 +106,7 @@ def configure_logging(project_dir: Path) -> logging.Logger:
     # every other logger in the process.
     logger.propagate = False
 
-    formatter = logging.Formatter(_FORMAT)
+    formatter = logging.Formatter(LOG_FORMAT)
 
     log_file = values.get("LOG_FILE")
     if log_file:

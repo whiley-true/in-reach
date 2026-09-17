@@ -75,6 +75,7 @@ from PyQt6.QtWidgets import (
 from in_reach.app import indent_settings
 from in_reach.ide import indent_state, schema_check
 from in_reach.ide.code_folding import compute_fold_ranges
+from in_reach.ide.find_replace import FindReplaceBar
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
 
@@ -97,6 +98,12 @@ _INDENT_SIZE = 2
 #: same technique (and alpha, for visual consistency) as the minimap's own visible-viewport band in
 #: :meth:`_Minimap.paintEvent`, just applied to a single document line instead of a page range.
 _GOTO_LINE_HIGHLIGHT_ALPHA = 70
+
+#: PROMPT.md: "add a helper text when a user hovers over schema in settings that warns the user
+#: they cannot edit that section of the jsons" -- shown by :meth:`_PlainTextEditor.
+#: _error_message_at`'s own hover tooltip while the pointer sits over the protected "$schema" line
+#: (see :meth:`_PlainTextEditor._schema_line_range`).
+_SCHEMA_LINE_WARNING = "This line is managed automatically and can't be edited."
 
 #: PROMPT.md: "please increase the font size of the 3 setting json files by 10%" -- the project's
 #: own hand-relevant settings files (see :mod:`in_reach.app.new_project`'s own module docstring:
@@ -571,14 +578,24 @@ class _PlainTextEditor(QPlainTextEdit):
 
     def _error_message_at(self, pos: QPoint) -> str | None:
         """The schema-error message covering the character under ``pos`` (viewport coordinates),
-        if any -- what the red wavy underline's own hover tooltip shows."""
-        if not self._error_spans:
-            return None
+        if any -- what the red wavy underline's own hover tooltip shows. Falls back to
+        :meth:`_schema_line_warning_at` (PROMPT.md: "add a helper text when a user hovers over
+        schema in settings that warns the user they cannot edit that section of the jsons") once
+        there's no actual validation error to report -- the two never really overlap in practice
+        (the "$schema" key itself is excluded from validation, see schema_check.find_errors), but
+        checking spans first keeps a real error message from ever being shadowed either way."""
         char_pos = self.cursorForPosition(pos).position()
         for start, end, message in self._error_spans:
             if start <= char_pos < end:
                 return message
-        return None
+        return self._schema_line_warning_at(char_pos)
+
+    def _schema_line_warning_at(self, char_pos: int) -> str | None:
+        schema_range = self._schema_line_range()
+        if schema_range is None:
+            return None
+        start, end = schema_range
+        return _SCHEMA_LINE_WARNING if start <= char_pos < end else None
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)
@@ -865,6 +882,10 @@ class TextEditorWidget(QWidget):
         self._line_number_area = _LineNumberArea(self._edit)
         self._breadcrumb = _BreadcrumbBar()
         self._minimap = _Minimap(self._edit)
+        # PROMPT.md: "please add an option for Find ... and Replace" -- hidden until open()/
+        # open_find() shows it, taking no layout space while closed (see find_replace.py's own
+        # module docstring).
+        self._find_bar = FindReplaceBar(self._edit)
         # See _PlainTextEditor's own docstring -- it reads these back through its own instance
         # attributes of the same names, set here rather than created there.
         self._edit._line_number_area = self._line_number_area
@@ -874,12 +895,13 @@ class TextEditorWidget(QWidget):
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._breadcrumb, 0, 0, 1, 3)
-        layout.addWidget(self._line_number_area, 1, 0)
-        layout.addWidget(self._edit, 1, 1)
-        layout.addWidget(self._minimap, 1, 2)
+        layout.addWidget(self._find_bar, 0, 0, 1, 3)
+        layout.addWidget(self._breadcrumb, 1, 0, 1, 3)
+        layout.addWidget(self._line_number_area, 2, 0)
+        layout.addWidget(self._edit, 2, 1)
+        layout.addWidget(self._minimap, 2, 2)
         layout.setColumnStretch(1, 1)
-        layout.setRowStretch(1, 1)
+        layout.setRowStretch(2, 1)
 
         # The gutter's own column only actually grows/shrinks when something tells the layout its
         # sizeHint() changed -- _PlainTextEditor._on_text_changed() already calls this whenever the
@@ -890,6 +912,16 @@ class TextEditorWidget(QWidget):
 
         self.setFocusProxy(self._edit)
         self._edit.set_path(path)
+
+    # -- find/replace ---------------------------------------------------------------------------
+
+    def open_find(self, *, replace: bool = False) -> None:
+        """Shows this tab's own Find/Replace bar -- MainWindow's Ctrl+F/Ctrl+R shortcuts (PROMPT.md)
+        route here via ``MainWindow._active_text_editor()``, same as Undo/Redo/Cut/Copy/Paste."""
+        self._find_bar.open(replace=replace)
+
+    def close_find(self) -> None:
+        self._find_bar.close_bar()
 
     # -- explicit forwarding for the handful of QWidget-*native* methods QPlainTextEdit also has --
     #

@@ -45,11 +45,11 @@ from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
+from in_reach.ide.documentation_panel import DocumentationPanel
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
 from in_reach.ide.llm_panel import LlmPanel
-from in_reach.ide.locations_panel import LocationsPanel
 from in_reach.ide.maps_panel import MapsPanel
 from in_reach.ide.quick_access import Command, QuickAccessBar
 from in_reach.ide.scripts_panel import ScriptsPanel
@@ -88,12 +88,31 @@ _HALO_STATUS_POLL_MS = 500
 #: Segoe UI at an equal point size), not anything zoom-related on its own. 420 leaves real headroom
 #: over that 360px measurement rather than just barely clearing it, so a slightly different distro
 #: default font doesn't immediately reopen this same regression.
-_SIDEBAR_MIN_WIDTH = 420
+#:
+#: PROMPT.md: "this is good but the side panel needs to be resiziable to be much smaller or wider"
+#: -- this used to *also* double as the hard minimum-drag floor (see git history), which on any
+#: screen under ~2500px wide (i.e. almost every real monitor) collided with the fraction-of-screen
+#: max below once that was introduced, flooring both to this exact same number and leaving zero
+#: actual drag range at all. Split in two: this constant now only ever sets the sidebar's *initial*
+#: width (still tuned so nothing wraps the moment a project first opens), and
+#: :data:`_SIDEBAR_MIN_DRAG_WIDTH` below is the real, much smaller, floor a user can actually drag
+#: down to -- going narrower than 420 by choice can elide the Stats/section-header text above, same
+#: as dragging any real sidebar (VSCode's included) narrow does; that's expected, not the regression
+#: this constant was originally tuned against (an unwantedly-narrow *default*).
+_SIDEBAR_DEFAULT_WIDTH = 420
 
-#: PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width" --
-#: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
-#: primaryScreen() read, taken once at construction) as the window's own minimum-size floor below.
-_SIDEBAR_MAX_WIDTH_FRACTION = 4
+#: PROMPT.md: "the side panel needs to be resiziable to be much smaller" -- a flat floor (not
+#: fraction-of-screen -- "genuinely narrow" should mean the same thing on a laptop and a 4K
+#: monitor), just enough that the splitter/its children never fully degenerate.
+_SIDEBAR_MIN_DRAG_WIDTH = 200
+
+#: PROMPT.md: "the side panel needs to be resiziable to be ... wider" -- half the screen's own
+#: width (revised from 1/3, then 1/4, then 1/5 -- each of which, floored at the old shared
+#: _SIDEBAR_MIN_WIDTH, actually collapsed to zero drag range on most real screens, see
+#: _SIDEBAR_DEFAULT_WIDTH's own comment above). Floored at _SIDEBAR_MIN_DRAG_WIDTH purely so an
+#: extreme (sub-400px) screen can't still end up with max < min -- on any realistic screen this
+#: never actually triggers, unlike the old floor.
+_SIDEBAR_MAX_WIDTH_FRACTION = 2
 
 #: File/Edit top bar menu shortcuts (PROMPT.md) -- named here so the menu's own QAction shortcuts
 #: and the command palette's "detail" column (see build_command_palette_commands) can't drift
@@ -111,6 +130,10 @@ _SHORTCUT_REDO = "Ctrl+Y"
 _SHORTCUT_CUT = "Ctrl+X"
 _SHORTCUT_COPY = "Ctrl+C"
 _SHORTCUT_PASTE = "Ctrl+V"
+_SHORTCUT_FIND = "Ctrl+F"
+_SHORTCUT_REPLACE = "Ctrl+R"
+_SHORTCUT_SELECT_ALL = "Ctrl+A"
+_SHORTCUT_COMMAND_PALETTE = "Ctrl+Shift+P"
 
 #: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
 #: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
@@ -120,7 +143,7 @@ _SHORTCUT_PASTE = "Ctrl+V"
 #: :meth:`MainWindow._on_watched_bin_changed`.
 _RVT_SYNCED_JSON_FILENAMES = ("settings.json", "script_settings.json", "strings.json")
 
-#: The activity bar's own view-toggle buttons are keyed internally as "explorer"/"locations"/
+#: The activity bar's own view-toggle buttons are keyed internally as "explorer"/"git"/.../
 #: "search" (see activity_bar.py's own note on "explorer" being the Dashboard button's long-
 #: established internal name); this is the user-facing name each one's own
 #: :class:`_NoProjectSidebarPage` text should read instead.
@@ -128,7 +151,7 @@ _VIEW_DISPLAY_NAMES = {
     "explorer": "Dashboard",
     "git": "Git",
     "scripts": "Scripts",
-    "locations": "Locations",
+    "documentation": "Documentation",
     "testing": "Testing",
     "maps": "Map Files",
     "llm": "LLM",
@@ -168,17 +191,6 @@ def _add_action(
     if shortcut:
         action.setShortcut(QKeySequence(shortcut))
     return menu
-
-
-class _DropdownButton(QToolButton):
-    """An empty topbar dropdown -- no items yet, to be filled in later (PROMPT.md)."""
-
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setText(label)
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.setAutoRaise(True)
-        self.setMenu(QMenu(self))
 
 
 class _FileMenuButton(QToolButton):
@@ -223,9 +235,8 @@ class _FileMenuButton(QToolButton):
 
 
 class _EditMenuButton(QToolButton):
-    """The top bar's "Edit" dropdown (PROMPT.md) -- Undo/Redo/Cut/Copy/Paste against whichever text
-    editor is active (see ``MainWindow._active_text_editor``). Searching is deliberately left for a
-    later pass (PROMPT.md: "we will implement/refine searching later")."""
+    """The top bar's "Edit" dropdown (PROMPT.md) -- Undo/Redo/Cut/Copy/Paste/Find/Replace against
+    whichever text editor is active (see ``MainWindow._active_text_editor``)."""
 
     def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -240,6 +251,81 @@ class _EditMenuButton(QToolButton):
         _add_action(menu, "Cut", window.edit_cut, _SHORTCUT_CUT)
         _add_action(menu, "Copy", window.edit_copy, _SHORTCUT_COPY)
         _add_action(menu, "Paste", window.edit_paste, _SHORTCUT_PASTE)
+        menu.addSeparator()
+        # PROMPT.md: "Under edit in the top bar, please add an option for Find with shortcut CTRL
+        # + F and Replace with shortcut CTRL + R" -- see find_replace.py's own module docstring for
+        # the bar these open.
+        _add_action(menu, "Find", window.edit_find, _SHORTCUT_FIND)
+        _add_action(menu, "Replace", window.edit_replace, _SHORTCUT_REPLACE)
+        self.setMenu(menu)
+
+
+class _SelectionMenuButton(QToolButton):
+    """The top bar's "Selection" dropdown (PROMPT.md: "Under Selection, please add Select All
+    (ctrl A), should highlight all of the most recently opened tab")."""
+
+    def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText("Selection")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        _add_action(menu, "Select All", window.select_all, _SHORTCUT_SELECT_ALL)
+        self.setMenu(menu)
+
+
+class _ViewMenuButton(QToolButton):
+    """The top bar's "View" dropdown (PROMPT.md: "Under View, please add Command Palette, a sub
+    menu for appearance, then options to switch to the appropriate side panel (which should be in
+    this order (please re-order default icon order too): compile, dashboard, git, scripts, maps,
+    docs, testing, ai, search ... we are removing locations, and rvt ... please add an entry for
+    view logs"). Each "switch to panel" entry clicks the matching activity-bar button directly
+    (rather than re-implementing view-switching here) -- the exact same code path a real click
+    takes, so the activity bar's own checked-button state and the sidebar both stay in sync."""
+
+    def __init__(
+        self, window: "MainWindow", quick_access: QuickAccessBar, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setText("View")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        # quick_access is the top bar's own instance, passed in directly rather than read off
+        # `window.quick_access` -- MainWindow doesn't set that alias until *after* the top bar
+        # (and so this button) finishes constructing, see _TopBar.__init__'s own comment.
+        _add_action(menu, "Command Palette", quick_access.open_command_palette, _SHORTCUT_COMMAND_PALETTE)
+        menu.addSeparator()
+
+        appearance_menu = menu.addMenu("Appearance")
+        theme_menu = appearance_menu.addMenu("Set Theme")
+        for name in theme_module.list_themes():
+            theme_menu.addAction(name, lambda _checked=False, n=name: window._set_theme(n))
+        scale_menu = appearance_menu.addMenu("Set UI Scale")
+        scale_menu.addAction("Increase", window._zoom_in)
+        scale_menu.addAction("Decrease", window._zoom_out)
+        menu.addSeparator()
+
+        # PROMPT.md's own re-ordering, keyed to activity_bar.py's own button attributes -- "docs"/
+        # "ai" there are the existing Documentation/LLM entries, not a rename (see activity_bar.py's
+        # own module docstring).
+        panel_buttons = (
+            ("Dashboard", "explorer_button"),
+            ("Git", "git_button"),
+            ("Scripts", "scripts_button"),
+            ("Map Files", "maps_button"),
+            ("Documentation", "documentation_button"),
+            ("Testing", "testing_button"),
+            ("LLM", "llm_button"),
+            ("Search", "search_button"),
+        )
+        for label, attr in panel_buttons:
+            menu.addAction(label, lambda _checked=False, a=attr: getattr(window.activity_bar, a).click())
+        menu.addSeparator()
+
+        menu.addAction("View Logs", window.view_logs)
         self.setMenu(menu)
 
 
@@ -273,19 +359,9 @@ class _TopBar(QWidget):
         layout.addWidget(self.mark_label)
         layout.addSpacing(4)
 
-        self.file_menu_button = _FileMenuButton(window)
-        layout.addWidget(self.file_menu_button)
-        self.edit_menu_button = _EditMenuButton(window)
-        layout.addWidget(self.edit_menu_button)
-        # Empty placeholders (PROMPT.md) -- no items yet, to be filled in later.
-        layout.addWidget(_DropdownButton("Selection"))
-        layout.addWidget(_DropdownButton("View"))
-        layout.addStretch(1)
-
-        # Two equal stretches around the pill center it in the gap between the left content
-        # (mark/File/Edit/Selection/View) and the right-side toggle/window-control cluster, rather
-        # than in the dead center of the whole bar (which would drift off-center against those
-        # unequal-width neighbors) -- the standard QBoxLayout "center between two stretches" trick.
+        # Built (but not yet laid out -- see the addWidget() call further down, in its actual
+        # visual position) before the Selection/View menus, which both need it to already exist:
+        # View's own "Command Palette" entry opens straight through it.
         self.quick_access = QuickAccessBar(
             self,
             get_project_folder=lambda: self._window.explorer_panel.current_folder,
@@ -293,6 +369,21 @@ class _TopBar(QWidget):
             build_root_commands=self._window.build_command_palette_commands,
             label=self._window.root_dir.name,
         )
+
+        self.file_menu_button = _FileMenuButton(window)
+        layout.addWidget(self.file_menu_button)
+        self.edit_menu_button = _EditMenuButton(window)
+        layout.addWidget(self.edit_menu_button)
+        self.selection_menu_button = _SelectionMenuButton(window)
+        layout.addWidget(self.selection_menu_button)
+        self.view_menu_button = _ViewMenuButton(window, self.quick_access)
+        layout.addWidget(self.view_menu_button)
+        layout.addStretch(1)
+
+        # Two equal stretches around the pill center it in the gap between the left content
+        # (mark/File/Edit/Selection/View) and the right-side toggle/window-control cluster, rather
+        # than in the dead center of the whole bar (which would drift off-center against those
+        # unequal-width neighbors) -- the standard QBoxLayout "center between two stretches" trick.
         layout.addWidget(self.quick_access)
         layout.addStretch(1)
 
@@ -492,6 +583,12 @@ class MainWindow(QWidget):
         self._side_splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
         self._side_splitter.setHandleWidth(style.SIDEBAR_CONTENT_GAP)
         self._side_splitter.setChildrenCollapsible(False)
+        # PROMPT.md: "the dragging behaviour is jerky. please fix" -- the default opaque resize
+        # relayouts the sidebar's own (potentially expensive -- a QFileSystemModel-backed tree,
+        # stats, ...) content on every single mouse-move event during the drag; Qt's own standard
+        # remedy is to resize just once, on release, showing a plain drag indicator line for the
+        # duration instead (drawn by Qt itself, independent of this handle's own QSS styling).
+        self._side_splitter.setOpaqueResize(False)
         body_layout.addWidget(self._side_splitter, 1)
 
         self.primary_sidebar = self._build_primary_sidebar()
@@ -504,7 +601,7 @@ class MainWindow(QWidget):
         self._side_splitter.addWidget(self._main_splitter)
         self._side_splitter.setStretchFactor(0, 0)
         self._side_splitter.setStretchFactor(1, 1)
-        self._side_splitter.setSizes([_SIDEBAR_MIN_WIDTH, 1000])
+        self._side_splitter.setSizes([_SIDEBAR_DEFAULT_WIDTH, 1000])
 
         self.main_panel = MainPanelArea(
             root_dir=self.root_dir,
@@ -551,7 +648,7 @@ class MainWindow(QWidget):
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
         self.explorer_panel.export_requested.connect(self.export_rvt_file)
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
-        self.explorer_panel.notes_requested.connect(self.open_notes)
+        self.explorer_panel.launch_rvt_requested.connect(self.launch_rvt)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
@@ -563,14 +660,12 @@ class MainWindow(QWidget):
 
         self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
-        # PROMPT.md: "please remove the dir location string (under the tabs section) and move
-        # that information into the bottom bar (in the centre)" -- connected here (after
-        # self.status_bar exists) rather than alongside the other explorer_panel.
-        # active_project_changed connections above, and primed once immediately since any restored
-        # tab from the last launch (the `for folder in restored` loop above) already fired that
-        # signal before this connection existed.
-        self.explorer_panel.active_project_changed.connect(self._update_status_project_label)
-        self._update_status_project_label(self.explorer_panel.current_folder)
+        # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+        # bar, we want to replace with the game file name and in brackets its uuid" -- primed once
+        # immediately since any restored tab from the last launch (the `for folder in restored`
+        # loop above) already fired active_project_changed before this connection existed.
+        self.explorer_panel.active_project_changed.connect(self._update_quick_access_label)
+        self._update_quick_access_label(self.explorer_panel.current_folder)
         # Same priming reasoning as the status label just above -- a restored project (or the lack
         # of one) already fired active_project_changed before this method's own connection existed.
         self._sync_project_dependent_views(self.explorer_panel.current_folder)
@@ -590,7 +685,6 @@ class MainWindow(QWidget):
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
-        self.activity_bar.launch_rvt_requested.connect(self.launch_rvt)
         self.activity_bar.apply_requested.connect(self.apply_settings_changes)
         self.activity_bar.settings_requested.connect(self.open_settings_dialog)
         self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
@@ -618,7 +712,7 @@ class MainWindow(QWidget):
         # Quick Access Bar (PROMPT.md): Ctrl+P search, Ctrl+Shift+P command palette.
         self._quick_open_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
         self._quick_open_shortcut.activated.connect(self.quick_access.open_search)
-        self._command_palette_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        self._command_palette_shortcut = QShortcut(QKeySequence(_SHORTCUT_COMMAND_PALETTE), self)
         self._command_palette_shortcut.activated.connect(self.quick_access.open_command_palette)
 
         self.refresh_icon_colors()
@@ -656,18 +750,20 @@ class MainWindow(QWidget):
 
     def _build_primary_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
         screen = QApplication.primaryScreen()
+        # PROMPT.md: "the side panel needs to be resiziable to be much smaller or wider" --
+        # QSplitter enforces a pane's own setMinimumWidth()/setMaximumWidth() as a hard floor/
+        # ceiling on how far the user can drag its handle. The floor is flat (see
+        # _SIDEBAR_MIN_DRAG_WIDTH's own comment); the ceiling floors at that same flat minimum
+        # purely so an extreme (sub-400px) screen can't leave a self-contradictory min > max for
+        # Qt's own constraint solver to pick one of arbitrarily -- on any real screen this never
+        # actually triggers, unlike the old shared-with-the-minimum floor it replaces.
+        min_width = _SIDEBAR_MIN_DRAG_WIDTH
         if screen is not None:
-            # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen
-            # width" -- QSplitter enforces a pane's own setMaximumWidth() as a hard ceiling on how
-            # far the user can drag its handle, same as setMinimumWidth() already is for the floor.
-            # Floored at _SIDEBAR_MIN_WIDTH itself -- a small enough screen (a CI box's own
-            # headless/offscreen virtual display, e.g.) can otherwise put the fraction-of-screen
-            # ceiling *below* the fixed floor above, a self-contradictory min > max that leaves
-            # Qt's own constraint solver to pick one arbitrarily rather than actually honoring both.
-            max_width = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+            available = screen.availableGeometry().width()
+            max_width = max(_SIDEBAR_MIN_DRAG_WIDTH, available // _SIDEBAR_MAX_WIDTH_FRACTION)
             sidebar.setMaximumWidth(max_width)
+        sidebar.setMinimumWidth(min_width)
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setObjectName("primarySidebar")
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
@@ -676,9 +772,9 @@ class MainWindow(QWidget):
 
         self.explorer_panel = ExplorerPanel()
         self.search_panel = SearchPanel()
-        self.locations_panel = LocationsPanel()
         self.git_panel = GitPanel()
         self.scripts_panel = ScriptsPanel()
+        self.documentation_panel = DocumentationPanel()
         self.testing_panel = TestingPanel()
         self.maps_panel = MapsPanel()
         self.llm_panel = LlmPanel()
@@ -686,7 +782,7 @@ class MainWindow(QWidget):
             "explorer": self.explorer_panel,
             "git": self.git_panel,
             "scripts": self.scripts_panel,
-            "locations": self.locations_panel,
+            "documentation": self.documentation_panel,
             "testing": self.testing_panel,
             "maps": self.maps_panel,
             "llm": self.llm_panel,
@@ -793,16 +889,19 @@ class MainWindow(QWidget):
             project.get_project_dir(self.root_dir) / ".env", new_project.PROJECT_DIR_KEY, str(folder) if folder else ""
         )
 
-    def _update_status_project_label(self, folder: Path | None) -> None:
-        """Shows the active project as "<title> (<folder id>)" centered in the bottom status bar
-        (PROMPT.md), or clears it once no project is open. Also called from
-        :meth:`_sync_project_title`, since a rename changes the title half of that text without
-        the active project (and so without :attr:`~in_reach.ide.explorer.ExplorerPanel.
-        active_project_changed`) actually changing."""
+    def _update_quick_access_label(self, folder: Path | None) -> None:
+        """Shows the active project as "<title> (<folder id>)" in the Quick Access pill (PROMPT.md:
+        "where we presently have the name of the parent directory in the quick access bar, we want
+        to replace with the game file name and in brackets its uuid" -- ``folder.name`` is that
+        uuid-named project folder, see :func:`~in_reach.app.new_project.create_gametype_project`),
+        or falls back to the workspace's own directory name once no project is open (its original,
+        pre-project-open text). Also called from :meth:`_sync_project_title`, since a rename changes
+        the title half of that text without the active project (and so without
+        :attr:`~in_reach.ide.explorer.ExplorerPanel.active_project_changed`) actually changing."""
         if folder is None:
-            self.status_bar.set_project_label("")
+            self.quick_access.set_label(self.root_dir.name)
             return
-        self.status_bar.set_project_label(f"{new_project.read_project_title(folder)} ({folder.name})")
+        self.quick_access.set_label(f"{new_project.read_project_title(folder)} ({folder.name})")
 
     def _on_explorer_file_activated(self, path: Path) -> None:
         """Opens a file clicked in any of the Explorer panel's three trees -- into the active
@@ -1095,6 +1194,7 @@ class MainWindow(QWidget):
         """"New Window" -- a fresh, independent MainWindow in the same working directory, starting
         blank (Welcome tab, no project loaded) rather than reopening whatever project is already
         open in this one."""
+        _logger.info("opening a new window (root_dir=%s)", self.root_dir)
         window = MainWindow(root_dir=self.root_dir, restore_last_project=False)
         window.showMaximized()
         self._child_windows.append(window)
@@ -1111,10 +1211,10 @@ class MainWindow(QWidget):
 
     def ask_export_path(self, default_path: Path) -> str:
         """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
-        "Export RVT File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's
-        own bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
+        "Export File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's own
+        bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
         chosen, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export RVT File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
+            self, "Export File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
         )
         return chosen
 
@@ -1136,22 +1236,27 @@ class MainWindow(QWidget):
         self._adopt_project(folder)
 
     def _adopt_project(self, folder: Path) -> None:
+        _logger.info("opening project %s", folder)
         recent.add_recent(project.get_project_dir(self.root_dir), folder)
         self._on_project_opened(folder)
 
     def save_current(self) -> None:
+        _logger.info("saving the active tab")
         self.main_panel.active_pane.save_current()
 
     def save_all(self) -> None:
+        _logger.info("saving all open tabs")
         self.main_panel.save_all()
 
     def close_project(self) -> None:
         """"Close Project" -- closes the one project open in this window (PROMPT.md: "1 per
         window"). Doesn't touch any files, and doesn't close this window (that's the title bar's
         own close button)."""
+        _logger.info("closing project %s", self.explorer_panel.current_folder)
         self.explorer_panel.close_active_project()
 
     def close_editor(self) -> None:
+        _logger.info("closing the active tab")
         self.main_panel.active_pane.close_current()
 
     # -- Edit menu --------------------------------------------------------------------------------
@@ -1180,6 +1285,40 @@ class MainWindow(QWidget):
         editor = self._active_text_editor()
         if editor is not None:
             editor.paste()
+
+    def edit_find(self) -> None:
+        """PROMPT.md: "add an option for Find with shortcut CTRL + F ... it should show a find and
+        replace bar (cursored on find or replace depending on selection)" -- opens the active tab's
+        own Find/Replace bar (see :meth:`~in_reach.ide.editor.TextEditorWidget.open_find`) focused
+        on the Find field."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.open_find(replace=False)
+
+    def edit_replace(self) -> None:
+        """"Replace" (Ctrl+R) -- same bar as :meth:`edit_find`, just opened with the Replace row
+        shown and focused."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.open_find(replace=True)
+
+    # -- Selection menu -----------------------------------------------------------------------------
+
+    def select_all(self) -> None:
+        """"Select All" (Ctrl+A, PROMPT.md) -- highlights all of the active pane's own current tab,
+        same "whichever editor is active" targeting as the Edit menu's Undo/Redo/Cut/Copy/Paste."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.selectAll()
+
+    # -- View menu ------------------------------------------------------------------------------
+
+    def view_logs(self) -> None:
+        """"View Logs" (the View menu, PROMPT.md) -- opens the bottom panel onto its live Logs tab
+        (see :mod:`in_reach.ide.logs_panel`), showing the panel first if it was collapsed (same
+        toggle the top bar's own panel_toggle button drives)."""
+        self.top_bar.panel_toggle.setChecked(True)
+        self.bottom_panel.show_logs()
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -1300,11 +1439,14 @@ class MainWindow(QWidget):
         """
         from in_reach.app import apply_settings
 
+        _logger.info("compiling %s", folder)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            return apply_settings.apply_settings_changes(project_dir, folder)
+            result = apply_settings.apply_settings_changes(project_dir, folder)
         finally:
             QApplication.restoreOverrideCursor()
+        _logger.info("compile %s for %s", "succeeded" if result.success else "failed", folder)
+        return result
 
     def launch_rvt(self) -> None:
         """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
@@ -1349,14 +1491,14 @@ class MainWindow(QWidget):
                 return
             # Disabled for the compile's own duration -- see _run_compile()'s own docstring
             # (PROMPT.md: "we are having to press compile twice").
-            self.activity_bar.rvt_button.setEnabled(False)
+            self.explorer_panel.rvt_button.setEnabled(False)
             try:
                 compile_result = self._run_compile(project.get_project_dir(self.root_dir), folder)
             except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
                 _logger.exception("best-effort compile before RVT launch failed for %s", folder)
                 compile_result = None
             finally:
-                self.activity_bar.set_rvt_enabled(True)  # folder is not None in this branch
+                self.explorer_panel.rvt_button.setEnabled(True)  # folder is not None in this branch
             if compile_result is not None and not compile_result.success:
                 # Still best-effort/non-blocking by design (see this method's own docstring) --
                 # just logged, not a dialog on every launch -- but this needs at least a trace
@@ -1458,7 +1600,7 @@ class MainWindow(QWidget):
         """PROMPT.md: "rvt should not be launchable if no project is open" -- and the Apply
         button's own enabled state depends on the *active* project's own ``settings/`` too, so both
         need re-checking on every tab switch, not just when a project first opens/closes."""
-        self.activity_bar.set_rvt_enabled(folder is not None)
+        self.explorer_panel.rvt_button.setEnabled(folder is not None)
         self._refresh_apply_enabled(folder)
 
     def _sync_project_dependent_views(self, folder: Path | None) -> None:
@@ -1566,6 +1708,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("stamped release %r for %s", message, folder)
         self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
@@ -1582,6 +1725,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("created branch %r for %s", name, folder)
         self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
@@ -1608,6 +1752,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("switched to branch %r for %s", name, folder)
         self.main_panel.reload_open_tabs_under(folder)
         self.git_panel.refresh()
         self._refresh_vcs_status(folder)
@@ -1648,6 +1793,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("deleted branch %r for %s", name, folder)
         self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
@@ -1703,6 +1849,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("restored snapshot %s for %s", sha, folder)
         self.main_panel.reload_open_tabs_under(folder)
         self.git_panel.refresh()
         self._refresh_vcs_status(folder)
@@ -1781,11 +1928,12 @@ class MainWindow(QWidget):
             return
         from in_reach.app.output_view import write_output_view
 
+        _logger.info("viewing compiled output for %s", folder)
         path = write_output_view(folder)
         self.main_panel.active_pane.open_file(path, force_reload=True)
 
     def open_notes(self) -> None:
-        """"Notes" (the Dashboard's own Documentation section, PROMPT.md) -- opens the active
+        """"Open Notes" (the ``>`` command palette, PROMPT.md) -- opens the active
         project's own freeform scratch notes file, ``Notes.txt`` or ``Notes.md`` per the saved
         :mod:`in_reach.app.notes_settings` preference (see :func:`~in_reach.app.notes_settings.
         ensure_notes_file`, which creates the target file from the same template ``Notes.txt``
@@ -1805,6 +1953,7 @@ class MainWindow(QWidget):
 
         notes_format = notes_settings.get_notes_format(self._notes_format_env_path())
         path = notes_settings.ensure_notes_file(folder, notes_format)
+        _logger.info("opening notes for %s", folder)
         self.main_panel.active_pane.open_file(path, editable_markdown=notes_format == notes_settings.FORMAT_MD)
 
     def _notes_format_env_path(self) -> Path:
@@ -1881,6 +2030,8 @@ class MainWindow(QWidget):
             script_path = folder / new_project.SCRIPT_DIRNAME / SCRIPT_FILENAME
             if not write_mglo(compiled, script_path, dest):
                 QMessageBox.critical(self, "in-reach", f"Couldn't write {dest.name}.")
+                return
+            _logger.info("exported %s to %s", folder, dest)
             return
 
         import shutil
@@ -1889,6 +2040,8 @@ class MainWindow(QWidget):
             shutil.copyfile(compiled, dest)
         except OSError as exc:
             QMessageBox.critical(self, "in-reach", f"Couldn't export {dest.name}:\n{exc}")
+            return
+        _logger.info("exported %s to %s", folder, dest)
 
     def _sync_project_title(self, folder: Path) -> None:
         """Brings every cached display of ``folder``'s own title -- any already-open editor's
@@ -1910,7 +2063,7 @@ class MainWindow(QWidget):
         nothing actually changed.
         """
         self.main_panel.refresh_project_titles()
-        self._update_status_project_label(folder)
+        self._update_quick_access_label(folder)
 
     def _rewatch_project_bin(self, _folder: Path | None) -> None:
         """Re-points :attr:`_bin_watcher` at the newly-active project's own freshly-*compiled*

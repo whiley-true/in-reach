@@ -16,12 +16,10 @@ from in_reach.app import env_file, logging_setup
 from in_reach.ide import icons
 from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
-from in_reach.ide.first_run_dialog import FirstRunDialog
 from in_reach.ide.main_window import MainWindow
 from in_reach.ide.win_native_filter import BlockAccessibilityQueries
 
 _ENV_NAME = ".env"
-_FIRST_USE_KEY = "FIRST_USE"
 _WINDOWS_APP_USER_MODEL_ID = "InReach.IDE"
 
 _logger = logging_setup.get_logger(__name__)
@@ -42,11 +40,6 @@ def _set_windows_app_user_model_id() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_WINDOWS_APP_USER_MODEL_ID)
     except (AttributeError, OSError):
         pass
-
-
-def _is_first_use(env_path: Path) -> bool:
-    value = env_file.get_env_values(env_path).get(_FIRST_USE_KEY, "true")
-    return value.strip().lower() != "false"
 
 
 def _install_crash_logging() -> None:
@@ -79,8 +72,7 @@ def _install_crash_logging() -> None:
 def run(project_dir: Path) -> int:
     """Opens the IDE, fullscreen, against ``project_dir``'s ``.in-reach`` project folder.
 
-    Blocks until the window is closed. Shows the first-run welcome popup (theme picker) exactly
-    once per project, tracked by the ``FIRST_USE`` flag in ``project_dir/.env``.
+    Blocks until the window is closed.
     """
     env_path = project_dir / _ENV_NAME
     # Idempotent, and cheap -- cli.py's own "run" command already calls this before reaching here,
@@ -115,12 +107,6 @@ def run(project_dir: Path) -> int:
     # window was still in its pre-maximized state, so without this the icon stays wrong until the
     # button's own toggle_maximize() happens to run once.
     window.refresh_icon_colors()
-
-    if _is_first_use(env_path):
-        _logger.info("first use of this project -- showing the welcome dialog")
-        dialog = FirstRunDialog(window, on_theme_changed=window.on_theme_applied)
-        dialog.exec()
-        env_file.update_env_value(env_path, _FIRST_USE_KEY, "false")
 
     exit_code = app.exec()
     _logger.info("IDE exiting (code=%d)", exit_code)
