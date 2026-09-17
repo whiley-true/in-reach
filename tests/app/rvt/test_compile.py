@@ -192,11 +192,15 @@ def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(t
 def test_run_compile_of_an_unedited_script_reproduces_the_original_action_counts(tmp_path: Path) -> None:
     """Round-trip fidelity regression guard (PROMPT.md: "we want to make sure when we compile or
     decompile a script it processes the code correctly ... i want a working compiler/decompiler we
-    can rely on"). A real, playable .bin can sit close enough to a budget cap (one seen in practice:
-    1013/1024 actions per RVT's own display) that decompiling it and immediately recompiling that
-    *unedited* text -- exactly what every Apply/Export/Launch RVT does -- must reproduce the same
-    trigger/condition/action/forge-label counts as the original, not silently inflate them. This
-    fixture (juggernaut.bin) is the regression guard for that property in CI.
+    can rely on"). Confirmed directly (not guessed): ``mp.compile_script()`` is not a stable fixed
+    point over its own ``decompile_script()`` output -- recompiling this exact fixture completely
+    unedited used to change 25 triggers/92 actions into 19/91 (some ordinary nested-trigger blocks
+    silently recompile as "inline" triggers instead, a non-configurable default the native compiler
+    makes on its own). A real, playable .bin can sit close enough to a budget cap that the same
+    non-idempotence -- in either direction -- can push it over one even with zero edits, which is
+    exactly what every Apply/Export/Launch RVT does to a project the moment it's opened. See
+    :mod:`in_reach.app.rvt.compile`'s own "skip recompiling an unchanged script" comment for the fix
+    this guards.
     """
     from in_reach.app.rvt.decompile import GENERATED_STATS_FILENAME
 

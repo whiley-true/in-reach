@@ -54,7 +54,7 @@ from pydantic import BaseModel
 from in_reach.app import logging_setup, new_project
 from in_reach.app.blank_variant import resolve_blank_variant
 
-from . import decompile, settings_io, settings_writer, strings_io, strings_writer
+from . import decompile, megalo_compiler, settings_io, settings_writer, strings_io, strings_writer
 from .decompile import write_build_snapshot
 from .rvt_bridge import get_rvt
 from .settings_io import load_game_settings
@@ -216,10 +216,10 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     if init_gametype_bin.is_file():
         # See module docstring for why this is preferred over the packaged blank whenever it
         # exists.
-        variant = rvt.load(str(init_gametype_bin))
+        variant_source_path = init_gametype_bin
     else:
-        blank_path = resolve_blank_variant(firefight=not settings.meta.is_multiplayer)
-        variant = rvt.load(str(blank_path))
+        variant_source_path = resolve_blank_variant(firefight=not settings.meta.is_multiplayer)
+    variant = rvt.load(str(variant_source_path))
 
     mp = variant.multiplayer
     content_header = variant.content_header
@@ -228,15 +228,50 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     if mp is not None:
         script_path = script_dir / decompile.SCRIPT_FILENAME
         source = script_path.read_text(encoding="utf-8") if script_path.is_file() else ""
-        compile_result = mp.compile_script(source)
-        result.fatal_errors = _messages(compile_result.fatal_errors)
-        result.errors = _messages(compile_result.errors)
-        result.warnings = _messages(compile_result.warnings)
-        result.notices = _messages(compile_result.notices)
-        if not compile_result.success:
-            result.success = False
-            result.failure = "Megalo compile failed -- see .errors/.fatal_errors for details."
-            return result
+        # PROMPT.md: "we want to make sure when we compile or decompile a script it processes the
+        # code correctly ... i want a working compiler/decompiler we can rely on" -- confirmed by
+        # direct testing that mp.compile_script() is not a stable fixed point over its own
+        # decompile_script() output: recompiling the juggernaut fixture completely unedited changes
+        # 25 triggers/92 actions to 19/91 (a real, reproducible discrepancy, not a guess -- some
+        # ordinary nested-trigger blocks silently recompile as "inline" triggers instead, a
+        # non-configurable default the native compiler makes on its own -- see
+        # in_reach.app.rvt.megalo_compiler's own module docstring for the root cause and for the
+        # real, from-scratch compiler this reaches for below). `variant` was just loaded straight
+        # from init_gametype_bin, so its own script bytecode is already exactly correct -- if
+        # `source` hasn't actually changed since it was decompiled from this same base, skip
+        # recompiling it at all rather than re-deriving bytecode that's already sitting right there
+        # and risking a discrepancy like the one above for zero reason.
+        if source == decompile.normalize_script_text(variant.decompile_script()):
+            _logger.info(
+                "script unchanged since decompile for %s -- skipping recompile to avoid the "
+                "non-idempotent decompile/recompile round trip",
+                folder,
+            )
+        else:
+            try:
+                megalo_compiler.compile_script(rvt, variant, source)
+            except megalo_compiler.UnsupportedConstruct as exc:
+                _logger.info(
+                    "megalo_compiler doesn't cover this script yet (%s) -- falling back to the "
+                    "native compiler for %s",
+                    exc,
+                    folder,
+                )
+                # megalo_compiler may have already appended partially-built triggers before hitting
+                # the unsupported construct, and MultiplayerData has no way to remove/undo those --
+                # see its own module docstring. A genuinely fresh variant is the only safe recovery.
+                variant = rvt.load(str(variant_source_path))
+                mp = variant.multiplayer
+                content_header = variant.content_header
+                compile_result = mp.compile_script(source)
+                result.fatal_errors = _messages(compile_result.fatal_errors)
+                result.errors = _messages(compile_result.errors)
+                result.warnings = _messages(compile_result.warnings)
+                result.notices = _messages(compile_result.notices)
+                if not compile_result.success:
+                    result.success = False
+                    result.failure = "Megalo compile failed -- see .errors/.fatal_errors for details."
+                    return result
 
         # Order matters: the script must already be compiled (above) so its forge-label/
         # scripted-option/etc. counts exist before settings/script_settings reference them;

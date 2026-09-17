@@ -78,6 +78,17 @@ SCRIPT_SETTINGS_SCHEMA_FILENAME = "script_settings.schema.json"
 STRINGS_SCHEMA_FILENAME = "strings.schema.json"
 
 
+def normalize_script_text(text: str) -> str:
+    """``"\\r\\n"``/``"\\r"`` -> ``"\\n"`` -- applied to a decompiled script before it's ever
+    written to ``script/output.txt`` (see :func:`_decompile_into_project_in_process`'s own comment:
+    ``write_text()``'s default text-mode translation would otherwise double each ``"\\r\\n"`` into
+    ``"\\r\\r\\n"`` on Windows, PROMPT.md: "when it is generated it is has alternating blanks
+    lines"). Public (not module-private) since :mod:`~in_reach.app.rvt.compile` needs the exact same
+    normalization to compare a freshly re-``decompile_script()``'d string against that file's own
+    on-disk content -- see that module's own "skip recompiling an unchanged script" comment."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass
 class _Decompiled:
     game_settings: GameSettings
@@ -392,7 +403,7 @@ def _decompile_into_project_in_process(
     # "\r\r\n" on Windows, which reads back as two lines (a blank line after every real one, see
     # PROMPT.md: "when it is generated it is has alternating blanks lines"). Normalizing to a bare
     # "\n" first sidesteps that double-translation regardless of platform.
-    script_text = decompiled.script_text.replace("\r\n", "\n").replace("\r", "\n")
+    script_text = normalize_script_text(decompiled.script_text)
     (script_dir / SCRIPT_FILENAME).write_text(script_text, encoding="utf-8")
 
     _write_generated_files(
