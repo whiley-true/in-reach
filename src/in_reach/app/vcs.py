@@ -10,23 +10,30 @@ this history store itself and anything :func:`~in_reach.app.new_project.is_gener
 knows is disposable build output), so a snapshot always reflects exactly what a user would see in
 the Explorer right now.
 
-Two kinds of snapshot share one commit history rather than two parallel mechanisms:
+PROMPT.md (a later pass): "we also want our vcs functionality to better match vscode
+functionality[;] so we want to add committed changes and uncommitted changes ... committing changes
+should require a commit message[;] we want to remove the autosave entries in vcs history panel" --
+this superseded an earlier PROMPT.md pass's own "every change should be traceable (but not stamped
+explicitly)" design (the ``record_change``/anonymous ``"autosave"``-message commit this module used
+to make on every single file save, whether or not the user ever asked for a checkpoint there). That
+auto-commit-on-save mechanism is gone: nothing in this module creates a commit on its own any more
+except :func:`restore_snapshot` (whose own auto-generated ``"restored <sha>"`` message is real and
+descriptive, not the old anonymous ``"autosave"``) -- a save now just changes what
+:func:`uncommitted_changes` reports (a live diff against ``HEAD``, never itself written to the
+object store as a commit), matching how git/VSCode's own working tree behaves. Two kinds of *commit*
+share one history rather than two parallel mechanisms, both now requiring a real, non-empty message:
 
-- **Traceable** (PROMPT.md: "every change should be traceable (but not stamped explicitly)") --
-  :func:`record_change`, called on every file save. A plain, unlabelled commit; a no-op if nothing
-  on disk actually changed since the last snapshot (no empty commits).
-- **Stamped** (PROMPT.md: "ability for a user to stamp a release (which takes a 'commit
-  message')") -- :func:`stamp`, always creates a commit (even if nothing changed since the last
-  traceable one), carrying the user's own message. Stamps are told apart from traceable commits by
-  a literal ``"stamp: "`` message prefix rather than a separate sidecar status file -- the commit
-  log is already the one source of truth for "was this ever explicitly stamped," so there's nothing
-  else to keep in sync with it.
+- **Commit** (:func:`commit`) -- the everyday checkpoint, VSCode's own plain "Commit" action.
+- **Stamp** (:func:`stamp`, PROMPT.md: "ability for a user to stamp a release (which takes a 'commit
+  message')") -- an explicit release marker on top of the same history, told apart from an ordinary
+  commit by a literal ``"stamp: "`` message prefix rather than a separate sidecar status file (the
+  commit log is already the one source of truth for "was this ever explicitly stamped").
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dulwich.objects import Blob, Commit, Tree
@@ -42,7 +49,6 @@ DEFAULT_BRANCH = "main"
 
 _AUTHOR = b"in-reach <in-reach@local>"
 _STAMP_PREFIX = "stamp: "
-_AUTOSAVE_MESSAGE = "autosave"
 
 
 @dataclass
@@ -53,8 +59,18 @@ class Snapshot:
     message: str
     at: float
     #: The user's own message, with the ``"stamp: "`` prefix stripped -- ``None`` for a plain
-    #: traceable commit.
+    #: commit.
     stamp_message: str | None
+    #: Every parent commit's own sha (empty for the very first commit on a branch, more than one
+    #: entry only for a merge -- this shadow VCS never actually merges branches today, but the field
+    #: stays a list rather than ``str | None`` so :func:`graph_history`'s own topology data doesn't
+    #: need a second, differently-shaped type). Populated by :func:`graph_history`; plain
+    #: :func:`history` leaves it empty (its own callers only ever cared about one branch's own
+    #: linear order, never the DAG shape).
+    parents: list[str] = field(default_factory=list)
+    #: Every branch name whose tip is exactly this commit, if any -- also only ever populated by
+    #: :func:`graph_history`.
+    branches: list[str] = field(default_factory=list)
 
     @property
     def is_stamp(self) -> bool:
@@ -94,13 +110,13 @@ def init(folder: Path, *, stamp_message: str | None = None) -> None:
 
     Args:
         stamp_message: When given, the first snapshot is a real user-labelled stamp (this
-            module's own docstring on "Stamped" snapshots) carrying this message, rather than the
-            plain untraceable :data:`_AUTOSAVE_MESSAGE` every other caller gets. PROMPT.md: "when a
+            module's own docstring on "Stamped" commits) carrying this message. PROMPT.md: "when a
             gametype is innited it should be stamped with commit 'gametype init'" --
             :func:`~in_reach.app.new_project.create_gametype_project` passes ``"gametype init"``
-            here.
+            here, the only real caller -- every other caller gets a plain ``"Initial commit"``.
 
-    A no-op if ``folder`` already has a history repo (never re-initializes over one).
+    A no-op if ``folder`` already has a history repo (never re-initializes over one), or if there's
+    nothing to snapshot yet (an empty ``folder``) -- same "no empty commits" rule as :func:`commit`.
     """
     if is_initialized(folder):
         return
@@ -111,9 +127,12 @@ def init(folder: Path, *, stamp_message: str | None = None) -> None:
     # own DEFAULT_BRANCH so a fresh project's branch name doesn't quietly depend on dulwich's
     # default rather than this module's own documented one.
     repo.refs.set_symbolic_ref(b"HEAD", _branch_ref(DEFAULT_BRANCH))
-    message = f"{_STAMP_PREFIX}{stamp_message}" if stamp_message else _AUTOSAVE_MESSAGE
-    record_change(folder, message=message)
-    _logger.info("initialized shadow VCS history for %s", folder)
+    tree_sha = _build_tree(repo, _walk_files(folder))
+    if tree_sha is None:
+        return
+    message = f"{_STAMP_PREFIX}{stamp_message}" if stamp_message else "Initial commit"
+    sha = _commit(repo, tree_sha, message)
+    _logger.info("initialized shadow VCS history for %s (%s, %r)", folder, sha, message)
 
 
 def _should_skip(path: Path, folder: Path) -> bool:
@@ -318,36 +337,128 @@ def _checkout_tree(repo: Repo, tree_sha: bytes, folder: Path) -> None:
             pass  # not empty -- still in use
 
 
-def record_change(folder: Path, *, message: str = _AUTOSAVE_MESSAGE) -> str | None:
-    """Snapshots ``folder``'s current on-disk state as a plain, unlabelled commit (PROMPT.md:
-    "every change should be traceable (but not stamped explicitly)").
+@dataclass
+class UncommittedFile:
+    """One file that differs between the current on-disk working tree and ``HEAD`` -- VSCode-style
+    "uncommitted changes" (PROMPT.md: "we want to add committed changes and uncommitted
+    changes[;] when there are uncommitted changes in the repo there should be a notification icon
+    with the number of uncommitted changes")."""
 
-    A no-op (returns ``None``) if nothing has actually changed since the last snapshot, or if
-    ``folder`` has no history yet (:func:`init` was never called for it) -- callers that always
-    want a snapshot to exist regardless should call :func:`init` first.
+    path: str
+    #: ``"added"``, ``"removed"`` or ``"modified"`` -- same convention as :class:`FileDiff` below.
+    change_type: str
 
-    Returns:
-        The new commit's sha, or ``None`` if nothing changed / there's no history to record into.
+
+def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
+    """Every file that differs between ``folder``'s current on-disk state and its last commit
+    (``HEAD``), sorted by path -- what the Git panel's own uncommitted-changes badge counts, and
+    what :func:`commit` snapshots when called. Empty if ``folder`` has no history yet, or if the
+    working tree exactly matches ``HEAD`` (nothing uncommitted).
+
+    Building the comparison tree has the same side effect :func:`commit`/:func:`stamp` already have
+    (writing loose blob/tree objects into the shadow repo's own object store even when nothing ends
+    up committed) -- acceptable here for the same reason it already was there: this repo has no
+    working index/staging area of its own, so "what would a commit look like right now" can only
+    ever be answered by actually building that tree.
     """
     if not is_initialized(folder):
-        return None
+        return []
+    from dulwich.diff_tree import tree_changes
+
     repo = _open(folder)
-    tree_sha = _build_tree(repo, _walk_files(folder))
-    if tree_sha is None:
-        return None
     parent = _head_commit(repo)
-    if parent is not None and parent.tree == tree_sha:
-        return None
+    tree_sha = _build_tree(repo, _walk_files(folder))
+    if tree_sha == (parent.tree if parent is not None else None):
+        return []
+    changes = tree_changes(repo.object_store, parent.tree if parent is not None else None, tree_sha)
+    results = [
+        UncommittedFile(
+            path=(change.new or change.old).path.decode("utf-8"),
+            change_type={"add": "added", "delete": "removed"}.get(change.type, "modified"),
+        )
+        for change in changes
+    ]
+    return sorted(results, key=lambda f: f.path)
+
+
+def uncommitted_file_diff(folder: Path, rel_path: str) -> tuple[str | None, str | None]:
+    """``(old_text, new_text)`` for one uncommitted file (one of :func:`uncommitted_changes`' own
+    ``.path`` entries) -- what the Git panel's own side-by-side diff tab shows when a changed file
+    is clicked (PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should
+    appear showing the original on the left and highlighted changes on the right (like vscode
+    git)"). ``old_text`` is ``rel_path``'s own content at ``HEAD`` (``None`` for a newly added file,
+    which has no ``HEAD`` copy at all); ``new_text`` is its current on-disk content (``None`` for a
+    removed file, which no longer exists on disk at all). Either side is also ``None`` if it can't
+    be decoded as UTF-8 text (a binary file) -- the caller decides how to present that, same
+    "binary, not diffable as text" treatment :func:`diff`'s own ``FileDiff.diff_text`` gives it.
+
+    Both ``None`` if ``folder`` has no history yet, or if ``rel_path`` isn't actually uncommitted
+    (nothing to show) -- callers should already know this from :func:`uncommitted_changes` before
+    calling this at all, but this doesn't raise over a stale/wrong path regardless.
+    """
+    if not is_initialized(folder):
+        return None, None
+    repo = _open(folder)
+    parent = _head_commit(repo)
+    old_text = None
+    if parent is not None:
+        from dulwich.object_store import tree_lookup_path
+
+        try:
+            _mode, sha = tree_lookup_path(repo.object_store.__getitem__, parent.tree, rel_path.encode("utf-8"))
+        except KeyError:
+            old_text = None
+        else:
+            old_text = _decode_blob(repo, sha)
+    real_path = folder / rel_path
+    new_text = None
+    if real_path.is_file():
+        try:
+            new_text = real_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            new_text = None
+    # A git blob preserves whatever bytes were actually committed -- "\r\n" on a file this shadow
+    # VCS snapshotted from a Windows disk write, unlike Path.read_text()'s own universal-newlines
+    # decoding above (already always "\n"). Normalizing both sides the same way stops every single
+    # line reading as "changed" purely over a line-ending difference nobody actually made -- same
+    # reasoning/technique as in_reach.app.rvt.decompile.normalize_script_text.
+    if old_text is not None:
+        old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
+    if new_text is not None:
+        new_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
+    return old_text, new_text
+
+
+def commit(folder: Path, message: str) -> str:
+    """Snapshots ``folder``'s current on-disk state as a plain, user-authored checkpoint (PROMPT.md:
+    "committing changes should require a commit message") -- the everyday counterpart to
+    :func:`stamp`; see this module's own docstring for what tells the two apart.
+
+    Raises:
+        ValueError: ``message`` is empty, ``folder`` has no history yet, or there's nothing
+            uncommitted to commit (the working tree already matches ``HEAD`` -- same "no empty
+            commits" rule :func:`uncommitted_changes` itself uses to report "nothing changed").
+    """
+    if not message.strip():
+        raise ValueError("A commit needs a commit message.")
+    if not is_initialized(folder):
+        raise ValueError("This project has no history yet.")
+    repo = _open(folder)
+    parent = _head_commit(repo)
+    tree_sha = _build_tree(repo, _walk_files(folder))
+    if tree_sha is None or tree_sha == (parent.tree if parent is not None else None):
+        raise ValueError("Nothing to commit -- the working tree matches the last commit.")
     sha = _commit(repo, tree_sha, message)
-    _logger.debug("recorded change %s in %s (%r)", sha, folder, message)
+    _logger.info("committed %s in %s (%r)", sha, folder, message)
     return sha
 
 
 def stamp(folder: Path, message: str) -> str:
     """Snapshots ``folder``'s current on-disk state as a user-labelled release (PROMPT.md:
     "ability for a user to stamp a release (which takes a 'commit message')") -- always creates a
-    commit, even if nothing changed since the last traceable snapshot, so a stamp always has its
-    own addressable point in history to switch back to later.
+    commit, even if nothing changed since the last one, so a stamp always has its own addressable
+    point in history to switch back to later regardless of whether anything was actually edited
+    since (see :func:`commit`'s own docstring for the everyday, change-required counterpart).
 
     Raises:
         ValueError: ``message`` is empty, or ``folder`` has no history yet.
@@ -368,10 +479,17 @@ def stamp(folder: Path, message: str) -> str:
     return sha
 
 
-def _to_snapshot(commit: Commit) -> Snapshot:
-    text = commit.message.decode("utf-8")
+def _to_snapshot(commit_obj: Commit, *, parents: list[str] = (), branches: list[str] = ()) -> Snapshot:
+    text = commit_obj.message.decode("utf-8")
     stamp_message = text[len(_STAMP_PREFIX):] if text.startswith(_STAMP_PREFIX) else None
-    return Snapshot(sha=commit.id.decode("ascii"), message=text, at=commit.commit_time, stamp_message=stamp_message)
+    return Snapshot(
+        sha=commit_obj.id.decode("ascii"),
+        message=text,
+        at=commit_obj.commit_time,
+        stamp_message=stamp_message,
+        parents=list(parents),
+        branches=list(branches),
+    )
 
 
 def history(folder: Path) -> list[Snapshot]:
@@ -384,8 +502,42 @@ def history(folder: Path) -> list[Snapshot]:
     return [_to_snapshot(entry.commit) for entry in repo.get_walker()]
 
 
+def graph_history(folder: Path) -> list[Snapshot]:
+    """Every snapshot across *every* branch, newest first, each with :attr:`Snapshot.parents`/
+    :attr:`Snapshot.branches` populated -- what the Git panel's own commit-graph widget lays out
+    into lanes (PROMPT.md: "show a git graph of commits, branches and stamps instead in vscode
+    style"). :func:`history` stays the plain "current branch's own linear order" reader every
+    pre-graph caller already used (comparing/restoring a snapshot doesn't care about the full DAG),
+    so this is additive, not a replacement.
+    """
+    if not is_initialized(folder):
+        return []
+    repo = _open(folder)
+    # More than one branch can share a tip (e.g. right after create_branch(), before either one has
+    # its own new commit) -- a plain dict[sha, name] would silently drop every branch but the last
+    # one seen for that sha, so this is dict[sha, list[name]] instead.
+    branch_tips: dict[bytes, list[str]] = {}
+    prefix = b"refs/heads/"
+    for ref in repo.refs.allkeys():
+        if ref.startswith(prefix):
+            branch_tips.setdefault(repo.refs[ref], []).append(ref[len(prefix):].decode("utf-8"))
+    if not branch_tips:
+        return []
+    snapshots = []
+    for entry in repo.get_walker(include=list(branch_tips.keys())):
+        commit_obj = entry.commit
+        snapshots.append(
+            _to_snapshot(
+                commit_obj,
+                parents=[p.decode("ascii") for p in commit_obj.parents],
+                branches=branch_tips.get(commit_obj.id, []),
+            )
+        )
+    return snapshots
+
+
 def last_saved_at(folder: Path) -> float | None:
-    """When the most recent snapshot (traceable or stamped) was taken, or ``None``."""
+    """When the most recent commit (plain or stamped) was made, or ``None``."""
     if not is_initialized(folder):
         return None
     commit = _head_commit(_open(folder))
@@ -501,11 +653,14 @@ def diff(folder: Path, ref_a: str, ref_b: str) -> list[FileDiff]:
 
 def restore_snapshot(folder: Path, sha: str) -> None:
     """Restores the project's files on disk to match a specific past snapshot -- any stamp or
-    traceable commit, on any branch -- without switching branches (PROMPT.md: "add any other
+    plain commit, on any branch -- without switching branches (PROMPT.md: "add any other
     functionality you think may help the user manage the project using vcs"; pairs with comparing
     stamped versions -- see something you like in an old stamp, restore it). Nothing already
-    committed is ever lost: the restore itself is immediately recorded as a new traceable snapshot
-    on the *current* branch, so history only ever gains an entry, never rewrites one.
+    committed is ever lost: the restore itself is immediately recorded as a new commit on the
+    *current* branch (a real, descriptive, auto-generated message -- not the old anonymous
+    ``"autosave"`` this module used to stamp every plain commit with), so history only ever gains an
+    entry, never rewrites one. A no-op commit-wise if ``sha`` already matches the current branch's
+    own ``HEAD`` (nothing actually changes on disk either, in that case).
 
     This overwrites/deletes real files on disk -- same caller responsibility as
     :func:`switch_branch`'s own docstring.
@@ -517,9 +672,14 @@ def restore_snapshot(folder: Path, sha: str) -> None:
     if not _looks_like_sha(sha):
         raise ValueError(f'Unknown snapshot: "{sha}".')
     try:
-        commit = repo.object_store[sha.encode("ascii")]
+        commit_obj = repo.object_store[sha.encode("ascii")]
     except KeyError as exc:
         raise ValueError(f'Unknown snapshot: "{sha}".') from exc
-    _checkout_tree(repo, commit.tree, folder)
-    record_change(folder, message=f"restored {sha[:8]}")
-    _logger.info("restored snapshot %s in %s", sha, folder)
+    _checkout_tree(repo, commit_obj.tree, folder)
+    tree_sha = _build_tree(repo, _walk_files(folder))
+    parent = _head_commit(repo)
+    if tree_sha is not None and tree_sha != (parent.tree if parent is not None else None):
+        new_sha = _commit(repo, tree_sha, f"Restored {sha[:8]}")
+        _logger.info("restored snapshot %s in %s (new commit %s)", sha, folder, new_sha)
+    else:
+        _logger.info("restored snapshot %s in %s (already matches HEAD)", sha, folder)

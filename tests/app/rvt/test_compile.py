@@ -139,6 +139,103 @@ def test_run_compile_against_a_blank_firefight_project(tmp_path: Path) -> None:
     assert result.output_path.is_file()
 
 
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
+def test_run_compile_applies_edited_firefight_settings(tmp_path: Path) -> None:
+    """Regression guard for the bug this test's own edits reproduce without
+    settings_writer.apply_firefight_settings(): a Firefight project's own settings.json edits used
+    to never reach the compiled .bin at all (compile.py's own Firefight branch only ever called
+    apply_meta_header()), so the very next Apply's own build/dist/*.bin resync
+    (in_reach.app.rvt.decompile.resync_from_bin, wired to MainWindow's own bin-file-watcher) would
+    silently overwrite settings/settings.json right back to the *unedited* values -- confirmed by
+    direct reproduction (edit firefight.wave_limit, compile, re-decompile the output -- it came back
+    unchanged) before apply_firefight_settings() existed.
+
+    Covers one representative field from each writable subsection (scenario flags/scalars, base
+    traits, elite respawn options, the general/respawn/social/map/team/loadout options tree, round
+    skulls, custom skulls, bonus wave skulls) -- NOT wave.squads, see the next test for why.
+    """
+    from in_reach.app.rvt.decompile import decompile_into_project
+
+    blank_ff = resolve_blank_variant(firefight=True)
+    project_dir, folder = _project(tmp_path, source_variant=blank_ff)
+    settings_path = folder / "settings" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    ff = settings["firefight"]
+
+    ff["hazards_enabled"] = True
+    ff["wave_limit"] = 42
+    ff["bonus_target"] = 12345
+    ff["starting_lives_spartan"] = 7
+    ff["base_traits_spartan"]["defense"]["vampirism"] = "value_050"
+    ff["base_traits_wave"]["vision"] = "eagle_eye"
+    ff["elite_respawn_options"]["lives_per_round"] = 9
+    ff["options"]["general_settings"]["time_limit"] = 15
+    ff["options"]["respawn_settings"]["respawn_time"] = 6
+    ff["options"]["social_settings"]["friendly_fire"] = True
+    ff["options"]["map_and_game_settings"]["grenades"] = False
+    ff["options"]["team_settings"]["teams"][0]["color_primary"] = 3
+    ff["options"]["loadout_settings"]["spartan_loadouts_enabled"] = True
+    ff["rounds"][0]["skulls"]["iron"] = True
+    ff["custom_skulls"][0]["traits_spartan"]["defense"]["headshot_immune"] = "enabled"
+    ff["bonus_wave_skulls"]["famine"] = True
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+    assert result.success is True, compile_module.format_build_result(result)
+
+    compare_folder = tmp_path / "compare"
+    compare_folder.mkdir()
+    decompile_into_project(result.output_path, compare_folder)
+    after = json.loads((compare_folder / "settings" / "settings.json").read_text(encoding="utf-8"))["firefight"]
+
+    assert after["hazards_enabled"] is True
+    assert after["wave_limit"] == 42
+    assert after["bonus_target"] == 12345
+    assert after["starting_lives_spartan"] == 7
+    assert after["base_traits_spartan"]["defense"]["vampirism"] == "value_050"
+    assert after["base_traits_wave"]["vision"] == "eagle_eye"
+    assert after["elite_respawn_options"]["lives_per_round"] == 9
+    assert after["options"]["general_settings"]["time_limit"] == 15
+    assert after["options"]["respawn_settings"]["respawn_time"] == 6
+    assert after["options"]["social_settings"]["friendly_fire"] is True
+    assert after["options"]["map_and_game_settings"]["grenades"] is False
+    assert after["options"]["team_settings"]["teams"][0]["color_primary"] == 3
+    assert after["options"]["loadout_settings"]["spartan_loadouts_enabled"] is True
+    assert after["rounds"][0]["skulls"]["iron"] is True
+    assert after["custom_skulls"][0]["traits_spartan"]["defense"]["headshot_immune"] == "enabled"
+    assert after["bonus_wave_skulls"]["famine"] is True
+
+
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
+def test_run_compile_cannot_apply_firefight_wave_squads(tmp_path: Path) -> None:
+    """Documents the one known gap in apply_firefight_settings() (see its own docstring): the
+    bundled _reachvarianttool extension exposes FirefightWave.squad(i) as read-only (no setter
+    exists in the native bindings at all), so an edited squad list currently has no effect on
+    compile -- unlike every other firefight field, which test_run_compile_applies_edited_firefight_
+    settings confirms does apply. This is a regression guard the *other* direction: if a future
+    native-extension update adds a squad setter and nobody notices, this starts failing (the output
+    would then actually match the edit) as a prompt to also update apply_firefight_settings()."""
+    from in_reach.app.rvt.decompile import decompile_into_project
+
+    blank_ff = resolve_blank_variant(firefight=True)
+    project_dir, folder = _project(tmp_path, source_variant=blank_ff)
+    settings_path = folder / "settings" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    original_squads = settings["firefight"]["rounds"][0]["wave_initial"]["squads"]
+    settings["firefight"]["rounds"][0]["wave_initial"]["squads"] = ["brutes"] * len(original_squads)
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    result = compile_module.run_compile(project_dir, folder, save=True)
+    assert result.success is True, compile_module.format_build_result(result)
+
+    compare_folder = tmp_path / "compare"
+    compare_folder.mkdir()
+    decompile_into_project(result.output_path, compare_folder)
+    after = json.loads((compare_folder / "settings" / "settings.json").read_text(encoding="utf-8"))
+
+    assert after["firefight"]["rounds"][0]["wave_initial"]["squads"] == original_squads
+
+
 @_NEEDS_NATIVE_RVT
 def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(tmp_path: Path) -> None:
     """The strongest available correctness signal for settings_writer.py/strings_writer.py's own
@@ -186,6 +283,33 @@ def test_run_compile_round_trips_multiplayer_game_settings_and_script_settings(t
     before_script_settings.pop("$schema", None)
     after_script_settings.pop("$schema", None)
     assert before_script_settings == after_script_settings
+
+
+@_NEEDS_NATIVE_RVT
+def test_run_compile_does_not_re_stamp_meta_generated_at(tmp_path: Path) -> None:
+    """PROMPT.md: "we want to update our compiling process so it no longers updates a game's
+    created at ... this is because every compile was updating this value and causing git changes[;]
+    instead created at and modified at should be set to the same value of when the gametype was
+    created in in-reach" -- traced to settings/settings.json's own meta.generated_at, which
+    extraction.py's _extract_meta() always stamps fresh with datetime.now() on its own; compile.py's
+    own write_build_snapshot() call now reads this project's already-established value back via
+    settings_io.load_meta_generated_at() and carries it forward instead, so two real compiles of the
+    same project produce the exact same build/settings.autogenerated.json meta.generated_at rather
+    than a fresh one every time (a real, VCS-tracked-churn bug once settings/settings.json itself
+    gets resynced from the same freshly-compiled .bin, see test_decompile.py's own
+    test_resync_from_bin_carries_generated_at_through for that other half)."""
+    import time
+
+    project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
+    build_settings_path = folder / "build" / "settings.autogenerated.json"
+    before = json.loads(build_settings_path.read_text(encoding="utf-8"))["meta"]["generated_at"]
+
+    time.sleep(1.1)
+    result = compile_module.run_compile(project_dir, folder, save=True)
+    assert result.success is True, compile_module.format_build_result(result)
+
+    after = json.loads(build_settings_path.read_text(encoding="utf-8"))["meta"]["generated_at"]
+    assert after == before
 
 
 @_NEEDS_NATIVE_RVT

@@ -1534,6 +1534,79 @@ def test_open_file_reports_an_unreadable_file_rather_than_raising(
     assert pane.count() == before
 
 
+# -- open_diff (PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should
+# appear showing the original on the left and highlighted changes on the right (like vscode git)")
+
+def test_open_diff_adds_a_diff_view_tab(window: MainWindow) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_diff("settings/settings.json", old_text="a\n", new_text="b\n")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "settings/settings.json"
+    assert pane.tabText(index) == "settings.json (diff)"
+    assert widget.old_pane.toPlainText() == "a"
+    assert widget.new_pane.toPlainText() == "b"
+
+
+def test_open_diff_switches_to_an_already_open_diff_tab_instead_of_duplicating(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert pane.count() == before
+
+
+def test_open_diff_refreshes_an_already_open_tabs_content(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    pane.open_diff("Notes.txt", old_text="x\n", new_text="y\n")
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.old_pane.toPlainText() == "x"
+    assert widget.new_pane.toPlainText() == "y"
+
+
+def test_open_diff_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
+def test_open_diff_does_not_collide_with_open_file_for_the_same_path(window: MainWindow, tmp_path: Path) -> None:
+    # A diff tab must never be mistaken for the real, editable file at the same path -- clicking
+    # the real file in the Explorer should always land on the real editable tab, not the read-only
+    # diff view, even if the diff tab happens to sit earlier in the pane.
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.txt"
+    source.write_text("hi\n", encoding="utf-8")
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="hi\n")
+
+    pane.open_file(source)
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert pane._tab_state_for(widget).path == source
+
+
+def test_open_diff_is_not_included_in_dirty_tab_names_under(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert window.main_panel.dirty_tab_names_under(tmp_path) == []
+
+
 def test_close_current_closes_the_active_tab(window: MainWindow) -> None:
     pane = window.main_panel.panes[0]
     before = pane.count()

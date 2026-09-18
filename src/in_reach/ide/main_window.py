@@ -676,12 +676,14 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
         self.explorer_panel.active_project_changed.connect(self._persist_active_project)
         self.explorer_panel.project_closed.connect(self._close_rvt_for_project)
+        self.git_panel.commit_requested.connect(self.vcs_commit)
         self.git_panel.stamp_requested.connect(self.vcs_stamp)
         self.git_panel.new_branch_requested.connect(self.vcs_new_branch)
         self.git_panel.switch_branch_requested.connect(self.vcs_switch_branch)
         self.git_panel.delete_branch_requested.connect(self.vcs_delete_branch)
         self.git_panel.compare_requested.connect(self.vcs_compare)
         self.git_panel.restore_requested.connect(self.vcs_restore)
+        self.git_panel.diff_file_requested.connect(self.vcs_open_diff)
         # PROMPT.md: "1 per window" -- initial_project (see __init__'s own docstring) wins over
         # whatever's persisted; otherwise restore the one project PROJECT_DIR_KEY last had open,
         # the same key every gametype-project creation already writes (see
@@ -1013,6 +1015,7 @@ class MainWindow(QWidget):
                     Command(label="Markdown (.md)", action=lambda: self._set_notes_format(notes_settings.FORMAT_MD)),
                 ],
             ),
+            Command(label="Commit", action=self._vcs_commit_via_dialog),
             Command(label="Stamp Release", action=self._vcs_stamp_via_dialog),
             Command(label="New Branch", action=self._vcs_new_branch_via_dialog),
             Command(
@@ -1084,6 +1087,13 @@ class MainWindow(QWidget):
                 if snapshot.is_stamp
             ]
         return refs
+
+    def _vcs_commit_via_dialog(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        message, ok = QInputDialog.getText(self, "Commit", "Commit message:")
+        if ok and message.strip():
+            self.vcs_commit(message.strip())
 
     def _vcs_stamp_via_dialog(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -1721,29 +1731,44 @@ class MainWindow(QWidget):
         just always re-check on any save rather than filtering to paths under ``settings/`` first;
         the check itself is a handful of small-file reads.
 
-        Also takes a traceable VCS snapshot of the active project (PROMPT.md: "every change should
-        be traceable (but not stamped explicitly)") -- a no-op if nothing actually changed on disk
-        since the last snapshot, or if the project has no history yet (see :func:`in_reach.app.vcs.
-        record_change`)."""
+        Also refreshes the VCS status (branch/uncommitted-count badge, Git panel) -- a save now just
+        changes what :func:`~in_reach.app.vcs.uncommitted_changes` reports, it doesn't create a
+        commit on its own any more (PROMPT.md, a later VSCode-style pass: "we want to remove the
+        autosave entries in vcs history panel" -- superseding this method's own earlier
+        ``vcs.record_change()`` call, see :mod:`in_reach.app.vcs`'s own module docstring for the
+        full history)."""
         folder = self.explorer_panel.current_folder
         self._refresh_apply_enabled(folder)
         if folder is not None:
-            from in_reach.app import vcs
-
-            vcs.record_change(folder)
             self._refresh_vcs_status(folder)
 
     # -- VCS panel (PROMPT.md: "vcs panel and dulwich implementation") --------------------------
 
     def _refresh_vcs_status(self, folder: Path | None) -> None:
-        """Refreshes (or hides) the bottom-left "<branch> - <last stamped> - <last saved>" segment
-        to match ``folder``'s own VCS history -- called whenever the active project changes and
-        after any action that adds to that history (a save, a stamp, a new/switched branch)."""
+        """Refreshes (or hides) the bottom-left "<branch> - <last stamped> - <last saved>" segment,
+        the activity bar's own git-icon uncommitted-count badge, and the Git panel itself (its
+        "Changes" list/commit button/graph), to match ``folder``'s own VCS state -- called whenever
+        the active project changes and after any action that could change any of them (a save, a
+        commit, a stamp, a new/switched branch).
+
+        Folding the panel's own ``refresh()`` in here (rather than leaving every call site to
+        remember both) fixed a real, confirmed bug: :meth:`_on_file_saved`/the RVT-resync watcher
+        only ever called this method, never ``self.git_panel.refresh()`` directly -- so the
+        activity-bar badge and status-bar segment updated the instant a file was saved, but the
+        panel's own "Changes" list stayed empty/stale until some *other* action (a new branch, a
+        switch, ...) happened to call ``git_panel.refresh()`` for an unrelated reason. A save is by
+        far the most common way uncommitted changes appear at all, so this was the normal case, not
+        an edge case.
+        """
         from in_reach.app import vcs
 
         if folder is None or not vcs.is_initialized(folder):
             self.status_bar.clear_vcs_status()
+            self.activity_bar.set_git_badge_count(0)
+            self.git_panel.refresh()
             return
+        self.activity_bar.set_git_badge_count(len(vcs.uncommitted_changes(folder)))
+        self.git_panel.refresh()
         branch = vcs.current_branch(folder) or "?"
         last_stamp = vcs.last_stamp(folder)
         stamp_text = last_stamp.stamp_message if last_stamp is not None else None
@@ -1772,6 +1797,24 @@ class MainWindow(QWidget):
         days = hours // 24
         return f"{days} day{'s' if days != 1 else ''} ago"
 
+    def vcs_commit(self, message: str) -> None:
+        """"Commit" (the Git panel's own inline message box + button) -- PROMPT.md: "committing
+        changes should require a commit message" -- the everyday checkpoint action, distinct from
+        :meth:`vcs_stamp` below. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.commit(folder, message)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("committed %r for %s", message, folder)
+        self.git_panel.clear_commit_message()
+        self._refresh_vcs_status(folder)
+
     def vcs_stamp(self, message: str) -> None:
         """"Stamp Release" (the Git panel's own button) -- PROMPT.md: "ability for a user to stamp
         a release (which takes a 'commit message')". A no-op with no project open."""
@@ -1786,7 +1829,6 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", str(exc))
             return
         _logger.info("stamped release %r for %s", message, folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def vcs_new_branch(self, name: str) -> None:
@@ -1803,18 +1845,20 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", str(exc))
             return
         _logger.info("created branch %r for %s", name, folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def vcs_switch_branch(self, name: str) -> None:
         """Switching branches (the Git panel's own branch combo, PROMPT.md: "it should be possible
         ... to change and switch versions/branches") overwrites/deletes real files on disk to match
         the target branch's own last snapshot -- refuses outright if that would blow away an
-        open tab's own unsaved edits (same "warn, don't silently clobber" treatment as an RVT
-        resync, see :meth:`_confirm_overwrite_rvt_changes`), and snapshots the project's current
-        state first so anything already saved to disk is never actually lost from history even
-        though the working files themselves are about to change. Reloads every open tab under this
-        project afterward so nothing already open goes stale."""
+        open tab's own unsaved *editor* edits (same "warn, don't silently clobber" treatment as an
+        RVT resync, see :meth:`_confirm_overwrite_rvt_changes`), then separately -- PROMPT.md, the
+        VSCode-style VCS pass: removing the old silent ``vcs.record_change()`` safety-snapshot this
+        used to take here -- warns about any *uncommitted VCS* changes (files already saved to disk
+        but never committed) and lets the user cancel, commit them first, or explicitly discard them
+        and switch anyway (see :meth:`_confirm_uncommitted_before_switch`), rather than silently
+        folding them into an anonymous commit the way this method used to. Reloads every open tab
+        under this project afterward so nothing already open goes stale."""
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
@@ -1823,7 +1867,23 @@ class MainWindow(QWidget):
             return
         from in_reach.app import vcs
 
-        vcs.record_change(folder)
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return  # backed out of the message prompt -- treat the whole switch as cancelled
+                try:
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to switch_branch() below, which overwrites/deletes
+            # exactly these uncommitted files on disk -- that overwrite *is* the discard.
+
         try:
             vcs.switch_branch(folder, name)
         except ValueError as exc:
@@ -1831,12 +1891,11 @@ class MainWindow(QWidget):
             return
         _logger.info("switched to branch %r for %s", name, folder)
         self.main_panel.reload_open_tabs_under(folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def _confirm_switch_branch_overwrite(self, dirty_names: list[str]) -> bool:
-        """Asks whether to proceed with a branch switch that would overwrite unsaved edits in
-        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        """Asks whether to proceed with a branch switch that would overwrite unsaved *editor* edits
+        in ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
         :meth:`_confirm_overwrite_rvt_changes`.
 
         Returns:
@@ -1855,6 +1914,44 @@ class MainWindow(QWidget):
         box.exec()
         return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
 
+    def _confirm_uncommitted_before_switch(self, paths: list[str]) -> str:
+        """Asks what to do about ``paths`` (already saved to disk, but never committed) before a
+        branch switch would silently overwrite them -- kept as its own method purely as a test seam,
+        same reasoning as :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``"cancel"``, ``"commit"`` (commit them first, then switch), or ``"discard"`` (switch
+            anyway, letting :func:`~in_reach.app.vcs.switch_branch` overwrite them).
+        """
+        joined = "\n".join(paths)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "You have uncommitted changes in the following files:\n\n"
+            f"{joined}\n\nSwitching branches will overwrite them. Commit first, discard and switch, "
+            "or cancel?"
+        )
+        commit_button = box.addButton("Commit First", QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton("Discard && Switch", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(commit_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is commit_button:
+            return "commit"
+        if clicked is discard_button:
+            return "discard"
+        return "cancel"
+
+    def _ask_commit_message(self) -> str:
+        """Kept as its own method purely as a test seam, same reasoning as
+        :meth:`~in_reach.ide.git_panel.GitPanel._ask_text`."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        text, ok = QInputDialog.getText(self, "Commit", "Commit message:")
+        return text.strip() if ok else ""
+
     def vcs_delete_branch(self, name: str) -> None:
         """"Delete Branch" (the Git panel's own button, PROMPT.md: "add any other functionality
         you think may help the user manage the project using vcs") -- reports a refusal (the
@@ -1871,7 +1968,6 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", str(exc))
             return
         _logger.info("deleted branch %r for %s", name, folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def _vcs_ref_label(self, folder: Path, ref: str) -> str:
@@ -1906,6 +2002,20 @@ class MainWindow(QWidget):
         dialog = DiffDialog(self, title=title, diffs=diffs)
         dialog.exec()
 
+    def vcs_open_diff(self, rel_path: str) -> None:
+        """A file clicked in the Git panel's own "Changes" list -- PROMPT.md: "when clicking on
+        changes to a file (in the changes tab) a tab should appear showing the original on the
+        left and highlighted changes on the right (like vscode git)". Opens (or refreshes/switches
+        to, if already open) a :class:`~in_reach.ide.diff_view.DiffViewWidget` tab for ``rel_path``'s
+        own uncommitted change, in the currently active pane. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        old_text, new_text = vcs.uncommitted_file_diff(folder, rel_path)
+        self.main_panel.active_pane.open_diff(rel_path, old_text=old_text, new_text=new_text)
+
     def vcs_restore(self, sha: str) -> None:
         """"Restore Selected" (the Git panel's own history list, PROMPT.md: "add any other
         functionality you think may help the user manage the project using vcs") -- brings the
@@ -1928,7 +2038,6 @@ class MainWindow(QWidget):
             return
         _logger.info("restored snapshot %s for %s", sha, folder)
         self.main_panel.reload_open_tabs_under(folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def _confirm_restore_overwrite(self, dirty_names: list[str]) -> bool:
@@ -2241,6 +2350,7 @@ class MainWindow(QWidget):
             if not dirty_names or self._confirm_overwrite_rvt_changes(dirty_names):
                 settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
                 category, category_icon = settings_io.load_meta_category(settings_path)
+                created_at = settings_io.load_meta_generated_at(settings_path)
                 map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
                 try:
                     resync_from_bin(
@@ -2248,6 +2358,7 @@ class MainWindow(QWidget):
                         folder,
                         category=category,
                         category_icon=category_icon,
+                        created_at=created_at,
                         map_entries=map_entries,
                     )
                 except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
@@ -2258,12 +2369,10 @@ class MainWindow(QWidget):
                     # PROMPT.md: "please also add a stats view into the dashboard" -- this resync
                     # just regenerated build/stats.autogenerated.json too.
                     self.explorer_panel.refresh_stats()
-                    # PROMPT.md: "every change should be traceable" -- RVT overwriting settings/
-                    # directly (outside the normal in-app save path _on_file_saved already covers)
-                    # is still a real change to the project's own tracked files.
-                    from in_reach.app import vcs
-
-                    vcs.record_change(folder)
+                    # RVT overwriting settings/ directly (outside the normal in-app save path
+                    # _on_file_saved already covers) is still a real change to the project's own
+                    # tracked files -- refreshes the uncommitted-changes badge/status the same way a
+                    # save does, no longer auto-commits it (see _on_file_saved's own docstring).
                     self._refresh_vcs_status(folder)
         # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
         # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so

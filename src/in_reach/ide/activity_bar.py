@@ -28,8 +28,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QMimeData, QObject, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QDrag, QMouseEvent
+from PyQt6.QtCore import QEvent, QMimeData, QObject, QPoint, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QDrag, QFont, QMouseEvent, QPainter
 from PyQt6.QtWidgets import (
     QApplication,
     QLayout,
@@ -101,10 +101,56 @@ ORDER_ENV_KEY = "ACTIVITY_BAR_ORDER"
 _REORDER_MIME = "application/x-inreach-activitybar-icon"
 
 
+#: PROMPT.md (the VSCode-style VCS pass): "when there are uncommitted changes in the repo there
+#: should be a notification icon with the number of uncommitted changes" -- same red-badge-with-a-
+#: count convention as VSCode's own Source Control activity-bar icon.
+_BADGE_COLOR = "#C5342B"
+_BADGE_TEXT_COLOR = "#FFFFFF"
+_BADGE_DIAMETER = 16
+
+
+class _BadgeToolButton(QToolButton):
+    """A plain :class:`QToolButton` that can also paint a small numbered badge in its
+    bottom-right corner -- used only by :attr:`ActivityBar.git_button`. Painting the badge as part
+    of the button's own ``paintEvent`` (rather than a separately positioned sibling widget) means it
+    automatically follows the button wherever it's actually rendered, with zero extra coordination
+    needed -- including inside the reorderable strip's own overflow "..." popout, which this bar's
+    icons can end up in and out of at any time (see :class:`_IconStrip`'s own docstring)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._badge_count = 0
+
+    def set_badge_count(self, count: int) -> None:
+        if count != self._badge_count:
+            self._badge_count = max(0, count)
+            self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001 -- QPaintEvent
+        super().paintEvent(event)
+        if self._badge_count <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        diameter = _BADGE_DIAMETER
+        rect = QRectF(self.width() - diameter - 2, self.height() - diameter - 2, diameter, diameter)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(_BADGE_COLOR))
+        painter.drawEllipse(rect)
+        painter.setPen(QColor(_BADGE_TEXT_COLOR))
+        font = QFont(painter.font())
+        font.setPixelSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        text = str(self._badge_count) if self._badge_count < 100 else "99+"
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+
+
 def _bar_button(
-    icon_name: str, tooltip: str, *, checkable: bool = False, checked: bool = False
+    icon_name: str, tooltip: str, *, checkable: bool = False, checked: bool = False, cls: type = QToolButton
 ) -> QToolButton:
-    button = QToolButton()
+    button = cls()
     button.setIcon(icons.icon(icon_name, color=_ICON_COLOR, size=_ICON_SIZE))
     button.setIconSize(button.iconSize())
     button.setToolTip(tooltip)
@@ -513,7 +559,9 @@ class ActivityBar(QWidget):
         # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a dulwich
         # gui))" -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder
         # view behind it (see MainWindow's own GitPanel wiring).
-        self.git_button = _bar_button("git", "Git (toggle primary sidebar)", checkable=True, checked=False)
+        self.git_button = _bar_button(
+            "git", "Git (toggle primary sidebar)", checkable=True, checked=False, cls=_BadgeToolButton
+        )
         self.git_button.clicked.connect(lambda: self._handle_click("git"))
 
         # PROMPT.md: "a bookshelf with the label Scripts (also stubbed for now)".
@@ -672,6 +720,15 @@ class ActivityBar(QWidget):
         self._apply_enabled = enabled
         self.apply_button.setEnabled(enabled)
         self.apply_button.setIcon(icons.apply_icon(_ICON_COLOR, round(_ICON_SIZE * self._icon_scale), enabled=enabled))
+
+    # -- Git uncommitted-changes badge (PROMPT.md: "when there are uncommitted changes in the repo
+    # there should be a notification icon with the number of uncommitted changes") ----------------
+
+    def set_git_badge_count(self, count: int) -> None:
+        """Shows (or hides, for ``0``) a small numbered badge on :attr:`git_button` -- how many
+        files the active project currently has uncommitted (see ``MainWindow._refresh_vcs_status``,
+        which reads this from :func:`~in_reach.app.vcs.uncommitted_changes`)."""
+        self.git_button.set_badge_count(count)
 
     # -- Halo install/running status -----------------------------------------------------------------
 

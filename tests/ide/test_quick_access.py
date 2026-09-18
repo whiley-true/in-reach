@@ -370,6 +370,7 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Set UI Scale",
         "Open Notes",
         "Set Notes Format",
+        "Commit",
         "Stamp Release",
         "New Branch",
         "Switch Branch",

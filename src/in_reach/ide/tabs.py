@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app.new_project import is_generated_file
 from in_reach.ide import file_dialogs, icons, schema_check, style
+from in_reach.ide.diff_view import DiffViewWidget
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.markdown_preview import MarkdownPreviewWidget
@@ -610,6 +611,40 @@ class TabPane(QTabWidget):
         else:
             new_index = self.addTab(widget, path.name)
         self._track_tab(new_index, widget, state=_TabState(path=path))
+        self.setCurrentIndex(new_index)
+
+    def open_diff(self, rel_path: str, *, old_text: str | None, new_text: str | None) -> None:
+        """Opens (or refreshes and switches to, if already open) a side-by-side
+        :class:`~in_reach.ide.diff_view.DiffViewWidget` tab for ``rel_path``'s own uncommitted
+        change -- PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should
+        appear showing the original on the left and highlighted changes on the right (like vscode
+        git)". Called by ``MainWindow.vcs_open_diff`` whenever a file is clicked in the Git panel's
+        own "Changes" list.
+
+        Tracked with ``_TabState(path=None)`` deliberately, unlike :meth:`open_file` -- a diff view
+        isn't the real file itself (giving it that same :class:`Path` would make this method's own
+        dedup below collide with :meth:`open_file`'s: clicking ``rel_path`` in the Explorer while
+        its diff tab happens to sit earlier in this pane would silently land on the read-only diff
+        instead of the real editable file). Matched by :attr:`~in_reach.ide.diff_view.
+        DiffViewWidget.rel_path` instead, a plain widget attribute :meth:`open_file` never looks at,
+        so the two can never step on each other.
+
+        Always refreshes an already-open tab's own content before switching to it (unlike
+        ``open_file``'s ``force_reload``, which defaults to leaving a re-opened file's stale
+        content alone) -- an uncommitted change is live working-tree state, stale the moment
+        anything else touches the file, so there's no "intentionally frozen" reading to preserve
+        the way there is for `force_reload`'s own default.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, DiffViewWidget) and widget.rel_path == rel_path:
+                widget.set_diff(old_text, new_text)
+                self.setCurrentIndex(index)
+                return
+        diff_widget = DiffViewWidget(rel_path=rel_path, old_text=old_text, new_text=new_text)
+        label = Path(rel_path).name
+        new_index = self.addTab(diff_widget, icons.icon("git", color=_SPLIT_ICON_COLOR), f"{label} (diff)")
+        self._track_tab(new_index, diff_widget, state=_TabState(path=None))
         self.setCurrentIndex(new_index)
 
     def _reusable_tab_index(self) -> int | None:

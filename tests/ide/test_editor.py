@@ -715,6 +715,140 @@ def test_hovering_a_forge_label_name_shows_a_warning(qtbot, tmp_path) -> None:
     assert editor._error_message_at(outside_pos) is None
 
 
+# -- other never-applied text fields (edit -> save -> Apply silently reverts the edit, since these
+# route through strings.json/aren't written by a real compile at all -- see editor.py's own
+# _never_applied_field_spans() docstring) --------------------------------------------------------
+
+_SETTINGS_MIRROR_TEXT = (
+    "{\n"
+    '  "multiplayer": {\n'
+    '    "game_settings": {\n'
+    '      "metadata": {\n'
+    '        "description_string": "Old description",\n'
+    '        "category": "Slayer"\n'
+    "      },\n"
+    '      "team_settings": {\n'
+    '        "teams": [\n'
+    '          {"name": "Red Team", "index": 0}\n'
+    "        ]\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}"
+)
+
+
+def test_typing_inside_description_string_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Old description"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_typing_inside_metadata_category_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Slayer"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_typing_inside_a_team_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Red Team"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_other_settings_json_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index('"index": 0') + len('"index": '))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _SETTINGS_MIRROR_TEXT
+    assert '"index": 90' in editor.toPlainText()
+
+
+_SCRIPT_SETTINGS_MIRROR_TEXT = (
+    "{\n"
+    '  "forge_labels": [\n'
+    '    {"required_object_type_name": "Skull", "required_number": 1}\n'
+    "  ],\n"
+    '  "scripted_options": [\n'
+    '    {"name": "Zombie Damage", "desc": "Zombie melee multiplier", "default_value_index": 0}\n'
+    "  ],\n"
+    '  "scripted_player_traits": [\n'
+    '    {"name": "Zombie Traits", "desc": "Traits for zombies"}\n'
+    "  ],\n"
+    '  "scripted_stats": [\n'
+    '    {"name": "Zombie Kills"}\n'
+    "  ],\n"
+    '  "required_object_types": {\n'
+    '    "object_type_indices": [3],\n'
+    '    "object_type_names": ["Weapon Rack"]\n'
+    "  }\n"
+    "}"
+)
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [
+        "Skull",
+        "Zombie Damage",
+        "Zombie melee multiplier",
+        "Zombie Traits",
+        "Traits for zombies",
+        "Zombie Kills",
+        "Weapon Rack",
+    ],
+)
+def test_typing_inside_a_script_settings_mirror_field_is_blocked(qtbot, tmp_path, needle) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCRIPT_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SCRIPT_SETTINGS_MIRROR_TEXT.index(needle))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SCRIPT_SETTINGS_MIRROR_TEXT
+
+
+def test_other_script_settings_json_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCRIPT_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(
+        editor,
+        _SCRIPT_SETTINGS_MIRROR_TEXT.index('"object_type_indices": [3]') + len('"object_type_indices": ['),
+    )
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _SCRIPT_SETTINGS_MIRROR_TEXT
+    assert '"object_type_indices": [93]' in editor.toPlainText()
+
+
 # -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----
 
 

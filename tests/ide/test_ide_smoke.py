@@ -1755,7 +1755,13 @@ def test_closing_the_project_hides_the_vcs_status_segment(project_window: MainWi
     assert project_window.status_bar.vcs_label.isVisible() is False
 
 
-def test_saving_a_file_records_a_traceable_vcs_snapshot(project_window: MainWindow, tmp_path: Path) -> None:
+def test_saving_a_file_shows_up_as_uncommitted_rather_than_auto_committing(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md (the VSCode-style VCS pass): "we want to remove the autosave entries in vcs history
+    # panel" -- a save no longer creates a commit on its own; it just changes what
+    # vcs.uncommitted_changes() reports (and the activity bar's own badge count, see
+    # MainWindow._refresh_vcs_status).
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
     before = len(vcs.history(folder))
@@ -1765,8 +1771,34 @@ def test_saving_a_file_records_a_traceable_vcs_snapshot(project_window: MainWind
     widget.setPlainText("edited\n")
     project_window.main_panel.active_pane.save_current()
 
-    assert len(vcs.history(folder)) == before + 1
-    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved just now")
+    assert len(vcs.history(folder)) == before
+    assert [c.path for c in vcs.uncommitted_changes(folder)] == ["Notes.txt"]
+    assert project_window.activity_bar.git_button._badge_count == 1
+    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved")
+
+
+def test_saving_a_file_immediately_populates_the_git_panels_own_changes_list(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # Regression guard: the badge/status-bar segment used to update the instant a file was saved
+    # (via _refresh_vcs_status), but the Git panel's own "Changes" list stayed empty/stale until
+    # some *other* VCS action (new branch, switch, ...) happened to call git_panel.refresh() for an
+    # unrelated reason -- confirmed reported: "nothing is showing under changes in vcs even when the
+    # notification shows there are changes, unless a user then makes a new branch". Fixed by folding
+    # git_panel.refresh() into _refresh_vcs_status() itself.
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    assert project_window.git_panel.changes_list.count() == 0
+
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("edited\n")
+    project_window.main_panel.active_pane.save_current()
+
+    assert project_window.git_panel.changes_list.count() == 1
+    assert project_window.git_panel.changes_list.item(0).text() == "M  Notes.txt"
+    assert project_window.git_panel.uncommitted_count == 1
+    assert project_window.git_panel.commit_button.isEnabled() is False  # no message typed yet
 
 
 def test_vcs_stamp_creates_a_labelled_snapshot_and_refreshes_the_ui(
@@ -1817,7 +1849,7 @@ def test_vcs_switch_branch_reloads_a_clean_open_tab_from_disk(project_window: Ma
     project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("feature branch content\n", encoding="utf-8")
-    vcs.record_change(folder)
+    vcs.commit(folder, "feature branch content")
 
     project_window.vcs_switch_branch(vcs.DEFAULT_BRANCH)
 
@@ -1868,6 +1900,115 @@ def test_vcs_switch_branch_proceeds_once_confirmed_despite_the_dirty_tab(
 
 def test_vcs_switch_branch_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
     window.vcs_switch_branch("feature")  # should not raise
+
+
+# -- switching branches with uncommitted VCS changes (PROMPT.md, the VSCode-style VCS pass:
+# removing the old silent auto-commit-before-switch, in favor of a real cancel/commit-first/discard
+# choice) --------------------------------------------------------------------------------------
+
+
+def test_vcs_switch_branch_warns_about_uncommitted_changes_and_can_be_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: warned.append(paths) or "cancel"
+    )
+
+    project_window.vcs_switch_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # switch refused, still on main
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "uncommitted edit\n"  # never overwritten
+
+
+def test_vcs_switch_branch_commits_first_when_chosen(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "commit")
+    monkeypatch.setattr(MainWindow, "_ask_commit_message", lambda self: "save my edit")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+    # the commit landed before the switch away, rather than being silently discarded.
+    assert "save my edit" in [s.message for s in vcs.graph_history(folder)]
+
+
+def test_vcs_switch_branch_cancels_if_the_commit_message_prompt_is_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "commit")
+    monkeypatch.setattr(MainWindow, "_ask_commit_message", lambda self: "")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # never switched
+    assert vcs.uncommitted_changes(folder) != []  # never committed either
+
+
+def test_vcs_switch_branch_discards_uncommitted_changes_when_chosen(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "discard")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"  # overwritten by the switch
+
+
+def test_commit_command_prompts_and_commits(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("edit notes", True)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Commit").action()
+
+    assert vcs.uncommitted_changes(folder) == []
+    assert vcs.history(folder)[0].message == "edit notes"
+
+
+def test_commit_command_does_nothing_when_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Commit").action()
+
+    assert vcs.uncommitted_changes(folder) != []
 
 
 def test_stamp_release_command_prompts_and_stamps(
@@ -1970,7 +2111,7 @@ def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     project_window._on_project_opened(folder)
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
-    vcs.record_change(folder)
+    vcs.commit(folder, "edit notes")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
 
     opened = []
@@ -1982,6 +2123,50 @@ def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     dialog = opened[0]
     assert dialog.windowTitle() == "main vs. feature"
     assert [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())] == ["M Notes.txt"]
+
+
+def test_vcs_open_diff_opens_a_diff_view_tab_for_the_uncommitted_change(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_diff("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    # old_pane's own second line is a blank alignment filler, not a real line of "hi\n"'s own
+    # content -- new_pane's "edited" line has nothing to line up with on the old side, so _align()
+    # pads old_pane with a blank row to keep both sides vertically aligned row-for-row.
+    assert widget.old_pane.toPlainText() == "hi\n"
+    assert widget.new_pane.toPlainText() == "hi\nedited"
+
+
+def test_vcs_open_diff_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_diff("Notes.txt")  # should not raise
+
+
+def test_clicking_a_changed_file_in_the_git_panel_opens_its_diff_tab(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+    project_window.git_panel.refresh()
+
+    project_window.git_panel.changes_list.itemClicked.emit(project_window.git_panel.changes_list.item(0))
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
 
 
 def test_vcs_compare_labels_a_stamp_ref_with_its_message(
@@ -3038,9 +3223,12 @@ def test_the_watched_bin_changing_resyncs_the_build_snapshot(
     assert calls[0][1] == folder
 
 
-def test_the_watched_bin_changing_records_a_traceable_vcs_snapshot(
+def test_the_watched_bin_changing_shows_up_as_uncommitted_rather_than_auto_committing(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Same "no more silent auto-commit" behavior change as
+    # test_saving_a_file_shows_up_as_uncommitted_rather_than_auto_committing, but for an RVT-driven
+    # resync instead of an in-app save.
     from in_reach.app import new_project, project, vcs
 
     window.root_dir = tmp_path
@@ -3063,7 +3251,11 @@ def test_the_watched_bin_changing_records_a_traceable_vcs_snapshot(
 
     window._on_watched_bin_changed(str(bin_path))
 
-    assert len(vcs.history(folder)) == before + 1
+    assert len(vcs.history(folder)) == before
+    assert [c.path for c in vcs.uncommitted_changes(folder)] == ["settings/settings.json"]
+    # Same regression guard as test_saving_a_file_immediately_populates_the_git_panels_own_changes_
+    # list -- an RVT-driven resync must populate the Git panel's own "Changes" list immediately too.
+    assert window.git_panel.changes_list.count() == 1
     assert window.status_bar.vcs_label.isVisible() is True
 
 

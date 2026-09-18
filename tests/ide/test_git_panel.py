@@ -25,7 +25,8 @@ def test_starts_disabled_with_no_project(panel: GitPanel) -> None:
     assert panel.branch_combo.isEnabled() is False
     assert panel.new_branch_button.isEnabled() is False
     assert panel.stamp_button.isEnabled() is False
-    assert panel.history_list.isVisible() is False
+    assert panel.commit_button.isEnabled() is False
+    assert panel._graph_scroll.isVisible() is False
 
 
 def test_a_project_with_no_history_yet_still_shows_the_empty_state(panel: GitPanel, tmp_path: Path) -> None:
@@ -47,7 +48,7 @@ def test_set_project_enables_controls_and_lists_the_branch(panel: GitPanel, tmp_
     assert panel.new_branch_button.isEnabled() is True
     assert panel.stamp_button.isEnabled() is True
     assert panel.branch_combo.currentText() == vcs.DEFAULT_BRANCH
-    assert panel.history_list.count() == 1
+    assert panel.graph.row_count() == 1
 
 
 def test_set_project_none_clears_and_disables_everything(panel: GitPanel, tmp_path: Path) -> None:
@@ -61,7 +62,7 @@ def test_set_project_none_clears_and_disables_everything(panel: GitPanel, tmp_pa
     assert panel.branch_combo.count() == 0
 
 
-def test_refresh_lists_every_branch_and_marks_stamps_in_history(panel: GitPanel, tmp_path: Path) -> None:
+def test_refresh_lists_every_branch_and_marks_stamps_in_the_graph(panel: GitPanel, tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.stamp(folder, "v1")
@@ -73,8 +74,8 @@ def test_refresh_lists_every_branch_and_marks_stamps_in_history(panel: GitPanel,
         vcs.DEFAULT_BRANCH,
         "feature",
     }
-    items = [panel.history_list.item(i).text() for i in range(panel.history_list.count())]
-    assert any(item.startswith("* v1") for item in items)
+    stamp_messages = [row.snapshot.stamp_message for row in panel.graph._rows if row.snapshot.is_stamp]
+    assert stamp_messages == ["v1"]
 
 
 def test_stamp_button_emits_stamp_requested_with_the_typed_message(
@@ -181,13 +182,13 @@ def test_compare_button_emits_compare_requested_with_the_selected_refs(panel: Gi
     assert emitted == [("feature", vcs.DEFAULT_BRANCH)]
 
 
-def test_selecting_a_history_row_enables_restore(panel: GitPanel, tmp_path: Path) -> None:
+def test_selecting_a_graph_row_enables_restore(panel: GitPanel, tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     panel.set_project(folder)
     assert panel.restore_button.isEnabled() is False
 
-    panel.history_list.setCurrentRow(0)
+    panel.graph.select_row(0)
 
     assert panel.restore_button.isEnabled() is True
 
@@ -197,7 +198,7 @@ def test_restore_button_emits_restore_requested_with_the_snapshots_sha(panel: Gi
     vcs.init(folder)
     sha = vcs.stamp(folder, "v1")
     panel.set_project(folder)
-    panel.history_list.setCurrentRow(0)  # newest first -- the v1 stamp
+    panel.graph.select_row(0)  # newest first -- the v1 stamp
     emitted = []
     panel.restore_requested.connect(emitted.append)
 
@@ -210,7 +211,7 @@ def test_refresh_disables_restore_until_a_row_is_selected_again(panel: GitPanel,
     folder = _project(tmp_path)
     vcs.init(folder)
     panel.set_project(folder)
-    panel.history_list.setCurrentRow(0)
+    panel.graph.select_row(0)
     assert panel.restore_button.isEnabled() is True
 
     panel.refresh()
@@ -230,3 +231,112 @@ def test_refreshing_the_combo_never_emits_switch_branch_requested(panel: GitPane
     panel.refresh()
 
     assert emitted == []
+
+
+# -- "Changes" / commit (PROMPT.md: "add committed changes and uncommitted changes[;] ... committing
+# changes should require a commit message") -------------------------------------------------------
+
+
+def test_a_clean_project_shows_zero_uncommitted_changes(panel: GitPanel, tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    panel.set_project(folder)
+
+    assert panel.uncommitted_count == 0
+    assert panel.changes_label.text() == "Changes (0)"
+    assert panel.changes_list.count() == 0
+    assert panel.commit_button.isEnabled() is False
+
+
+def test_an_edited_file_shows_up_as_an_uncommitted_change(panel: GitPanel, tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+
+    panel.set_project(folder)
+
+    assert panel.uncommitted_count == 1
+    assert panel.changes_label.text() == "Changes (1)"
+    assert panel.changes_list.item(0).text() == "M  Notes.txt"
+
+
+def test_clicking_a_changed_file_emits_diff_file_requested_with_its_path(panel: GitPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should appear
+    # showing the original on the left and highlighted changes on the right (like vscode git)".
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    panel.set_project(folder)
+    emitted = []
+    panel.diff_file_requested.connect(emitted.append)
+
+    panel.changes_list.itemClicked.emit(panel.changes_list.item(0))
+
+    assert emitted == ["Notes.txt"]
+
+
+def test_commit_button_stays_disabled_with_no_message_even_if_something_changed(
+    panel: GitPanel, tmp_path: Path
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    panel.set_project(folder)
+
+    assert panel.commit_button.isEnabled() is False
+
+    panel.commit_message_edit.setText("fix notes")
+
+    assert panel.commit_button.isEnabled() is True
+
+
+def test_commit_button_stays_disabled_with_a_message_but_nothing_uncommitted(
+    panel: GitPanel, tmp_path: Path
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+
+    panel.commit_message_edit.setText("nothing to commit")
+
+    assert panel.commit_button.isEnabled() is False
+
+
+def test_commit_button_emits_commit_requested_with_the_typed_message(panel: GitPanel, tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    panel.set_project(folder)
+    panel.commit_message_edit.setText("fix notes")
+    emitted = []
+    panel.commit_requested.connect(emitted.append)
+
+    panel.commit_button.click()
+
+    assert emitted == ["fix notes"]
+
+
+def test_pressing_enter_in_the_commit_message_box_also_commits(panel: GitPanel, tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    panel.set_project(folder)
+    panel.commit_message_edit.setText("fix notes")
+    emitted = []
+    panel.commit_requested.connect(emitted.append)
+
+    panel.commit_message_edit.returnPressed.emit()
+
+    assert emitted == ["fix notes"]
+
+
+def test_clear_commit_message_empties_the_box(panel: GitPanel, tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    panel.commit_message_edit.setText("something")
+
+    panel.clear_commit_message()
+
+    assert panel.commit_message_edit.text() == ""

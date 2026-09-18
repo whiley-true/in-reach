@@ -340,6 +340,12 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         result.notices = result.notices + [BuildMessage(line=0, col=0, text=w) for w in string_warnings]
     else:
         settings_writer.apply_meta_header(None, content_header, settings.meta.title, settings.meta.description)
+        ff = variant.firefight
+        if ff is not None and settings.firefight is not None:
+            try:
+                settings_writer.apply_firefight_settings(ff, settings.firefight)
+            except ValueError as exc:
+                return BuildResult(success=False, failure=f"Failed to apply settings: {exc}")
 
     if save:
         out_path = new_project.compiled_variant_path(folder)
@@ -354,6 +360,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
 
         category, category_icon = settings_io.load_meta_category(settings_path)
         title, description = settings_io.load_meta_title_description(settings_path)
+        created_at = settings_io.load_meta_generated_at(settings_path)
         try:
             write_build_snapshot(
                 variant,
@@ -363,6 +370,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 category_icon=category_icon,
                 title=title,
                 description=description,
+                created_at=created_at,
             )
         except Exception as exc:  # noqa: BLE001 -- extraction/pydantic code can raise almost anything
             result.success = False

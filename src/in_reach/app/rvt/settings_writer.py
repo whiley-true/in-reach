@@ -16,7 +16,11 @@ all 8 ScriptSettings subsystems (apply_script_settings(), a separate top-level e
 its own docstring for why it isn't folded into apply_multiplayer_settings()), plus meta.title/
 description and metadata's description_string/author/editor/categorization_icon/engine_category
 (see apply_multiplayer_settings()'s docstring) -- i.e. everything that's a direct field assignment
-on an already-writable engine object.
+on an already-writable engine object. apply_firefight_settings() is the Firefight-variant
+equivalent of apply_multiplayer_settings() (a separate top-level entry point for the same reason as
+apply_script_settings() -- Firefight.options isn't a field of MultiplayerGameSettings) -- see its
+own docstring for the one thing it can't yet apply (FirefightWave.squads, a native-extension
+binding gap, not a choice made here).
 
 Every list field applied here (team entries, loadout palette entries, forge labels, scripted
 options/traits/stats/HUD widgets) is matched positionally against the already-loaded variant's own
@@ -56,6 +60,8 @@ from __future__ import annotations
 
 from . import strings_writer
 from .extraction import (
+    FIREFIGHT_SCENARIO_FLAGS,
+    FIREFIGHT_SKULL_FLAGS,
     GENERAL_FLAGS,
     LOADOUT_FLAGS,
     MAP_FLAGS,
@@ -67,6 +73,12 @@ from .extraction import (
     TU1_FLAGS,
 )
 from .models.game_settings import (
+    Firefight,
+    FirefightCustomSkull,
+    FirefightGeneralSettings,
+    FirefightRound,
+    FirefightWave,
+    FirefightWaveTraits,
     GeneralSettings,
     MapAndGameSettings,
     MultiplayerGameSettings,
@@ -339,6 +351,106 @@ def apply_multiplayer_settings(mp, content_header, settings: MultiplayerGameSett
     content_header.modified_by.author_name = settings.metadata.editor
     warning = strings_writer.apply_description_string(rvt, mp, settings.metadata.description_string)
     return [warning] if warning is not None else []
+
+
+def _apply_firefight_general(options, general: FirefightGeneralSettings) -> None:
+    """Same idea as ``_apply_general`` above, minus ``fireteams_enabled``/``score_to_win`` (those
+    are sourced from ``GameVariantDataMultiplayer`` directly there -- see
+    :class:`~in_reach.app.rvt.models.game_settings.FirefightGeneralSettings`'s own docstring for why
+    a Firefight variant's options tree has no equivalent of either)."""
+    g = options.general
+    g.flags = _pack_flags(general, GENERAL_FLAGS)
+    g.time_limit = general.time_limit
+    g.round_limit = general.round_limit
+    g.rounds_to_win = general.rounds_to_win
+    g.sudden_death_time = general.sudden_death_time
+    g.grace_period = general.grace_period
+    options.team.species = general.player_species
+
+
+def apply_firefight_settings(ff, firefight: Firefight) -> None:
+    """Apply everything in scope (see below) from ``firefight`` onto ``ff`` (a loaded variant's
+    ``.firefight``). Mirrors :func:`apply_multiplayer_settings` -- ``ff.options`` is the exact same
+    ``ReachCustomGameOptions`` C++ type/shape as a multiplayer variant's own ``mp.options``
+    (confirmed by ``extraction.py``'s own ``_extract_firefight_options`` reusing
+    ``_extract_respawn``/``_extract_social``/``_extract_map``/``_extract_team``/``_extract_loadout``
+    verbatim), so this reuses those same ``_apply_*`` helpers rather than duplicating them.
+
+    Does NOT write wave squad compositions (``FirefightWave.squads``) -- confirmed, by direct
+    introspection of the bundled ``_reachvarianttool`` extension, that ``FirefightWave.squad(i)`` is
+    a read-only *method* (no setter of any kind exists in the native bindings), unlike every other
+    per-index accessor this module writes through (``team(i)``, ``loadout(i)``, etc., which return a
+    mutable object/expose a real setter). That's a genuine gap in the prebuilt native extension
+    itself, not something fixable from this side -- editing ``settings/settings.json``'s
+    ``firefight.rounds[].wave_*.squads``/``bonus_wave.squads`` currently has no effect on compile,
+    the same "never applied" situation as the text fields this module's own docstring already
+    documents, just for a different underlying reason (an engine binding gap, not a
+    routed-through-strings-instead design choice). Every other wave field
+    (``uses_dropship``/``ordered_squads``/``squad_count``) IS applied.
+    """
+    rvt = get_rvt()
+    ff.scenario_flags = _pack_flags(firefight, FIREFIGHT_SCENARIO_FLAGS)
+    ff.wave_limit = firefight.wave_limit
+    ff.bonus_target = firefight.bonus_target
+    ff.elite_kill_bonus = firefight.elite_kill_bonus
+    ff.starting_lives_spartan = firefight.starting_lives_spartan
+    ff.starting_lives_elite = firefight.starting_lives_elite
+    ff.max_spartan_extra_lives = firefight.max_spartan_extra_lives
+    ff.generator_count = firefight.generator_count
+    ff.bonus_wave_duration = firefight.bonus_wave_duration
+    _apply_player_traits(rvt, ff.base_traits_spartan, firefight.base_traits_spartan)
+    _apply_player_traits(rvt, ff.base_traits_elite, firefight.base_traits_elite)
+    _apply_firefight_wave_traits(rvt, ff.base_traits_wave, firefight.base_traits_wave)
+    _apply_respawn(rvt, ff.elite_respawn_options, firefight.elite_respawn_options)
+
+    options = ff.options
+    _apply_firefight_general(options, firefight.options.general_settings)
+    _apply_respawn(rvt, options.respawn, firefight.options.respawn_settings)
+    _apply_social(rvt, options, firefight.options.social_settings)
+    _apply_map(rvt, options, firefight.options.map_and_game_settings)
+    _apply_team(rvt, options, firefight.options.team_settings)
+    _apply_loadout(rvt, options.loadouts, firefight.options.loadout_settings)
+
+    for i, custom_skull in enumerate(firefight.custom_skulls):
+        _apply_firefight_custom_skull(rvt, ff.custom_skull(i), custom_skull)
+    for i, round_ in enumerate(firefight.rounds):
+        _apply_firefight_round(rvt, ff.round(i), round_)
+    _apply_firefight_wave(ff.bonus_wave, firefight.bonus_wave)
+    ff.bonus_wave_skulls = _pack_flags(firefight.bonus_wave_skulls, FIREFIGHT_SKULL_FLAGS)
+
+
+def _apply_firefight_wave_traits(rvt, wt, traits: FirefightWaveTraits) -> None:
+    wt.vision = _raw(rvt.AIVision, traits.vision)
+    wt.hearing = _raw(rvt.AIHearing, traits.hearing)
+    wt.luck = _raw(rvt.AILuck, traits.luck)
+    wt.shootiness = _raw(rvt.AIShootiness, traits.shootiness)
+    wt.grenades = _raw(rvt.AIGrenades, traits.grenades)
+    wt.dont_drop_equipment = _raw(rvt.BoolTrait, traits.dont_drop_equipment)
+    wt.assassin_immunity = _raw(rvt.BoolTrait, traits.assassin_immunity)
+    wt.headshot_immunity = _raw(rvt.BoolTrait, traits.headshot_immunity)
+    wt.damage_resist = _raw(rvt.DamageResist, traits.damage_resist)
+    wt.damage_mult = _raw(rvt.DamageMultiplier, traits.damage_mult)
+
+
+def _apply_firefight_wave(wave_obj, wave: FirefightWave) -> None:
+    """``squads`` is deliberately not applied -- see :func:`apply_firefight_settings`'s own
+    docstring for why (a native-extension binding gap, not an oversight here)."""
+    wave_obj.uses_dropship = wave.uses_dropship
+    wave_obj.ordered_squads = wave.ordered_squads
+    wave_obj.squad_count = wave.squad_count
+
+
+def _apply_firefight_round(rvt, round_obj, round_: FirefightRound) -> None:
+    round_obj.skulls = _pack_flags(round_.skulls, FIREFIGHT_SKULL_FLAGS)
+    _apply_firefight_wave(round_obj.wave_initial, round_.wave_initial)
+    _apply_firefight_wave(round_obj.wave_main, round_.wave_main)
+    _apply_firefight_wave(round_obj.wave_boss, round_.wave_boss)
+
+
+def _apply_firefight_custom_skull(rvt, skull_obj, skull: FirefightCustomSkull) -> None:
+    _apply_player_traits(rvt, skull_obj.traits_spartan, skull.traits_spartan)
+    _apply_player_traits(rvt, skull_obj.traits_elite, skull.traits_elite)
+    _apply_firefight_wave_traits(rvt, skull_obj.traits_wave, skull.traits_wave)
 
 
 def _apply_forge_label(rvt, fl, label: ForgeLabel) -> None:

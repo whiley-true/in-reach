@@ -8,9 +8,9 @@ Invoked as::
 
 ``request_path`` is a JSON object written by
 :func:`~in_reach.app.rvt.decompile._serialize_decompile_request`
-(``bin_path``/``folder``/``category``/``category_icon``/``title``/``description``/``map_entries``,
-every value already a plain JSON-safe type). Writes ``{"success": true}`` or ``{"success": false,
-"error": "..."}`` to ``result_path`` (never stdout -- same reasoning as
+(``bin_path``/``folder``/``category``/``category_icon``/``title``/``description``/``created_at``/
+``map_entries``, every value already a plain JSON-safe type). Writes ``{"success": true}`` or
+``{"success": false, "error": "..."}`` to ``result_path`` (never stdout -- same reasoning as
 :mod:`in_reach.app.rvt.compile_subprocess`) and exits 0 either way; a non-zero exit (or none at all,
 e.g. a crash) means this process never got the chance to write a result at all, which
 :func:`~in_reach.app.rvt.decompile._run_decompile_isolated` treats as its own reportable failure --
@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from in_reach.app.categories import EngineCategory, EngineIcon
@@ -42,6 +43,7 @@ def main(argv: list[str]) -> int:
 
     request = json.loads(request_path.read_text(encoding="utf-8"))
     category_icon = request["category_icon"]
+    created_at = request.get("created_at")
 
     try:
         _MODES[mode](
@@ -51,6 +53,7 @@ def main(argv: list[str]) -> int:
             category_icon=EngineIcon(category_icon) if category_icon is not None else None,
             title=request["title"],
             description=request["description"],
+            created_at=datetime.fromisoformat(created_at) if created_at is not None else None,
             map_entries=[MapEntry(**entry) for entry in request["map_entries"]],
         )
     except Exception as exc:  # noqa: BLE001 -- native/pydantic code can raise almost anything

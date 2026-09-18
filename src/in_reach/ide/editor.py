@@ -79,7 +79,7 @@ from in_reach.ide.code_folding import compute_fold_ranges
 from in_reach.ide.find_replace import FindReplaceBar
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
-from in_reach.ide.json_position import find_value_span
+from in_reach.ide.json_position import find_value_spans
 
 # Padding on each side of the line-number digits, so they don't sit flush against the text or the
 # panel's own edge.
@@ -111,6 +111,27 @@ _SCHEMA_LINE_WARNING = "This line is managed automatically and can't be edited."
 #: same hover-tooltip treatment as _SCHEMA_LINE_WARNING, shown over a protected forge_labels[].name
 #: value (see :meth:`_PlainTextEditor._forge_label_name_spans`).
 _FORGE_LABEL_NAME_WARNING = "Forge label names are fixed and can't be edited here."
+
+#: Same "protected span" treatment as the two warnings above, extended to every other field
+#: settings_writer.py's own module docstring documents as a "text field" -- a ``ReachString``
+#: pointer (or, for team names, an equivalent single-write-path field) that a real Apply never
+#: writes back at all, because in_reach.app.rvt.strings_writer's apply_strings() already owns that
+#: same underlying data -- confirmed a real, user-facing bug (not just the Apply button staying
+#: stuck "unapplied", which apply_settings.py's own _strip_never_applied_*() helpers already fixed):
+#: hand-editing one of these fields directly in settings/script_settings.json visibly reverts back
+#: to its real value the moment the next successful Apply's own build/dist/*.bin resync
+#: (MainWindow._on_watched_bin_changed -> in_reach.app.rvt.decompile.resync_from_bin) re-decompiles
+#: and overwrites settings/ with whatever's actually baked into the .bin -- which never picked up
+#: the edit in the first place. Protecting these here stops the edit (and the confusing revert)
+#: before it happens, the same way forge_labels[].name already does, rather than leaving users to
+#: rediscover this one field at a time.
+_TEAM_NAME_WARNING = "Team names are fixed here -- edit strings.json's teams[].name instead."
+_DESCRIPTION_STRING_WARNING = (
+    "The gametype description is fixed here -- edit strings.json's meta.description instead."
+)
+_CATEGORY_WARNING = "This field has no effect on the compiled variant and can't be edited here."
+_SCRIPTED_TEXT_WARNING = "This text is fixed here -- edit it in strings.json instead."
+_RESOLVED_NAME_WARNING = "This is a resolved display name and can't be edited here."
 
 #: PROMPT.md: "please increase the font size of the 3 setting json files by 10%" -- the project's
 #: own hand-relevant settings files (see :mod:`in_reach.app.new_project`'s own module docstring:
@@ -405,6 +426,18 @@ class _PlainTextEditor(QPlainTextEdit):
         #: :meth:`_error_message_at` hovers against to show the red-underline tooltip (PROMPT.md:
         #: "it should be a window that appears when hovering on the red underlined text").
         self._error_spans: list[tuple[int, int, str]] = []
+        #: Cached result of :meth:`_compute_protected_spans`, refreshed once per actual edit (see
+        #: :meth:`_on_text_changed`) rather than recomputed on every call -- :meth:`_protected_spans`
+        #: itself is now just a cheap accessor over this. Same reasoning/pattern as
+        #: :attr:`_error_spans` right above: confirmed a real, reproducible perf regression
+        #: (editor tabs going "very unresponsive") once protected-span coverage grew from a single
+        #: cheap forge_labels[].name scan to dozens of fields each requiring their own
+        #: find_value_span() call -- keyPressEvent() (every keystroke) *and* mouseMoveEvent() (every
+        #: pixel the mouse moves over the editor, to drive the hover tooltip) both called
+        #: :meth:`_protected_spans` directly before this, so a big settings/script_settings.json
+        #: was re-parsing and re-walking its own JSON dozens of times per second just from normal
+        #: mouse movement.
+        self._protected_spans_cache: list[tuple[int, int, str]] = []
         #: 0-based block number "Go to Line" last jumped to, if any -- cleared the moment the
         #: cursor moves to a *different* line (see :meth:`_maybe_clear_goto_highlight`), so it
         #: behaves like a one-shot "you are here" marker rather than a permanent current-line
@@ -516,26 +549,36 @@ class _PlainTextEditor(QPlainTextEdit):
     # -- protected-span editing (the "$schema" line, forge_labels[].name values) ----------------
 
     def _protected_spans(self) -> list[tuple[int, int, str]]:
+        """Cheap accessor over :attr:`_protected_spans_cache` -- see that attribute's own docstring
+        for why this doesn't just recompute on every call any more (keyPressEvent/mouseMoveEvent
+        both call this very frequently)."""
+        return self._protected_spans_cache
+
+    def _compute_protected_spans(self) -> list[tuple[int, int, str]]:
         """Every character span in the current document that can't be edited, each paired with the
         hover-warning message explaining why. Started as a single "$schema"-line special case (see
         :meth:`_schema_line_range`'s own docstring) before PROMPT.md asked for a second,
         structurally different protected span: "entries in forge labels (in script_settings.json)
         should instead not be changeable (the entry in the forge_labels name must always be none
-        editable in scrip_settings.json)" -- see :meth:`_forge_label_name_spans`."""
+        editable in scrip_settings.json)" -- see :meth:`_forge_label_name_spans`. Only ever called
+        from :meth:`_on_text_changed`, to refresh :attr:`_protected_spans_cache` -- see that
+        attribute's own docstring for why nothing else should call this directly."""
         spans: list[tuple[int, int, str]] = []
         schema_range = self._schema_line_range()
         if schema_range is not None:
             spans.append((schema_range[0], schema_range[1], _SCHEMA_LINE_WARNING))
         for start, end in self._forge_label_name_spans():
             spans.append((start, end, _FORGE_LABEL_NAME_WARNING))
+        spans.extend(self._never_applied_field_spans())
         return spans
 
     def _forge_label_name_spans(self) -> list[tuple[int, int]]:
         """Character spans of every top-level ``forge_labels[].name`` value, for a
         ``script_settings.json`` document that has a ``forge_labels`` array -- uses the same
         loc-path-to-span machinery as schema_check's own validation-error underlining
-        (:func:`find_value_span`), so a span stays correct as edits elsewhere shift the labels
-        around. Empty (not ``None``) for anything that isn't JSON, isn't valid JSON right now, or
+        (:func:`~in_reach.ide.json_position.find_value_spans`), so a span stays correct as edits
+        elsewhere shift the labels around. Empty (not ``None``) for anything that isn't JSON, isn't
+        valid JSON right now, or
         has no ``forge_labels`` array -- nothing to protect."""
         if self.path is None or self.path.suffix.lower() != ".json":
             return []
@@ -547,13 +590,129 @@ class _PlainTextEditor(QPlainTextEdit):
         forge_labels = data.get("forge_labels") if isinstance(data, dict) else None
         if not isinstance(forge_labels, list):
             return []
-        spans: list[tuple[int, int]] = []
-        for index, label in enumerate(forge_labels):
-            if not isinstance(label, dict) or "name" not in label:
-                continue
-            span = find_value_span(text, ("forge_labels", index, "name"))
+        locs = [
+            ("forge_labels", index, "name")
+            for index, label in enumerate(forge_labels)
+            if isinstance(label, dict) and "name" in label
+        ]
+        return [span for span in find_value_spans(text, locs) if span is not None]
+
+    def _never_applied_field_spans(self) -> list[tuple[int, int, str]]:
+        """Every other field settings_writer.py's own module docstring documents as never written
+        back by a real Apply, beyond ``forge_labels[].name`` above (see the constants' own
+        docstring for why these need protecting at all) -- covers both
+        ``settings/settings.json`` (``metadata.description_string``/``category``,
+        ``team_settings.teams[].name``) and ``settings/script_settings.json`` (every
+        ``forge_labels[].required_object_type_name``/``required_team_name``, every
+        ``scripted_options[]``/``scripted_player_traits[]``/``scripted_stats[]`` text field, and
+        ``required_object_types.object_type_names``). Keyed off which top-level keys are actually
+        present, the same structural check ``_forge_label_name_spans`` uses, not the open file's own
+        name -- so this works regardless of what a hand-renamed/copied file happens to be called.
+        Empty for anything that isn't JSON, isn't valid JSON right now, or has none of these keys."""
+        if self.path is None or self.path.suffix.lower() != ".json":
+            return []
+        text = self.toPlainText()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        # Collected as (loc, message) pairs and resolved to spans in one single batched pass at the
+        # very end (find_value_spans()), rather than one find_value_span() call per field -- each of
+        # which would otherwise re-tokenize this entire (possibly large) document from scratch on
+        # its own. See _protected_spans_cache's own docstring for why this function's total call
+        # frequency (once per keystroke) already makes that cost add up.
+        requests: list[tuple[tuple, str]] = []
+
+        def _add(loc: tuple, message: str) -> None:
+            requests.append((loc, message))
+
+        try:
+            metadata = data["multiplayer"]["game_settings"]["metadata"]
+        except (KeyError, TypeError):
+            metadata = None
+        if isinstance(metadata, dict):
+            base = ("multiplayer", "game_settings", "metadata")
+            if "description_string" in metadata:
+                _add((*base, "description_string"), _DESCRIPTION_STRING_WARNING)
+            if "category" in metadata:
+                _add((*base, "category"), _CATEGORY_WARNING)
+
+        try:
+            teams = data["multiplayer"]["game_settings"]["team_settings"]["teams"]
+        except (KeyError, TypeError):
+            teams = None
+        if isinstance(teams, list):
+            base = ("multiplayer", "game_settings", "team_settings", "teams")
+            for index, team in enumerate(teams):
+                if isinstance(team, dict) and "name" in team:
+                    _add((*base, index, "name"), _TEAM_NAME_WARNING)
+
+        forge_labels = data.get("forge_labels")
+        if isinstance(forge_labels, list):
+            for index, label in enumerate(forge_labels):
+                if not isinstance(label, dict):
+                    continue
+                for field in ("required_object_type_name", "required_team_name"):
+                    if label.get(field) is not None:
+                        _add(("forge_labels", index, field), _RESOLVED_NAME_WARNING)
+
+        scripted_options = data.get("scripted_options")
+        if isinstance(scripted_options, list):
+            for index, option in enumerate(scripted_options):
+                if not isinstance(option, dict):
+                    continue
+                base = ("scripted_options", index)
+                for field in ("name", "desc"):
+                    if field in option:
+                        _add((*base, field), _SCRIPTED_TEXT_WARNING)
+                values = option.get("values")
+                if isinstance(values, list):
+                    for v_index, value in enumerate(values):
+                        if not isinstance(value, dict):
+                            continue
+                        v_base = (*base, "values", v_index)
+                        for field in ("name", "desc"):
+                            if field in value:
+                                _add((*v_base, field), _SCRIPTED_TEXT_WARNING)
+                for range_field in ("range_default", "range_min", "range_max"):
+                    range_value = option.get(range_field)
+                    if isinstance(range_value, dict):
+                        r_base = (*base, range_field)
+                        for field in ("name", "desc"):
+                            if field in range_value:
+                                _add((*r_base, field), _SCRIPTED_TEXT_WARNING)
+
+        scripted_player_traits = data.get("scripted_player_traits")
+        if isinstance(scripted_player_traits, list):
+            for index, trait in enumerate(scripted_player_traits):
+                if not isinstance(trait, dict):
+                    continue
+                base = ("scripted_player_traits", index)
+                for field in ("name", "desc"):
+                    if field in trait:
+                        _add((*base, field), _SCRIPTED_TEXT_WARNING)
+
+        scripted_stats = data.get("scripted_stats")
+        if isinstance(scripted_stats, list):
+            for index, stat in enumerate(scripted_stats):
+                if isinstance(stat, dict) and "name" in stat:
+                    _add(("scripted_stats", index, "name"), _SCRIPTED_TEXT_WARNING)
+
+        required_object_types = data.get("required_object_types")
+        if isinstance(required_object_types, dict):
+            object_type_names = required_object_types.get("object_type_names")
+            if isinstance(object_type_names, list):
+                base = ("required_object_types", "object_type_names")
+                for index in range(len(object_type_names)):
+                    _add((*base, index), _RESOLVED_NAME_WARNING)
+
+        spans: list[tuple[int, int, str]] = []
+        found_spans = find_value_spans(text, [loc for loc, _message in requests])
+        for (_loc, message), span in zip(requests, found_spans):
             if span is not None:
-                spans.append(span)
+                spans.append((span[0], span[1], message))
         return spans
 
     def _schema_line_range(self) -> tuple[int, int] | None:
@@ -781,6 +940,7 @@ class _PlainTextEditor(QPlainTextEdit):
         self._apply_fold_visibility()
         self._update_breadcrumb()
         self._update_schema_validation()
+        self._protected_spans_cache = self._compute_protected_spans()
         if self._line_number_area is not None:
             self._line_number_area.updateGeometry()
 

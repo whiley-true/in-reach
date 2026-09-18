@@ -1,13 +1,26 @@
 """The primary-sidebar VCS panel behind the activity bar's git icon (PROMPT.md: "vcs panel and
-dulwich implementation").
+dulwich implementation"; a later pass: "we also want our vcs functionality to better match vscode
+functionality").
 
 A thin view over :mod:`in_reach.app.vcs` -- this panel never calls that module directly. Every user
-action (stamp a release, create a branch, switch branches) is emitted as a request signal instead,
-same convention as :class:`~in_reach.ide.activity_bar.ActivityBar`'s own ``launch_rvt_requested``/
-``apply_requested``. ``MainWindow`` is the integration point that actually calls :mod:`in_reach.app.
-vcs`, because switching branches can overwrite/delete real files on disk and needs to coordinate
-with whatever's currently open in the editor (reload clean tabs, warn about dirty ones) -- exactly
+action (commit, stamp a release, create a branch, switch branches) is emitted as a request signal
+instead, same convention as :class:`~in_reach.ide.activity_bar.ActivityBar`'s own
+``launch_rvt_requested``/``apply_requested``. ``MainWindow`` is the integration point that actually
+calls :mod:`in_reach.app.vcs`, because switching branches can overwrite/delete real files on disk and
+needs to coordinate with whatever's currently open in the editor (reload clean tabs, warn about dirty
+ones, and now -- PROMPT.md's own VSCode-style pass -- warn about *uncommitted* ones too) -- exactly
 the kind of cross-cutting concern this panel has no business knowing about.
+
+PROMPT.md (the VSCode-style pass): "we want to add committed changes and uncommitted changes[;]
+when there are uncommitted changes in the repo there should be a notification icon with the number
+of uncommitted changes[;] committing changes should require a commit message[;] we want to remove
+the autosave entries in vcs history panel[;] we also want to show a git graph of commits, branches
+and stamps instead in vscode style" -- this panel now has a live "Changes" section (an uncommitted
+file list plus an inline commit-message box, see :attr:`commit_requested`) above the existing "Stamp
+Release" button (kept as a *separate* action from an ordinary commit -- a stamp still explicitly
+marks a release, not just "a commit with a message"), and the old flat history ``QListWidget`` is
+replaced by :class:`~in_reach.ide.git_graph.GitGraphWidget`, a real lane-painted commit graph across
+every branch at once.
 """
 
 from __future__ import annotations
@@ -21,19 +34,27 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from in_reach.app import vcs
+from in_reach.ide.git_graph import GitGraphWidget
 
 _NO_HISTORY_TEXT = "This project has no history yet."
 _STAMP_LABEL_PREFIX = "Stamp: "
+_CHANGE_TYPE_PREFIX = {"added": "+", "removed": "-", "modified": "M"}
 
 
 class GitPanel(QWidget):
+    #: Emitted with the user's typed message when "Commit" is confirmed (PROMPT.md: "committing
+    #: changes should require a commit message") -- the everyday checkpoint action, distinct from
+    #: :attr:`stamp_requested` below.
+    commit_requested = pyqtSignal(str)
     #: Emitted with the user's typed message when "Stamp Release" is confirmed.
     stamp_requested = pyqtSignal(str)
     #: Emitted with the user's typed name when "New Branch" is confirmed.
@@ -47,15 +68,24 @@ class GitPanel(QWidget):
     #: "Compare" is clicked (PROMPT.md: "view branch differences[; and] compare different stamped
     #: versions").
     compare_requested = pyqtSignal(str, str)
-    #: Emitted with a snapshot's sha when "Restore" is clicked for a selected history entry
+    #: Emitted with a snapshot's sha when "Restore" is clicked for a selected graph row
     #: (PROMPT.md: "add any other functionality you think may help the user manage the project").
     restore_requested = pyqtSignal(str)
+    #: Emitted with a project-relative path when a file is clicked in the "Changes" list --
+    #: PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should appear
+    #: showing the original on the left and highlighted changes on the right (like vscode git)".
+    diff_file_requested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         #: The active gametype project's folder -- ``None`` with no project open. Mirrors
         #: ``ExplorerPanel.current_folder``'s own naming.
         self.current_folder: Path | None = None
+        #: How many files are currently uncommitted -- what the activity bar's own badge (see
+        #: ``MainWindow._refresh_vcs_status``) mirrors next to the git icon. Kept as a plain
+        #: attribute (not re-derived by callers) so the panel and the badge can never briefly
+        #: disagree between one ``vcs.uncommitted_changes()`` call and the next.
+        self.uncommitted_count = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -78,6 +108,34 @@ class GitPanel(QWidget):
         self.delete_branch_button.clicked.connect(self._on_delete_branch_clicked)
         branch_row.addWidget(self.delete_branch_button)
         layout.addLayout(branch_row)
+
+        divider0 = QFrame()
+        divider0.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(divider0)
+
+        # -- "Changes" -- uncommitted files + inline commit box (PROMPT.md: "add committed changes
+        # and uncommitted changes ... committing changes should require a commit message") --------
+        self.changes_label = QLabel("Changes")
+        layout.addWidget(self.changes_label)
+        self.changes_list = QListWidget()
+        self.changes_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.changes_list.setMaximumHeight(120)
+        self.changes_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.changes_list.itemClicked.connect(self._on_change_clicked)
+        layout.addWidget(self.changes_list)
+        commit_row = QHBoxLayout()
+        commit_row.setContentsMargins(0, 0, 0, 0)
+        self.commit_message_edit = QLineEdit()
+        self.commit_message_edit.setPlaceholderText("Commit message")
+        self.commit_message_edit.returnPressed.connect(self._on_commit_clicked)
+        self.commit_message_edit.textChanged.connect(self._update_commit_enabled)
+        commit_row.addWidget(self.commit_message_edit, 1)
+        self.commit_button = QPushButton("Commit")
+        self.commit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.commit_button.setEnabled(False)
+        self.commit_button.clicked.connect(self._on_commit_clicked)
+        commit_row.addWidget(self.commit_button)
+        layout.addLayout(commit_row)
 
         self.stamp_button = QPushButton("Stamp Release")
         self.stamp_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -111,12 +169,13 @@ class GitPanel(QWidget):
         self.history_label = QLabel("History")
         self.history_label.setEnabled(False)
         layout.addWidget(self.history_label)
-        self.history_list = QListWidget()
-        # A selectable single row (not the read-only NoSelection this started as) -- picking a past
-        # snapshot is what "Restore" below acts on.
-        self.history_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.history_list.currentRowChanged.connect(self._on_history_row_changed)
-        layout.addWidget(self.history_list, 1)
+        self.graph = GitGraphWidget()
+        self.graph.snapshot_selected.connect(self._on_graph_selection_changed)
+        self._graph_scroll = QScrollArea()
+        self._graph_scroll.setWidget(self.graph)
+        self._graph_scroll.setWidgetResizable(False)
+        self._graph_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(self._graph_scroll, 1)
         self.restore_button = QPushButton("Restore Selected")
         self.restore_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.restore_button.setEnabled(False)
@@ -141,19 +200,23 @@ class GitPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Re-reads :attr:`current_folder`'s own branch list/current branch/history from
-        :mod:`in_reach.app.vcs` -- called on activation, and again by MainWindow after any action
-        that changes history (stamp, new branch, switch, restore) actually completes."""
+        """Re-reads :attr:`current_folder`'s own branch list/current branch/uncommitted changes/
+        graph from :mod:`in_reach.app.vcs` -- called on activation, and again by MainWindow after
+        any action that changes history (commit, stamp, new branch, switch, restore) actually
+        completes."""
         has_history = self.current_folder is not None and vcs.is_initialized(self.current_folder)
         self.branch_combo.setEnabled(has_history)
         self.new_branch_button.setEnabled(has_history)
         self.delete_branch_button.setEnabled(has_history)
+        self.changes_label.setVisible(has_history)
+        self.changes_list.setVisible(has_history)
+        self.commit_message_edit.setEnabled(has_history)
         self.stamp_button.setEnabled(has_history)
         self.compare_label.setVisible(has_history)
         self.compare_a_combo.setEnabled(has_history)
         self.compare_b_combo.setEnabled(has_history)
         self.compare_button.setEnabled(has_history)
-        self.history_list.setVisible(has_history)
+        self._graph_scroll.setVisible(has_history)
         self.history_label.setVisible(has_history)
         self.restore_button.setVisible(has_history)
         self._empty_label.setVisible(not has_history)
@@ -169,13 +232,19 @@ class GitPanel(QWidget):
                 self.branch_combo.setCurrentText(current)
         self._suppress_branch_signal = False
 
-        self.history_list.clear()
-        snapshots = vcs.history(self.current_folder) if has_history else []
-        for snapshot in snapshots:
-            label = f"* {snapshot.stamp_message}" if snapshot.is_stamp else snapshot.message
-            item_index = self.history_list.count()
-            self.history_list.addItem(label)
-            self.history_list.item(item_index).setData(Qt.ItemDataRole.UserRole, snapshot.sha)
+        uncommitted = vcs.uncommitted_changes(self.current_folder) if has_history else []
+        self.uncommitted_count = len(uncommitted)
+        self.changes_label.setText(f"Changes ({len(uncommitted)})")
+        self.changes_list.clear()
+        for change in uncommitted:
+            prefix = _CHANGE_TYPE_PREFIX.get(change.change_type, "?")
+            item_index = self.changes_list.count()
+            self.changes_list.addItem(f"{prefix}  {change.path}")
+            self.changes_list.item(item_index).setData(Qt.ItemDataRole.UserRole, change.path)
+        self._update_commit_enabled()
+
+        snapshots = vcs.graph_history(self.current_folder) if has_history else []
+        self.graph.set_snapshots(snapshots)
         self.restore_button.setEnabled(False)
 
         for combo in (self.compare_a_combo, self.compare_b_combo):
@@ -189,6 +258,25 @@ class GitPanel(QWidget):
             self.compare_b_combo.setCurrentIndex(1)
 
     # -- user actions ---------------------------------------------------------------------------
+
+    def _on_change_clicked(self, item) -> None:  # noqa: ANN001 -- QListWidgetItem
+        rel_path = item.data(Qt.ItemDataRole.UserRole)
+        if rel_path:
+            self.diff_file_requested.emit(rel_path)
+
+    def _update_commit_enabled(self) -> None:
+        has_message = bool(self.commit_message_edit.text().strip())
+        self.commit_button.setEnabled(self.uncommitted_count > 0 and has_message)
+
+    def _on_commit_clicked(self) -> None:
+        message = self.commit_message_edit.text().strip()
+        if message and self.uncommitted_count > 0:
+            self.commit_requested.emit(message)
+
+    def clear_commit_message(self) -> None:
+        """Called by MainWindow right after a successful commit -- the message box shouldn't carry
+        the just-committed text forward into whatever gets typed next."""
+        self.commit_message_edit.clear()
 
     def _on_stamp_clicked(self) -> None:
         message = self._ask_text("Stamp Release", "Commit message:")
@@ -217,13 +305,13 @@ class GitPanel(QWidget):
         if ref_a and ref_b:
             self.compare_requested.emit(ref_a, ref_b)
 
-    def _on_history_row_changed(self, row: int) -> None:
-        self.restore_button.setEnabled(row >= 0)
+    def _on_graph_selection_changed(self, sha: str) -> None:
+        self.restore_button.setEnabled(bool(sha))
 
     def _on_restore_clicked(self) -> None:
-        item = self.history_list.currentItem()
-        if item is not None:
-            self.restore_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+        sha = self.graph.selected_sha()
+        if sha:
+            self.restore_requested.emit(sha)
 
     def _ask_text(self, title: str, label: str) -> str:
         """Kept as its own method purely as a test seam -- same reasoning as ``MainWindow``'s own

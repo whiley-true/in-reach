@@ -380,6 +380,56 @@ def test_resync_from_bin_without_an_override_keeps_the_bins_own_title(tmp_path: 
     assert settings_json["meta"]["description"] == "RVT's own description"
 
 
+def test_resync_from_bin_carries_generated_at_through(tmp_path: Path, monkeypatch) -> None:
+    # PROMPT.md: "we want to update our compiling process so it no longers updates a game's created
+    # at ... this is because every compile was updating this value and causing git changes[;]
+    # instead created at and modified at should be set to the same value of when the gametype was
+    # created in in-reach" -- resync_from_bin's own real caller (MainWindow's .bin-watcher, firing
+    # after every successful Apply) now reads this project's own already-established
+    # meta.generated_at back via settings_io.load_meta_generated_at() and passes it through as
+    # created_at, so it stops re-stamping to datetime.now() (a real, confirmed source of pointless
+    # settings.json churn on every single compile) once a project has one.
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    fixed = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    decompile.resync_from_bin(bin_path, folder, created_at=fixed)
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    build_json = json.loads((folder / "build" / decompile.GENERATED_SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["generated_at"] == fixed.isoformat().replace("+00:00", "Z")
+    assert build_json["meta"]["generated_at"] == fixed.isoformat().replace("+00:00", "Z")
+
+
+def test_resync_from_bin_without_an_override_uses_the_freshly_extracted_generated_at(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The one caller that's *supposed* to get a fresh stamp -- a project's very first decompile,
+    # which has no prior settings.json for a value to have come from yet (see decompile.py's own
+    # _build_decompiled() comment).
+    fresh = datetime(2024, 6, 15, tzinfo=timezone.utc)
+    settings = _game_settings()
+    settings.meta.generated_at = fresh
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.resync_from_bin(bin_path, folder)
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["generated_at"] == fresh.isoformat().replace("+00:00", "Z")
+
+
 def test_decompile_into_project_defaults_to_no_category(tmp_path: Path, monkeypatch) -> None:
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())
@@ -514,6 +564,7 @@ def test_serialize_decompile_request_round_trips_map_entries(tmp_path: Path) -> 
         category_icon=None,
         title=None,
         description=None,
+        created_at=None,
         map_entries=[entry],
     )
 

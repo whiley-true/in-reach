@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from in_reach.app import logging_setup, maps_io, new_project
@@ -106,6 +107,7 @@ def _build_decompiled(
     category_icon: EngineIcon | None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> _Decompiled:
     """The shared second half of :func:`_decompile` (loads-then-builds) and
     :func:`write_build_snapshot` (already-loaded/compiled-then-builds) -- everything that turns an
@@ -132,6 +134,20 @@ def _build_decompiled(
         game_settings.meta.title = title
     if description is not None:
         game_settings.meta.description = description[:127]
+    # PROMPT.md: "every compile was updating this value and causing git changes[;] instead created
+    # at and modified at should be set to the same value of when the gametype was created in
+    # in-reach" -- extract_game_settings() above always stamps meta.generated_at fresh with
+    # datetime.now() (see extraction.py's own _extract_meta()), which is exactly correct exactly
+    # once (a project's very first decompile, decompile_into_project -- there's no prior
+    # settings.json for that value to have come from yet), and wrong every time after (every later
+    # resync_from_bin/write_build_snapshot call, which would otherwise re-stamp it to "now" again on
+    # every single compile, a real, confirmed source of pointless VCS-tracked churn -- settings.json
+    # changing on every Apply with nothing the user actually edited). Every caller past the first
+    # passes this project's own already-established value back in (see
+    # settings_io.load_meta_generated_at()) so it only ever gets set once, the same
+    # "override-with-this-project's-own-value" pattern as category/category_icon above.
+    if created_at is not None:
+        game_settings.meta.generated_at = created_at
     script_settings = (
         game_settings.multiplayer.script_settings
         if game_settings.multiplayer is not None
@@ -149,11 +165,18 @@ def _decompile(
     category_icon: EngineIcon | None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> _Decompiled:
     rvt = get_rvt()
     variant = rvt.load(str(bin_path))
     return _build_decompiled(
-        variant, bin_path, category=category, category_icon=category_icon, title=title, description=description
+        variant,
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
 
 
@@ -166,6 +189,7 @@ def write_build_snapshot(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     """Extracts from an already-loaded/compiled ``variant`` (see
     :mod:`in_reach.app.rvt.compile`'s ``run_compile()``) and writes *only*
@@ -186,9 +210,19 @@ def write_build_snapshot(
             ``settings/settings.json`` (see
             :func:`~in_reach.app.rvt.settings_io.load_meta_category`/``load_meta_title_description``)
             rather than losing them.
+        created_at: This project's own ``meta.generated_at``, same reasoning as
+            category/category_icon -- callers should read it back via
+            :func:`~in_reach.app.rvt.settings_io.load_meta_generated_at` so a real compile doesn't
+            re-stamp it to ``datetime.now()`` (see :meth:`_build_decompiled`'s own comment on why).
     """
     decompiled = _build_decompiled(
-        variant, out_path, category=category, category_icon=category_icon, title=title, description=description
+        variant,
+        out_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
     _write_generated_files(
         decompiled,
@@ -208,6 +242,7 @@ def _serialize_decompile_request(
     category_icon: EngineIcon | None,
     title: str | None,
     description: str | None,
+    created_at: datetime | None,
     map_entries: list[maps_io.MapEntry],
 ) -> dict:
     """Everything :func:`_run_decompile_isolated` needs the child process to reconstruct before
@@ -220,6 +255,7 @@ def _serialize_decompile_request(
         "category_icon": int(category_icon) if category_icon is not None else None,
         "title": title,
         "description": description,
+        "created_at": created_at.isoformat() if created_at is not None else None,
         "map_entries": [dataclasses.asdict(entry) for entry in map_entries],
     }
 
@@ -233,6 +269,7 @@ def _run_decompile_isolated(
     category_icon: EngineIcon | None,
     title: str | None,
     description: str | None,
+    created_at: datetime | None,
     map_entries: list[maps_io.MapEntry],
 ) -> None:
     """Runs ``mode`` (``"into_project"`` or ``"resync"``) in a fresh, isolated ``python -m`` child
@@ -256,6 +293,7 @@ def _run_decompile_isolated(
         category_icon=category_icon,
         title=title,
         description=description,
+        created_at=created_at,
         map_entries=map_entries,
     )
     request_fd, request_path_str = tempfile.mkstemp(prefix="in-reach-decompile-req-", suffix=".json")
@@ -305,6 +343,7 @@ def decompile_into_project(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Isolated-child-process wrapper around :func:`_decompile_into_project_in_process` -- see this
@@ -318,6 +357,7 @@ def decompile_into_project(
         category_icon=category_icon,
         title=title,
         description=description,
+        created_at=created_at,
         map_entries=list(map_entries),
     )
 
@@ -330,6 +370,7 @@ def resync_from_bin(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Isolated-child-process wrapper around :func:`_resync_from_bin_in_process` -- see this
@@ -343,6 +384,7 @@ def resync_from_bin(
         category_icon=category_icon,
         title=title,
         description=description,
+        created_at=created_at,
         map_entries=list(map_entries),
     )
 
@@ -355,6 +397,7 @@ def _decompile_into_project_in_process(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Loads ``bin_path`` through the bundled ReachVariantTool extension and writes what it decodes
@@ -379,6 +422,11 @@ def _decompile_into_project_in_process(
             title the source ``.bin`` itself carries in its own header.
         description: This project's own description, stamped into ``meta.description`` the same
             way (truncated to fit that field's own, shorter, engine-derived length limit).
+        created_at: Left ``None`` by this function's own real caller (project creation, which has
+            no prior ``settings/settings.json`` for a value to have come from yet) -- see
+            :func:`_build_decompiled`'s own comment for why ``None`` is exactly correct here (the
+            freshly-extracted ``datetime.now()`` becomes this project's own permanent "created in
+            in-reach" timestamp) and wrong for every later resync/compile.
         map_entries: The shared ``.in-reach/maps.json`` scan (see
             :func:`~in_reach.app.maps_io.scan_maps`), narrowed down into ``settings/valid_maps.json``
             via :func:`~in_reach.app.maps_io.filter_maps_for_gametype`.
@@ -393,7 +441,12 @@ def _decompile_into_project_in_process(
     GUI process, see this module's own docstring for why.
     """
     decompiled = _decompile(
-        bin_path, category=category, category_icon=category_icon, title=title, description=description
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
 
     script_dir = folder / new_project.SCRIPT_DIRNAME
@@ -435,6 +488,7 @@ def _resync_from_bin_in_process(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Re-decompiles ``bin_path`` and rewrites ``folder``'s ``settings/`` and
@@ -465,6 +519,12 @@ def _resync_from_bin_in_process(
             :func:`~in_reach.app.new_project.read_project_title`). Still accepted as real overrides
             for anything that *does* want one (see ``test_resync_from_bin_carries_title_and_
             description_through``).
+        created_at: Same reasoning as category/category_icon above, NOT title/description -- a
+            project's own "created in in-reach" moment isn't something RVT has any concept of
+            either, so every real caller should read this back via
+            :func:`~in_reach.app.rvt.settings_io.load_meta_generated_at` rather than letting it
+            re-stamp to ``datetime.now()`` on every resync (see :func:`_build_decompiled`'s own
+            comment for why that would otherwise be a real, git-tracked-churn bug).
         map_entries: Same as :func:`decompile_into_project` -- callers should read this back from
             ``.in-reach/maps.json`` (see :func:`~in_reach.app.maps_io.read_maps_json`) rather than
             re-scanning the map-variant folders on every resync.
@@ -478,7 +538,12 @@ def _resync_from_bin_in_process(
     process, see this module's own docstring for why.
     """
     decompiled = _decompile(
-        bin_path, category=category, category_icon=category_icon, title=title, description=description
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
     _write_generated_files(
         decompiled,
