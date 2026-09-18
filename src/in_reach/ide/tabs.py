@@ -647,6 +647,84 @@ class TabPane(QTabWidget):
         self._track_tab(new_index, diff_widget, state=_TabState(path=None))
         self.setCurrentIndex(new_index)
 
+    def open_head_file(self, rel_path: str, text: str) -> None:
+        """Opens (or refreshes and switches to, if already open) a read-only tab showing
+        ``rel_path``'s own content at ``HEAD`` -- "Open File (HEAD)" (PROMPT.md: "in the changes it
+        should be possible to right click the file and then see: ... open file (HEAD) ...").
+
+        Tracked with ``_TabState(path=None)``, same reasoning as :meth:`open_diff` -- matched by its
+        own ``_head_rel_path`` attribute (a plain widget attribute :meth:`open_file` never looks at)
+        instead, so it can never collide with a real editable tab for the same file.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if getattr(widget, "_head_rel_path", None) == rel_path:
+                widget.setPlainText(text)
+                widget.document().setModified(False)
+                self.setCurrentIndex(index)
+                return
+        editor = TextEditorWidget(path=Path(rel_path))
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor._head_rel_path = rel_path
+        _connect_editor_signals(editor)
+        label = f"{Path(rel_path).name} (HEAD)"
+        new_index = self.addTab(editor, icons.lock_icon(), label)
+        self._track_tab(new_index, editor, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
+    def open_commit_diff(
+        self, rel_path: str, sha: str, *, old_text: str | None, new_text: str | None
+    ) -> None:
+        """Opens (or refreshes and switches to, if already open) a single, *unified* (not split)
+        :class:`~in_reach.ide.unified_diff_view.UnifiedDiffViewWidget` tab for ``rel_path`` as
+        changed by commit ``sha`` -- PROMPT.md: "please make it so that when clicking in history on
+        commits - it extends to show a list of files changed (which can then be clicked on to view
+        (please note this should be a single (not split) view, see sample.png for styling))".
+
+        Tracked with ``_TabState(path=None)``, same reasoning as :meth:`open_diff`/
+        :meth:`open_head_file` -- matched by ``(rel_path, sha)`` together (a single file can appear
+        in more than one commit, and different commits' own diffs of it are never the same tab).
+        """
+        from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, UnifiedDiffViewWidget) and widget.rel_path == rel_path and widget.sha == sha:
+                widget.set_diff(old_text, new_text)
+                self.setCurrentIndex(index)
+                return
+        diff_widget = UnifiedDiffViewWidget(rel_path=rel_path, sha=sha, old_text=old_text, new_text=new_text)
+        label = f"{Path(rel_path).name} ({sha[:8]})"
+        new_index = self.addTab(diff_widget, icons.icon("git", color=_SPLIT_ICON_COLOR), label)
+        self._track_tab(new_index, diff_widget, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
+    def open_commit_file(self, rel_path: str, sha: str, text: str) -> None:
+        """Opens (or refreshes and switches to, if already open) a read-only tab showing
+        ``rel_path``'s own content as of commit ``sha`` -- "Open File" (PROMPT.md, a later pass:
+        "and right click should have the option to open file", the Git panel's own History section
+        "Files Changed" list). Same shape as :meth:`open_head_file`, just for an arbitrary commit
+        instead of always ``HEAD`` -- tracked with ``_TabState(path=None)``, matched by ``(rel_path,
+        sha)`` together, same reasoning as :meth:`open_commit_diff`.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if getattr(widget, "_commit_file_key", None) == (rel_path, sha):
+                widget.setPlainText(text)
+                widget.document().setModified(False)
+                self.setCurrentIndex(index)
+                return
+        editor = TextEditorWidget(path=Path(rel_path))
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor._commit_file_key = (rel_path, sha)
+        _connect_editor_signals(editor)
+        label = f"{Path(rel_path).name} ({sha[:8]})"
+        new_index = self.addTab(editor, icons.lock_icon(), label)
+        self._track_tab(new_index, editor, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
     def _reusable_tab_index(self) -> int | None:
         """The current tab's index, if it's safe for :meth:`open_file` to silently replace with a
         newly-opened file instead of adding a new tab alongside it -- never the Welcome tab or a

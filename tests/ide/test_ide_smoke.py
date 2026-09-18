@@ -1849,6 +1849,7 @@ def test_vcs_switch_branch_reloads_a_clean_open_tab_from_disk(project_window: Ma
     project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("feature branch content\n", encoding="utf-8")
+    vcs.stage_all(folder)
     vcs.commit(folder, "feature branch content")
 
     project_window.vcs_switch_branch(vcs.DEFAULT_BRANCH)
@@ -1986,6 +1987,7 @@ def test_commit_command_prompts_and_commits(
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
     (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("edit notes", True)))
 
     commands = project_window.build_command_palette_commands()
@@ -2102,6 +2104,109 @@ def test_vcs_delete_branch_with_no_project_open_is_a_no_op(window: MainWindow) -
     window.vcs_delete_branch("feature")  # should not raise
 
 
+def test_vcs_merge_branch_fast_forwards_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    project_window.vcs_merge_branch("feature")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from feature\n"
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH
+    assert project_window.git_panel.uncommitted_count == 0
+
+
+def test_vcs_merge_branch_creates_a_two_parent_commit(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "feature.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    feature_sha = vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    main_sha = vcs.commit(folder, "main change")
+
+    project_window.vcs_merge_branch("feature")
+
+    merge_commit = vcs.graph_history(folder)[0]
+    assert sorted(merge_commit.parents) == sorted([main_sha, feature_sha])
+    assert (folder / "feature.txt").read_text(encoding="utf-8") == "from feature\n"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from main\n"
+
+
+def test_vcs_merge_branch_reports_a_conflict_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "main change")
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_merge_branch("feature")
+
+    assert len(errors) == 1
+    assert "Notes.txt" in errors[0]
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # merge refused, nothing committed
+
+
+def test_vcs_merge_branch_warns_before_overwriting_an_unsaved_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("unsaved edit")
+    widget.document().setModified(True)
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_merge_branch_overwrite", lambda self, names: warned.append(names) or False
+    )
+
+    project_window.vcs_merge_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+
+
+def test_vcs_merge_branch_warns_about_uncommitted_changes_and_can_be_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: warned.append(paths) or "cancel"
+    )
+
+    project_window.vcs_merge_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "uncommitted edit\n"  # never overwritten
+
+
+def test_vcs_merge_branch_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_merge_branch("feature")  # should not raise
+
+
 def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2111,6 +2216,7 @@ def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     project_window._on_project_opened(folder)
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    vcs.stage_all(folder)
     vcs.commit(folder, "edit notes")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
 
@@ -2167,6 +2273,287 @@ def test_clicking_a_changed_file_in_the_git_panel_opens_its_diff_tab(
     widget = pane.widget(pane.currentIndex())
     assert isinstance(widget, DiffViewWidget)
     assert widget.rel_path == "Notes.txt"
+
+
+# -- Changes context-menu actions (PROMPT.md: "in the changes it should be possible to right click
+# the file and then see: Open changes, open files, open file (HEAD), discard changes, stage changes
+# (or unstage changes), reveal in file explorer") ------------------------------------------------
+
+
+def test_vcs_open_file_opens_a_real_editable_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_file("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\nedited\n"
+    assert widget.isReadOnly() is False
+
+
+def test_vcs_open_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_file("Notes.txt")  # should not raise
+
+
+def test_vcs_open_file_head_opens_a_read_only_tab_with_the_committed_content(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_file_head("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert widget.isReadOnly() is True
+
+
+def test_vcs_open_file_head_reports_when_there_is_no_head_version(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
+    infos = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
+    before = project_window.main_panel.active_pane.count()
+
+    project_window.vcs_open_file_head("new_file.txt")
+
+    assert len(infos) == 1
+    assert project_window.main_panel.active_pane.count() == before
+
+
+def test_vcs_open_file_head_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_file_head("Notes.txt")  # should not raise
+
+
+def test_vcs_discard_reverts_the_file_after_confirming(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: True)
+
+    project_window.vcs_discard("Notes.txt")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert vcs.uncommitted_changes(folder) == []
+
+
+def test_vcs_discard_does_nothing_when_not_confirmed(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: False)
+
+    project_window.vcs_discard("Notes.txt")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "edited\n"
+
+
+def test_vcs_discard_reloads_an_already_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: True)
+
+    project_window.vcs_discard("Notes.txt")
+
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+
+
+def test_vcs_discard_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_discard("Notes.txt")  # should not raise
+
+
+def test_vcs_reveal_in_explorer_calls_the_os_explorer(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a))
+
+    project_window.vcs_reveal_in_explorer("Notes.txt")
+
+    assert len(calls) == 1
+    assert str(folder / "Notes.txt") in calls[0][0]
+
+
+def test_vcs_reveal_in_explorer_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_reveal_in_explorer("Notes.txt")  # should not raise
+
+
+def test_vcs_stage_adds_paths_to_the_staging_area(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+
+    project_window.vcs_stage(["Notes.txt"])
+
+    assert vcs.staged_paths(folder) == {"Notes.txt"}
+    assert project_window.git_panel.staged_list.count() == 1
+
+
+def test_vcs_stage_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_stage(["Notes.txt"])  # should not raise
+
+
+def test_vcs_unstage_removes_paths_from_the_staging_area(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+
+    project_window.vcs_unstage(["Notes.txt"])
+
+    assert vcs.staged_paths(folder) == set()
+    assert project_window.git_panel.changes_list.count() == 1
+
+
+def test_vcs_unstage_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_unstage(["Notes.txt"])  # should not raise
+
+
+# -- committing uncompiled changes (PROMPT.md: "please also give the user a warning if they are
+# committing changes that haven't yet been compiled (prompting them to compile)") -----------------
+
+
+def test_vcs_commit_warns_when_settings_have_unapplied_changes(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    (folder / "build").mkdir(parents=True, exist_ok=True)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    warned = []
+    monkeypatch.setattr(MainWindow, "_confirm_commit_uncompiled", lambda self: warned.append(1) or "cancel")
+
+    project_window.vcs_commit("edit notes")
+
+    assert warned == [1]
+    assert vcs.uncommitted_changes(folder) != []  # never committed -- cancelled
+
+
+def test_vcs_commit_proceeds_when_chosen_commit_anyway(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    (folder / "build").mkdir(parents=True, exist_ok=True)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["Notes.txt"])
+    monkeypatch.setattr(MainWindow, "_confirm_commit_uncompiled", lambda self: "commit")
+
+    project_window.vcs_commit("edit notes anyway")
+
+    assert vcs.history(folder)[0].message == "edit notes anyway"
+
+
+def test_vcs_commit_does_not_warn_when_nothing_is_unapplied(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+
+    project_window.vcs_commit("edit notes")  # should not raise or block -- nothing unapplied
+
+    assert vcs.history(folder)[0].message == "edit notes"
+
+
+# -- History "Files Changed" (PROMPT.md, a later pass: "please make it so that when clicking in
+# history on commits - it extends to show a list of files changed (which can then be clicked on to
+# view (please note this should be a single (not split) view, see sample.png for styling)) - and
+# right click should have the option to open file") -------------------------------------------
+
+
+def test_vcs_commit_selected_populates_the_git_panels_files_changed_list(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+
+    # Selecting a row in the graph is what actually emits commit_selected in real use, wired to
+    # vcs_commit_selected in __init__ -- select_row() rather than calling vcs_commit_selected()
+    # directly so set_commit_files()'s own "still the selected commit" staleness check (see its
+    # docstring) passes the same way it would for a real click.
+    project_window.git_panel.graph.select_row(0)
+
+    assert project_window.git_panel.commit_files_list.count() >= 1
+
+
+def test_vcs_commit_selected_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_commit_selected("deadbeef")  # should not raise
+
+
+def test_vcs_open_commit_diff_opens_a_unified_diff_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+
+    project_window.vcs_open_commit_diff(root_sha, "Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, UnifiedDiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    assert widget.sha == root_sha
+
+
+def test_vcs_open_commit_diff_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_commit_diff("deadbeef", "Notes.txt")  # should not raise
+
+
+def test_vcs_open_commit_file_opens_a_read_only_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+
+    project_window.vcs_open_commit_file(root_sha, "Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert widget.isReadOnly() is True
+
+
+def test_vcs_open_commit_file_reports_when_the_file_did_not_exist_yet(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+    infos = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
+    before = project_window.main_panel.active_pane.count()
+
+    project_window.vcs_open_commit_file(root_sha, "never_existed.txt")
+
+    assert len(infos) == 1
+    assert project_window.main_panel.active_pane.count() == before
+
+
+def test_vcs_open_commit_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_commit_file("deadbeef", "Notes.txt")  # should not raise
 
 
 def test_vcs_compare_labels_a_stamp_ref_with_its_message(
@@ -2283,6 +2670,23 @@ def test_delete_branch_command_lists_and_deletes_branches(project_window: MainWi
     next(c for c in delete_command.children if c.label == "feature").action()
 
     assert vcs.list_branches(folder) == [vcs.DEFAULT_BRANCH]
+
+
+def test_merge_branch_command_lists_other_branches_and_merges(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "feature.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    commands = project_window.build_command_palette_commands()
+    merge_command = next(c for c in commands if c.label == "Merge Branch")
+    assert [c.label for c in merge_command.children] == ["feature"]  # excludes the current branch
+    merge_command.children[0].action()
+
+    assert (folder / "feature.txt").read_text(encoding="utf-8") == "from feature\n"
 
 
 def test_restore_snapshot_command_lists_stamps_and_autosaves_and_restores(

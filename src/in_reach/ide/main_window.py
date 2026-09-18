@@ -681,9 +681,19 @@ class MainWindow(QWidget):
         self.git_panel.new_branch_requested.connect(self.vcs_new_branch)
         self.git_panel.switch_branch_requested.connect(self.vcs_switch_branch)
         self.git_panel.delete_branch_requested.connect(self.vcs_delete_branch)
+        self.git_panel.merge_branch_requested.connect(self.vcs_merge_branch)
         self.git_panel.compare_requested.connect(self.vcs_compare)
         self.git_panel.restore_requested.connect(self.vcs_restore)
         self.git_panel.diff_file_requested.connect(self.vcs_open_diff)
+        self.git_panel.open_file_requested.connect(self.vcs_open_file)
+        self.git_panel.open_file_head_requested.connect(self.vcs_open_file_head)
+        self.git_panel.discard_requested.connect(self.vcs_discard)
+        self.git_panel.reveal_requested.connect(self.vcs_reveal_in_explorer)
+        self.git_panel.stage_requested.connect(self.vcs_stage)
+        self.git_panel.unstage_requested.connect(self.vcs_unstage)
+        self.git_panel.commit_selected.connect(self.vcs_commit_selected)
+        self.git_panel.commit_diff_requested.connect(self.vcs_open_commit_diff)
+        self.git_panel.commit_open_file_requested.connect(self.vcs_open_commit_file)
         # PROMPT.md: "1 per window" -- initial_project (see __init__'s own docstring) wins over
         # whatever's persisted; otherwise restore the one project PROJECT_DIR_KEY last had open,
         # the same key every gametype-project creation already writes (see
@@ -1033,6 +1043,13 @@ class MainWindow(QWidget):
                 ],
             ),
             Command(
+                label="Merge Branch",
+                children=[
+                    Command(label=name, action=lambda n=name: self.vcs_merge_branch(n))
+                    for name in self._vcs_other_branches()
+                ],
+            ),
+            Command(
                 label="Restore Snapshot",
                 children=[
                     Command(
@@ -1065,6 +1082,17 @@ class MainWindow(QWidget):
         from in_reach.app import vcs
 
         return vcs.list_branches(folder) if vcs.is_initialized(folder) else []
+
+    def _vcs_other_branches(self) -> list[str]:
+        """Every branch except whichever is currently checked out -- what the command palette's
+        own "Merge Branch" submenu offers (merging the current branch into itself is meaningless)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import vcs
+
+        current = vcs.current_branch(folder)
+        return [name for name in self._vcs_branches() if name != current]
 
     def _vcs_history(self) -> list:
         folder = self.explorer_panel.current_folder
@@ -1800,11 +1828,30 @@ class MainWindow(QWidget):
     def vcs_commit(self, message: str) -> None:
         """"Commit" (the Git panel's own inline message box + button) -- PROMPT.md: "committing
         changes should require a commit message" -- the everyday checkpoint action, distinct from
-        :meth:`vcs_stamp` below. A no-op with no project open."""
+        :meth:`vcs_stamp` below. A no-op with no project open.
+
+        PROMPT.md (a later pass): "please also give the user a warning if they are committing
+        changes that haven't yet been compiled (prompting them to compile)" -- checked via the same
+        :func:`~in_reach.app.apply_settings.settings_have_unapplied_changes` the Apply button's own
+        enabled state already uses, so this can never disagree with what that button is showing.
+        "Compile Now" reuses :meth:`apply_settings_changes` itself (which already reports its own
+        failure) rather than re-implementing that bookkeeping here -- re-checking the same
+        "unapplied changes" flag afterward is what tells this whether that compile actually
+        succeeded, without needing a return value from it.
+        """
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import vcs
+        from in_reach.app import apply_settings, vcs
+
+        if apply_settings.settings_have_unapplied_changes(folder):
+            choice = self._confirm_commit_uncompiled()
+            if choice == "cancel":
+                return
+            if choice == "compile":
+                self.apply_settings_changes()
+                if apply_settings.settings_have_unapplied_changes(folder):
+                    return  # compile failed, or still needed -- don't commit on top of that
 
         try:
             vcs.commit(folder, message)
@@ -1814,6 +1861,34 @@ class MainWindow(QWidget):
         _logger.info("committed %r for %s", message, folder)
         self.git_panel.clear_commit_message()
         self._refresh_vcs_status(folder)
+
+    def _confirm_commit_uncompiled(self) -> str:
+        """Asks what to do about committing while ``settings/`` has changes the last compile never
+        picked up -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``"compile"`` (compile first, then commit if it succeeds), ``"commit"`` (commit anyway),
+            or ``"cancel"``.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "You have changes in settings/ that haven't been compiled yet (Apply is still "
+            "showing unapplied changes).\n\nCompile now, commit anyway, or cancel?"
+        )
+        compile_button = box.addButton("Compile Now", QMessageBox.ButtonRole.AcceptRole)
+        commit_button = box.addButton("Commit Anyway", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(compile_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is compile_button:
+            return "compile"
+        if clicked is commit_button:
+            return "commit"
+        return "cancel"
 
     def vcs_stamp(self, message: str) -> None:
         """"Stamp Release" (the Git panel's own button) -- PROMPT.md: "ability for a user to stamp
@@ -1877,6 +1952,10 @@ class MainWindow(QWidget):
                 if not message:
                     return  # backed out of the message prompt -- treat the whole switch as cancelled
                 try:
+                    # These uncommitted files were never explicitly staged by the user (they're just
+                    # live edits on disk) -- stage all of them ourselves, since commit() only ever
+                    # commits what's staged and this whole flow's point is "commit them for me".
+                    vcs.stage_all(folder)
                     vcs.commit(folder, message)
                 except ValueError as exc:
                     QMessageBox.critical(self, "in-reach", str(exc))
@@ -1952,6 +2031,73 @@ class MainWindow(QWidget):
         text, ok = QInputDialog.getText(self, "Commit", "Commit message:")
         return text.strip() if ok else ""
 
+    def vcs_merge_branch(self, source: str) -> None:
+        """"Merge Branch" (the Git panel's own button, PROMPT.md, a later pass: "we also need
+        buttons/functionality to: ... merge branch (this will need History Graph update to show
+        merging of branches)") -- :func:`~in_reach.app.vcs.merge_branch` checks the merged tree out
+        onto disk exactly like a branch switch does, so this takes the same unsaved-edits and
+        uncommitted-changes guards as :meth:`vcs_switch_branch` before calling it. A real conflict
+        (:class:`~in_reach.app.vcs.MergeConflictError`, a :class:`ValueError` subclass) surfaces its
+        own exact list of conflicting paths through the same generic ``ValueError`` handling every
+        other vcs action here already uses. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_merge_branch_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return  # backed out of the message prompt -- treat the whole merge as cancelled
+                try:
+                    # See the identical comment in vcs_switch_branch -- these were never explicitly
+                    # staged by the user, so stage all of them ourselves before committing.
+                    vcs.stage_all(folder)
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to merge_branch() below, which overwrites exactly
+            # these uncommitted files on disk with the merged tree's own content.
+
+        try:
+            vcs.merge_branch(folder, source)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("merged branch %r for %s", source, folder)
+        self.main_panel.reload_open_tabs_under(folder)
+        self._refresh_vcs_status(folder)
+
+    def _confirm_merge_branch_overwrite(self, dirty_names: list[str]) -> bool:
+        """Asks whether to proceed with a merge that would overwrite unsaved *editor* edits in
+        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``True`` for "Merge Anyway", ``False`` for "Cancel".
+        """
+        joined = "\n".join(dirty_names)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "Merging will overwrite unsaved changes in the following open files:\n\n"
+            f"{joined}\n\nMerge anyway, or cancel?"
+        )
+        box.addButton("Merge Anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
+
     def vcs_delete_branch(self, name: str) -> None:
         """"Delete Branch" (the Git panel's own button, PROMPT.md: "add any other functionality
         you think may help the user manage the project using vcs") -- reports a refusal (the
@@ -1999,7 +2145,7 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", str(exc))
             return
         title = f"{self._vcs_ref_label(folder, ref_a)} vs. {self._vcs_ref_label(folder, ref_b)}"
-        dialog = DiffDialog(self, title=title, diffs=diffs)
+        dialog = DiffDialog(self, title=title, folder=folder, ref_a=ref_a, ref_b=ref_b, diffs=diffs)
         dialog.exec()
 
     def vcs_open_diff(self, rel_path: str) -> None:
@@ -2015,6 +2161,150 @@ class MainWindow(QWidget):
 
         old_text, new_text = vcs.uncommitted_file_diff(folder, rel_path)
         self.main_panel.active_pane.open_diff(rel_path, old_text=old_text, new_text=new_text)
+
+    def vcs_open_file(self, rel_path: str) -> None:
+        """"Open File" (the Git panel's own Changes context menu, PROMPT.md: "in the changes it
+        should be possible to right click the file and then see: Open changes, open files, ...") --
+        opens ``rel_path`` as a normal, editable tab (the file's own *current* on-disk content, not
+        a read-only snapshot). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        self.main_panel.active_pane.open_file(folder / rel_path)
+
+    def vcs_open_file_head(self, rel_path: str) -> None:
+        """"Open File (HEAD)" (the Git panel's own Changes context menu) -- opens a read-only tab
+        showing ``rel_path``'s own content at ``HEAD``, not its current (uncommitted) on-disk
+        content. A no-op with no project open; reports rather than crashing if ``rel_path`` has no
+        ``HEAD`` copy at all yet (a newly added, never-committed file)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        head_text, _new_text = vcs.uncommitted_file_diff(folder, rel_path)
+        if head_text is None:
+            QMessageBox.information(self, "in-reach", f"{rel_path} has no HEAD version yet.")
+            return
+        self.main_panel.active_pane.open_head_file(rel_path, head_text)
+
+    def vcs_discard(self, rel_path: str) -> None:
+        """"Discard Changes" (the Git panel's own Changes context menu) -- reverts ``rel_path`` on
+        disk back to its own ``HEAD`` content (a newly-added file is deleted instead), after
+        confirming -- this can't be undone, unlike everything else this panel does (which only ever
+        adds to history). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        if not self._confirm_discard(rel_path):
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.discard_uncommitted_change(folder, rel_path)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("discarded uncommitted change to %r for %s", rel_path, folder)
+        self.main_panel.reload_open_tabs([folder / rel_path])
+        self._refresh_vcs_status(folder)
+
+    def _confirm_discard(self, rel_path: str) -> bool:
+        """Kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``True`` for "Discard Changes", ``False`` for "Cancel".
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(f'Discard changes to "{rel_path}"?\n\nThis can\'t be undone.')
+        box.addButton("Discard Changes", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.DestructiveRole
+
+    def vcs_reveal_in_explorer(self, rel_path: str) -> None:
+        """"Reveal in File Explorer" (the Git panel's own Changes context menu) -- same OS
+        file-explorer reveal as :meth:`~in_reach.ide.tabs.TabPane._reveal_in_os_explorer`. A no-op
+        with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        import subprocess
+
+        try:
+            subprocess.run(["explorer", "/select,", str(folder / rel_path)], check=False)
+        except OSError:
+            pass
+
+    def vcs_stage(self, paths: list[str]) -> None:
+        """"Stage Changes"/"Stage All" (the Git panel's own Changes context menu/button) -- PROMPT.md:
+        "changes should be staged, and then committed". A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        vcs.stage(folder, paths)
+        self._refresh_vcs_status(folder)
+
+    def vcs_unstage(self, paths: list[str]) -> None:
+        """"Unstage Changes"/"Unstage All" (the Git panel's own Staged Changes context menu/
+        button). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        vcs.unstage(folder, paths)
+        self._refresh_vcs_status(folder)
+
+    def vcs_commit_selected(self, sha: str) -> None:
+        """A commit row selected in the Git panel's own History graph -- PROMPT.md, a later pass:
+        "please make it so that when clicking in history on commits - it extends to show a list of
+        files changed". Fetches that commit's own changed-file list and hands it back to the panel
+        (which never calls :mod:`in_reach.app.vcs` directly). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            files = vcs.commit_files_changed(folder, sha)
+        except ValueError:
+            return  # the graph's own selection is always a real commit -- a stale/bad sha is unusual
+        self.git_panel.set_commit_files(sha, files)
+
+    def vcs_open_commit_diff(self, sha: str, rel_path: str) -> None:
+        """A file clicked in the Git panel's own "Files Changed" list (or "View Diff" from its
+        context menu) -- opens a single, unified (not split) diff tab for ``rel_path`` as changed by
+        commit ``sha`` (PROMPT.md: "(which can then be clicked on to view (please note this should
+        be a single (not split) view, see sample.png for styling))"). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        old_text, new_text = vcs.commit_file_diff(folder, sha, rel_path)
+        self.main_panel.active_pane.open_commit_diff(rel_path, sha, old_text=old_text, new_text=new_text)
+
+    def vcs_open_commit_file(self, sha: str, rel_path: str) -> None:
+        """"Open File" (the Git panel's own "Files Changed" list context menu, PROMPT.md: "and
+        right click should have the option to open file") -- opens a read-only tab showing
+        ``rel_path``'s own content as of commit ``sha``. A no-op with no project open, or if
+        ``rel_path`` doesn't exist as of that commit (it was removed by it)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        _old_text, new_text = vcs.commit_file_diff(folder, sha, rel_path)
+        if new_text is None:
+            QMessageBox.information(self, "in-reach", f"{rel_path} doesn't exist as of this commit.")
+            return
+        self.main_panel.active_pane.open_commit_file(rel_path, sha, new_text)
 
     def vcs_restore(self, sha: str) -> None:
         """"Restore Selected" (the Git panel's own history list, PROMPT.md: "add any other

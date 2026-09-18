@@ -17,6 +17,7 @@ dependencies = [
     "PyQt6==6.11.0",
     "pydantic==2.13.4",
     "dulwich==1.2.12",
+    "merge3==0.0.16",
 ]
 
 [project.optional-dependencies]

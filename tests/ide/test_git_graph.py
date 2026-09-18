@@ -77,6 +77,33 @@ def test_stamp_flag_and_branch_labels_are_preserved_on_the_row() -> None:
     assert rows[0].snapshot.branches == ["main"]
 
 
+def test_a_merge_commit_diverges_a_second_lane_down_to_its_second_parent() -> None:
+    # "merge" is on main, merging in "feature" -- its first parent (a2) continues main's own lane,
+    # its second parent (f1) is feature's own tip, which should get a freshly diverged lane rather
+    # than colliding with main's.
+    rows = compute_lanes(
+        [
+            _snap("merge", parents=["a2", "f1"], branches=["main"]),
+            _snap("f1", parents=["a1"], branches=["feature"]),
+            _snap("a2", parents=["a1"]),
+            _snap("a1", parents=[]),
+        ]
+    )
+    by_sha = {row.snapshot.sha: row for row in rows}
+
+    assert by_sha["merge"].lane == 0
+    assert by_sha["merge"].parent_lanes == [0, 1]
+    assert by_sha["merge"].continues is True
+
+    # f1 picks up the diverged lane 1, and a2 continues straight down lane 0.
+    assert by_sha["f1"].lane == 1
+    assert by_sha["a2"].lane == 0
+
+    # a1 is the shared root both branches trace back to -- both lanes converge back onto it.
+    assert sorted(by_sha["a1"].incoming_lanes) == [0, 1]
+    assert by_sha["a1"].lane == 0
+
+
 def test_active_lane_count_reflects_lanes_still_in_play() -> None:
     rows = compute_lanes(
         [

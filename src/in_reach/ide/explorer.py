@@ -49,6 +49,8 @@ from PyQt6.QtWidgets import (
 
 from in_reach.app import new_project, system_verify
 from in_reach.app.rvt import settings_io, strings_io
+from in_reach.ide.collapsible_section import CollapsibleSection as _CollapsibleSection
+from in_reach.ide.collapsible_section import SECTION_HEADER_STYLE
 from in_reach.ide.file_icons import ExplorerIconProvider
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
@@ -73,6 +75,18 @@ _MAX_CONDITIONS = 512
 _MAX_ACTIONS = 1024
 _MAX_FORGE_LABELS = 16
 _MAX_STRINGS = 112
+#: PROMPT.md: "also in dashboard please add progress bars for the remaining script counts (options,
+#: traits, stats, widgets)" -- same confirmed-cap sourcing as the five above (vendored
+#: ReachVariantTool ``game_variants/components/megalo/limits.h``,
+#: ``Megalo::Limits::max_script_options``/``max_script_traits``/``max_script_stats``/
+#: ``max_script_widgets``), not guessed -- ``max_script_traits``/``max_script_widgets`` in
+#: particular are *not* the same numbers a plausible-looking guess would land on (16 and 4, not 8
+#: and 11/12 -- the latter pair would come from conflating this cap with
+#: ``ScriptedHUDWidget.position``'s own unrelated 0-11 placement-slot range).
+_MAX_SCRIPT_OPTIONS = 16
+_MAX_SCRIPT_TRAITS = 16
+_MAX_SCRIPT_STATS = 4
+_MAX_SCRIPT_WIDGETS = 4
 
 
 def _new_tree() -> tuple[QTreeView, QFileSystemModel]:
@@ -131,12 +145,14 @@ def _point_tree_at(tree: QTreeView, model: QFileSystemModel, folder: Path | None
 #: PROMPT.md: "instead of using bubbles around sections, maybe just have the section header and a
 #: line break/divider with a collapsing arrow ... to try and stop the ui being too cluttered" --
 #: strips the checkable QToolButton's own default raised/"pill" background (shown whenever a
-#: section is expanded, since it's ``checked`` then -- see _CollapsibleSection.__init__) so the
+#: section is expanded, since it's ``checked`` then -- see ``CollapsibleSection.__init__``) so the
 #: header reads as plain text-plus-arrow, not a button.
 #: PROMPT.md: "please update dashbaord so headings are bold and subheadings are italic" -- applies
 #: to every _CollapsibleSection header (Stats/Quick Launch/Settings), on top of the plain-text/no-
-#: background treatment above.
-_SECTION_HEADER_STYLE = "QToolButton { border: none; background-color: transparent; font-weight: bold; }"
+#: background treatment above. See :mod:`in_reach.ide.collapsible_section` for the widget itself
+#: (factored out once the Git panel needed the same treatment) -- this alias is kept so every
+#: existing ``_SECTION_HEADER_STYLE`` reference in this file stays valid.
+_SECTION_HEADER_STYLE = SECTION_HEADER_STYLE
 
 #: PROMPT.md: "please remove the bubble outline around triggers conditions actions, forge lables
 #: and strings" -- Fusion's own default QProgressBar is a rounded, bordered pill; this flattens it
@@ -226,57 +242,6 @@ class _StatBox(QFrame):
         percent = min(100, round(100 * count / maximum)) if maximum else 0
         self.progress.setValue(percent)
         self.progress.setFormat(f"{label}: {count}/{maximum} ({percent}%)")
-
-
-class _CollapsibleSection(QWidget):
-    """A header (an arrow + title, click to toggle) above a divider line and a body widget that
-    hides/shows with it -- VS Code's own sidebar section headers, applied to every box in this
-    panel so each reads as its own labeled region without needing a bordered/bubble frame around
-    it (PROMPT.md, see :data:`_SECTION_HEADER_STYLE`)."""
-
-    def __init__(self, title: str, body: QWidget, *, collapsed: bool = True) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self._toggle = QToolButton()
-        self._toggle.setText(title)
-        self._toggle.setCheckable(True)
-        self._toggle.setChecked(not collapsed)
-        self._toggle.setArrowType(Qt.ArrowType.DownArrow if not collapsed else Qt.ArrowType.RightArrow)
-        self._toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._toggle.setAutoRaise(True)
-        self._toggle.setStyleSheet(_SECTION_HEADER_STYLE)
-        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._toggle.toggled.connect(self._on_toggled)
-        layout.addWidget(self._toggle)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Plain)
-        layout.addWidget(divider)
-
-        self.body = body
-        self.body.setVisible(not collapsed)
-        layout.addWidget(self.body, 1)
-
-    def _on_toggled(self, checked: bool) -> None:
-        self._toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
-        self.body.setVisible(checked)
-
-    def set_header_font(self, font: QFont) -> None:
-        """Overrides the header's own font -- e.g. to size it independently of :attr:`body`'s
-        inherited one (see :meth:`ExplorerPanel.refresh_font_scale`)."""
-        self._toggle.setFont(font)
-
-    @property
-    def expanded(self) -> bool:
-        return self._toggle.isChecked()
-
-    def set_expanded(self, expanded: bool) -> None:
-        self._toggle.setChecked(expanded)
 
 
 class ExplorerPanel(QWidget):
@@ -388,6 +353,13 @@ class ExplorerPanel(QWidget):
         self.action_stat = _StatBox()
         self.forge_label_stat = _StatBox()
         self.string_stat = _StatBox()
+        # PROMPT.md: "also in dashboard please add progress bars for the remaining script counts
+        # (options, traits, stats, widgets)" -- same _StatBox treatment as the five above, just the
+        # four ScriptContentCounts fields that didn't get one yet.
+        self.script_option_stat = _StatBox()
+        self.script_trait_stat = _StatBox()
+        self.script_stat_stat = _StatBox()
+        self.script_widget_stat = _StatBox()
         stats_grid = QGridLayout()
         stats_grid.setContentsMargins(0, 0, 0, 0)
         stats_grid.setSpacing(6)
@@ -396,6 +368,10 @@ class ExplorerPanel(QWidget):
         stats_grid.addWidget(self.action_stat, 1, 0)
         stats_grid.addWidget(self.forge_label_stat, 1, 1)
         stats_grid.addWidget(self.string_stat, 2, 0)
+        stats_grid.addWidget(self.script_option_stat, 2, 1)
+        stats_grid.addWidget(self.script_trait_stat, 3, 0)
+        stats_grid.addWidget(self.script_stat_stat, 3, 1)
+        stats_grid.addWidget(self.script_widget_stat, 4, 0)
         self.stats_grid_widget = QWidget()
         self.stats_grid_widget.setLayout(stats_grid)
         self.stats_label = QLabel(_NO_STATS_TEXT)
@@ -653,6 +629,10 @@ class ExplorerPanel(QWidget):
         self.action_stat.setVisible(has_counts)
         self.forge_label_stat.setVisible(has_counts)
         self.string_stat.setVisible(strings_count is not None)
+        self.script_option_stat.setVisible(has_counts)
+        self.script_trait_stat.setVisible(has_counts)
+        self.script_stat_stat.setVisible(has_counts)
+        self.script_widget_stat.setVisible(has_counts)
         if has_counts:
             self.stats_progress.setValue(round(stats.space.percent))
             # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 Bytes used
@@ -668,6 +648,12 @@ class ExplorerPanel(QWidget):
             self.condition_stat.set_value("Conditions", counts.conditions, _MAX_CONDITIONS)
             self.action_stat.set_value("Actions", counts.actions, _MAX_ACTIONS)
             self.forge_label_stat.set_value("Forge Labels", counts.forge_labels, _MAX_FORGE_LABELS)
+            # PROMPT.md: "also in dashboard please add progress bars for the remaining script
+            # counts (options, traits, stats, widgets)" -- see _MAX_SCRIPT_OPTIONS et al.
+            self.script_option_stat.set_value("Options", counts.script_options, _MAX_SCRIPT_OPTIONS)
+            self.script_trait_stat.set_value("Traits", counts.script_traits, _MAX_SCRIPT_TRAITS)
+            self.script_stat_stat.set_value("Stats", counts.script_stats, _MAX_SCRIPT_STATS)
+            self.script_widget_stat.set_value("Widgets", counts.script_widgets, _MAX_SCRIPT_WIDGETS)
         if strings_count is not None:
             self.string_stat.set_value("Strings", strings_count, _MAX_STRINGS)
         self.stats_label.setVisible(not has_counts and strings_count is None)

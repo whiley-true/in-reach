@@ -4,11 +4,22 @@ implementation").
 Design follows the shadow-repo shape already designed (and partially shipped) in the prior
 ``in-reach-v2`` prototype, per this repo's own ``TO_IMPLEMENT_(LATEST).md`` (§0.1 item 9, §2, §9.6):
 a *bare* git repository with no working tree of its own -- the real "working tree" is just whatever
-currently sits on disk under the project folder. There is deliberately no on-disk git index/staging
-area: every snapshot is built directly from a fresh recursive walk of the project folder (skipping
-this history store itself and anything :func:`~in_reach.app.new_project.is_generated_file` already
-knows is disposable build output), so a snapshot always reflects exactly what a user would see in
-the Explorer right now.
+currently sits on disk under the project folder. A commit's own tree is always built directly from
+that working tree (skipping this history store itself and anything
+:func:`~in_reach.app.new_project.is_generated_file` already knows is disposable build output), so a
+snapshot always reflects exactly what a user would see in the Explorer right now -- never a
+separately-tracked copy of file *content* the way a real git index/working-tree checkout is.
+
+There *is* a real staging area now (PROMPT.md, a later VSCode-style pass: "please then make it so
+that changes should be staged, and then committed") -- just not git's own on-disk index format: a
+plain JSON list of staged paths (see :func:`staged_paths`/:func:`stage`/:func:`unstage`, persisted
+as ``stage.json`` next to this shadow repo itself) that :func:`commit` cross-references against
+:func:`uncommitted_changes` at commit time. A staged path's *content* is never separately captured
+the way git's own index captures a blob at ``add`` time -- :func:`commit` always reads whatever's on
+disk for a staged path at commit time, so staging a file and then editing it again before committing
+just commits the latest edit, same as ``git add`` followed by another edit before ``git commit``
+would need a second ``git add`` to pick up (this shadow VCS has no notion of "add" being a snapshot
+of content at that moment, only "this path is included in the next commit").
 
 PROMPT.md (a later pass): "we also want our vcs functionality to better match vscode
 functionality[;] so we want to add committed changes and uncommitted changes ... committing changes
@@ -32,6 +43,7 @@ share one history rather than two parallel mechanisms, both now requiring a real
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -155,17 +167,23 @@ def _walk_files(folder: Path) -> dict[str, Path]:
     return files
 
 
-def _build_tree(repo: Repo, files: dict[str, Path]) -> bytes | None:
+def _build_tree(repo: Repo, files: dict[str, Path | bytes]) -> bytes | None:
     """Builds (and stores) a :class:`Tree` object per directory level from ``files``, bottom-up,
     returning the root tree's sha -- or ``None`` if ``files`` is empty (git has no way to represent
-    an empty tree as a parent entry)."""
+    an empty tree as a parent entry).
+
+    Each value is either a real on-disk :class:`Path` (read fresh and hashed into a new blob) or an
+    already-existing blob's own raw sha (reused as-is, no re-read/re-hash) -- the latter is what
+    :func:`_staged_tree` needs to carry a staged commit's *untouched* paths straight over from
+    ``HEAD``'s own tree without re-reading files this commit was never asked to include at all.
+    """
     root: dict[str, object] = {}
-    for rel, real_path in files.items():
+    for rel, value in files.items():
         parts = rel.split("/")
         node = root
         for part in parts[:-1]:
             node = node.setdefault(part, {})  # type: ignore[assignment]
-        node[parts[-1]] = real_path
+        node[parts[-1]] = value
 
     def _write(node: dict[str, object]) -> bytes | None:
         tree = Tree()
@@ -176,6 +194,8 @@ def _build_tree(repo: Repo, files: dict[str, Path]) -> bytes | None:
                 if sub_sha is None:
                     continue
                 tree.add(name.encode("utf-8"), 0o040000, sub_sha)
+            elif isinstance(value, bytes):
+                tree.add(name.encode("utf-8"), 0o100644, value)
             else:
                 data = value.read_bytes()  # type: ignore[union-attr]
                 blob = Blob.from_string(data)
@@ -189,6 +209,27 @@ def _build_tree(repo: Repo, files: dict[str, Path]) -> bytes | None:
     return _write(root)
 
 
+def _flat_tree_blobs(repo: Repo, tree_sha: bytes | None) -> dict[str, bytes]:
+    """Every blob's own sha in ``tree_sha`` (recursively), keyed by its ``/``-joined path -- the
+    same shape :func:`_walk_files` gives :func:`_build_tree` for a disk-sourced tree, just sourced
+    from an already-committed tree instead. ``{}`` for ``tree_sha=None`` (an empty/unborn tree)."""
+    blobs: dict[str, bytes] = {}
+    if tree_sha is None:
+        return blobs
+
+    def _walk(sha: bytes, prefix: str) -> None:
+        tree = repo.object_store[sha]
+        for entry in tree.iteritems():
+            rel = f"{prefix}{entry.path.decode('utf-8')}"
+            if entry.mode == 0o040000:
+                _walk(entry.sha, f"{rel}/")
+            else:
+                blobs[rel] = entry.sha
+
+    _walk(tree_sha, "")
+    return blobs
+
+
 def _head_commit(repo: Repo) -> Commit | None:
     try:
         head_sha = repo.refs[b"HEAD"]
@@ -197,11 +238,14 @@ def _head_commit(repo: Repo) -> Commit | None:
     return repo.object_store[head_sha]
 
 
-def _commit(repo: Repo, tree_sha: bytes, message: str) -> str:
+def _commit(repo: Repo, tree_sha: bytes, message: str, *, extra_parents: list[bytes] = ()) -> str:
+    """Commits ``tree_sha`` onto the current branch's own ``HEAD`` -- ``extra_parents`` (each a
+    commit sha), if given, are additional parents beyond ``HEAD`` itself, for :func:`merge_branch`'s
+    own merge commit (two parents: this branch's own tip, plus the branch being merged in's)."""
     parent = _head_commit(repo)
     commit = Commit()
     commit.tree = tree_sha
-    commit.parents = [parent.id] if parent is not None else []
+    commit.parents = ([parent.id] if parent is not None else []) + list(extra_parents)
     commit.author = commit.committer = _AUTHOR
     now = int(time.time())
     commit.author_time = commit.commit_time = now
@@ -268,7 +312,9 @@ def switch_branch(folder: Path, name: str) -> None:
 
     This overwrites/deletes real files -- callers are responsible for warning the user first (and
     for snapshotting/saving anything they want kept that isn't already in history: this only ever
-    restores what was actually committed).
+    restores what was actually committed). Also clears the staging area (see :func:`stage`) --
+    whatever was staged referred to edits against the *previous* branch's own working tree, which
+    this just replaced wholesale.
 
     Raises:
         ValueError: No branch named ``name`` exists.
@@ -280,6 +326,7 @@ def switch_branch(folder: Path, name: str) -> None:
     commit = repo.object_store[repo.refs[ref]]
     _checkout_tree(repo, commit.tree, folder)
     repo.refs.set_symbolic_ref(b"HEAD", ref)
+    _write_staged_paths(folder, set())
     _logger.info("switched branch to %r in %s", name, folder)
 
 
@@ -304,19 +351,95 @@ def delete_branch(folder: Path, name: str) -> None:
     _logger.info("deleted branch %r in %s", name, folder)
 
 
+class MergeConflictError(ValueError):
+    """:func:`merge_branch` couldn't complete automatically -- ``paths`` lists every file both
+    branches changed *differently* since their own common ancestor, which this shadow VCS has no
+    interactive conflict-resolution UI to let the user pick a winner for (unlike git's own
+    conflict-marker-in-the-file approach). The merge itself never happened -- nothing on disk or in
+    history changed -- so resolving this means picking one side by hand (e.g. :func:`restore_snapshot`
+    to the branch whose version should win for each conflicting path, or hand-editing it) and trying
+    the merge again once every conflicting path no longer disagrees.
+    """
+
+    def __init__(self, paths: list[str]) -> None:
+        self.paths = paths
+        super().__init__(
+            "Merge conflict in: " + ", ".join(paths) + " -- resolve by hand (pick one side's "
+            "version for each) and try again."
+        )
+
+
+def merge_branch(folder: Path, source: str) -> str:
+    """Merges branch ``source`` into the current branch -- PROMPT.md: "we also need buttons/
+    functionality to: ... merge branch (this will need History Graph update to show merging of
+    branches)" (see :func:`graph_history`'s own multi-parent :attr:`Snapshot.parents` support).
+
+    Fast-forwards (moves the current branch's own ref straight to ``source``'s tip, checking out its
+    tree -- no merge commit at all) when the current branch's own ``HEAD`` is a plain ancestor of
+    ``source``, i.e. nothing unique on the current branch to preserve alongside it. Otherwise
+    attempts a real three-way merge (via ``dulwich.merge.Merger``, the same machinery real git
+    itself is built on) against the two branches' own most recent common ancestor: a path only one
+    side touched takes that side's version outright; recurses into subtrees so non-overlapping
+    changes in different files never conflict just for sharing a directory. A path *both* sides
+    changed differently raises :class:`MergeConflictError` instead of guessing -- this shadow VCS
+    has no interactive resolution UI, so an unmergeable path stops the whole merge rather than
+    silently picking a side.
+
+    Also clears the staging area (see :func:`stage`) on either path, same reasoning as
+    :func:`switch_branch`'s own docstring -- the working tree just changed wholesale.
+
+    Raises:
+        ValueError: ``folder`` has no history yet, ``source`` doesn't name a known branch, or
+            ``source`` is already the current branch.
+        MergeConflictError: Both branches changed some of the same paths differently.
+    """
+    if not is_initialized(folder):
+        raise ValueError("This project has no history yet.")
+    repo = _open(folder)
+    current = current_branch(folder)
+    if current is None:
+        raise ValueError("No branch is currently checked out.")
+    if source == current:
+        raise ValueError(f'"{source}" is already the current branch.')
+    source_ref = _branch_ref(source)
+    if source_ref not in repo.refs:
+        raise ValueError(f'No branch named "{source}".')
+
+    from dulwich.graph import can_fast_forward, find_merge_base
+    from dulwich.merge import Merger
+
+    ours_sha = repo.refs[_current_branch_ref(repo)]
+    theirs_sha = repo.refs[source_ref]
+
+    if can_fast_forward(repo, ours_sha, theirs_sha):
+        commit_obj = repo.object_store[theirs_sha]
+        _checkout_tree(repo, commit_obj.tree, folder)
+        repo.refs[_current_branch_ref(repo)] = theirs_sha
+        _write_staged_paths(folder, set())
+        _logger.info("fast-forwarded %r to %r in %s", current, source, folder)
+        return theirs_sha.decode("ascii")
+
+    base_ids = find_merge_base(repo, [ours_sha, theirs_sha])
+    base_tree = repo.object_store[base_ids[0]].tree if base_ids else None
+    merger = Merger(repo.object_store)
+    merged_tree, conflicts = merger.merge_trees(
+        repo.object_store[base_tree] if base_tree is not None else None,
+        repo.object_store[repo.object_store[ours_sha].tree],
+        repo.object_store[repo.object_store[theirs_sha].tree],
+    )
+    if conflicts:
+        raise MergeConflictError(sorted(path.decode("utf-8") for path in conflicts))
+
+    repo.object_store.add_object(merged_tree)
+    sha = _commit(repo, merged_tree.id, f"Merge branch '{source}' into {current}", extra_parents=[theirs_sha])
+    _checkout_tree(repo, merged_tree.id, folder)
+    _write_staged_paths(folder, set())
+    _logger.info("merged %r into %r in %s (%s)", source, current, folder, sha)
+    return sha
+
+
 def _checkout_tree(repo: Repo, tree_sha: bytes, folder: Path) -> None:
-    wanted: dict[str, bytes] = {}
-
-    def _walk(sha: bytes, prefix: str) -> None:
-        tree = repo.object_store[sha]
-        for entry in tree.iteritems():
-            rel = f"{prefix}{entry.path.decode('utf-8')}"
-            if entry.mode == 0o040000:
-                _walk(entry.sha, f"{rel}/")
-            else:
-                wanted[rel] = entry.sha
-
-    _walk(tree_sha, "")
+    wanted = _flat_tree_blobs(repo, tree_sha)
 
     for rel, blob_sha in wanted.items():
         dest = folder / rel
@@ -347,19 +470,92 @@ class UncommittedFile:
     path: str
     #: ``"added"``, ``"removed"`` or ``"modified"`` -- same convention as :class:`FileDiff` below.
     change_type: str
+    #: Whether this path is in the staging area (PROMPT.md, a later pass: "please then make it so
+    #: that changes should be staged, and then committed") -- see :func:`stage`/:func:`commit`.
+    staged: bool = False
+
+
+_STAGE_FILENAME = "stage.json"
+
+
+def _stage_file(folder: Path) -> Path:
+    return history_dir(folder) / _STAGE_FILENAME
+
+
+def staged_paths(folder: Path) -> set[str]:
+    """The raw, persisted staging list -- every path :func:`stage` has ever added and
+    :func:`unstage`/:func:`commit` hasn't since removed. Not pruned against what's *actually*
+    still uncommitted (a path staged and then hand-reverted back to match ``HEAD`` stays listed
+    here until something explicitly unstages it) -- callers that care whether a staged path is
+    still real should cross-reference :func:`uncommitted_changes` instead, which already does that
+    (see its own ``staged`` field)."""
+    try:
+        return set(json.loads(_stage_file(folder).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return set()
+
+
+def _write_staged_paths(folder: Path, paths: set[str]) -> None:
+    _stage_file(folder).write_text(json.dumps(sorted(paths)), encoding="utf-8")
+
+
+def stage(folder: Path, paths: list[str]) -> None:
+    """Adds ``paths`` to the staging area -- PROMPT.md: "in the changes it should be possible to
+    right click the file and then see: ... stage changes (or unstage changes)". A no-op for a path
+    already staged; never validates ``paths`` are actually uncommitted (staging a path that isn't
+    is harmless -- :func:`commit` only ever acts on the intersection of staged and truly-uncommitted
+    paths, see its own docstring)."""
+    current = staged_paths(folder)
+    current.update(paths)
+    _write_staged_paths(folder, current)
+
+
+def unstage(folder: Path, paths: list[str]) -> None:
+    """Removes ``paths`` from the staging area. A no-op for a path that was never staged."""
+    current = staged_paths(folder)
+    current.difference_update(paths)
+    _write_staged_paths(folder, current)
+
+
+def stage_all(folder: Path) -> None:
+    """Stages every currently uncommitted path -- "Stage All"."""
+    stage(folder, [c.path for c in uncommitted_changes(folder)])
+
+
+def discard_uncommitted_change(folder: Path, rel_path: str) -> None:
+    """Reverts ``rel_path`` on disk back to its own ``HEAD`` content (a newly-added file with no
+    ``HEAD`` copy is deleted instead) -- PROMPT.md: "in the changes it should be possible to right
+    click the file and then see: ... discard changes". Also unstages it, if staged -- there's
+    nothing left to stage once the change itself is gone.
+
+    Raises:
+        ValueError: ``folder`` has no history yet.
+    """
+    if not is_initialized(folder):
+        raise ValueError("This project has no history yet.")
+    repo = _open(folder)
+    parent = _head_commit(repo)
+    blobs = _flat_tree_blobs(repo, parent.tree if parent is not None else None)
+    real_path = folder / rel_path
+    blob_sha = blobs.get(rel_path)
+    if blob_sha is None:
+        real_path.unlink(missing_ok=True)
+    else:
+        real_path.parent.mkdir(parents=True, exist_ok=True)
+        real_path.write_bytes(repo.object_store[blob_sha].data)
+    unstage(folder, [rel_path])
 
 
 def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
     """Every file that differs between ``folder``'s current on-disk state and its last commit
     (``HEAD``), sorted by path -- what the Git panel's own uncommitted-changes badge counts, and
-    what :func:`commit` snapshots when called. Empty if ``folder`` has no history yet, or if the
+    what :func:`stage`/:func:`commit` act on. Empty if ``folder`` has no history yet, or if the
     working tree exactly matches ``HEAD`` (nothing uncommitted).
 
     Building the comparison tree has the same side effect :func:`commit`/:func:`stamp` already have
     (writing loose blob/tree objects into the shadow repo's own object store even when nothing ends
-    up committed) -- acceptable here for the same reason it already was there: this repo has no
-    working index/staging area of its own, so "what would a commit look like right now" can only
-    ever be answered by actually building that tree.
+    up committed) -- acceptable here for the same reason it already was there: "what would a commit
+    look like right now" can only ever be answered by actually building that tree.
     """
     if not is_initialized(folder):
         return []
@@ -370,15 +566,41 @@ def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
     tree_sha = _build_tree(repo, _walk_files(folder))
     if tree_sha == (parent.tree if parent is not None else None):
         return []
+    staged = staged_paths(folder)
     changes = tree_changes(repo.object_store, parent.tree if parent is not None else None, tree_sha)
     results = [
         UncommittedFile(
-            path=(change.new or change.old).path.decode("utf-8"),
+            path=(path := (change.new or change.old).path.decode("utf-8")),
             change_type={"add": "added", "delete": "removed"}.get(change.type, "modified"),
+            staged=path in staged,
         )
         for change in changes
     ]
     return sorted(results, key=lambda f: f.path)
+
+
+def _normalize_newlines(text: str | None) -> str | None:
+    """``"\\r\\n"``/``"\\r"`` -> ``"\\n"``, or ``None`` through unchanged -- a git blob preserves
+    whatever bytes were actually committed ("\\r\\n" on a file this shadow VCS snapshotted from a
+    Windows disk write), unlike :meth:`Path.read_text`'s own universal-newlines decoding. Comparing
+    both sides of a diff through this stops every single line reading as "changed" purely over a
+    line-ending difference nobody actually made -- same reasoning/technique as
+    ``in_reach.app.rvt.decompile.normalize_script_text``."""
+    return text if text is None else text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _blob_text_at_path(repo: Repo, tree_sha: bytes | None, rel_path: str) -> str | None:
+    """``rel_path``'s own decoded blob text within ``tree_sha`` -- ``None`` if ``tree_sha`` is
+    ``None``, ``rel_path`` doesn't exist in it, or the blob isn't valid UTF-8 (binary)."""
+    if tree_sha is None:
+        return None
+    from dulwich.object_store import tree_lookup_path
+
+    try:
+        _mode, sha = tree_lookup_path(repo.object_store.__getitem__, tree_sha, rel_path.encode("utf-8"))
+    except KeyError:
+        return None
+    return _decode_blob(repo, sha)
 
 
 def uncommitted_file_diff(folder: Path, rel_path: str) -> tuple[str | None, str | None]:
@@ -400,16 +622,7 @@ def uncommitted_file_diff(folder: Path, rel_path: str) -> tuple[str | None, str 
         return None, None
     repo = _open(folder)
     parent = _head_commit(repo)
-    old_text = None
-    if parent is not None:
-        from dulwich.object_store import tree_lookup_path
-
-        try:
-            _mode, sha = tree_lookup_path(repo.object_store.__getitem__, parent.tree, rel_path.encode("utf-8"))
-        except KeyError:
-            old_text = None
-        else:
-            old_text = _decode_blob(repo, sha)
+    old_text = _blob_text_at_path(repo, parent.tree if parent is not None else None, rel_path)
     real_path = folder / rel_path
     new_text = None
     if real_path.is_file():
@@ -417,27 +630,47 @@ def uncommitted_file_diff(folder: Path, rel_path: str) -> tuple[str | None, str 
             new_text = real_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             new_text = None
-    # A git blob preserves whatever bytes were actually committed -- "\r\n" on a file this shadow
-    # VCS snapshotted from a Windows disk write, unlike Path.read_text()'s own universal-newlines
-    # decoding above (already always "\n"). Normalizing both sides the same way stops every single
-    # line reading as "changed" purely over a line-ending difference nobody actually made -- same
-    # reasoning/technique as in_reach.app.rvt.decompile.normalize_script_text.
-    if old_text is not None:
-        old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
-    if new_text is not None:
-        new_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
-    return old_text, new_text
+    return _normalize_newlines(old_text), _normalize_newlines(new_text)
+
+
+def ref_file_diff(folder: Path, ref_a: str, ref_b: str, rel_path: str) -> tuple[str | None, str | None]:
+    """``(old_text, new_text)`` for ``rel_path`` between ``ref_a`` and ``ref_b`` (each a branch name
+    or a :class:`Snapshot.sha`, same as :func:`diff`) -- what the Compare window's own per-file diff
+    view shows for a selected changed file (PROMPT.md, a later pass: "please then add text
+    colourings and line numbers in the compare window to make the text and changes clearer and more
+    visually appealing" -- reuses :class:`~in_reach.ide.diff_view.DiffViewWidget`, the same
+    line-numbered, syntax-highlighted view :func:`uncommitted_file_diff` already feeds the Changes
+    tab's own diff view). ``None`` on either side means ``rel_path`` doesn't exist there (added/
+    removed) or isn't valid UTF-8 text (binary), same as :func:`uncommitted_file_diff`.
+
+    Raises:
+        ValueError: Either ``ref_a`` or ``ref_b`` doesn't name a known branch or snapshot.
+    """
+    repo = _open(folder)
+    sha_a = _resolve_ref(repo, ref_a)
+    sha_b = _resolve_ref(repo, ref_b)
+    if sha_a is None or sha_b is None:
+        unknown = ref_a if sha_a is None else ref_b
+        raise ValueError(f'Unknown branch or snapshot: "{unknown}".')
+    tree_a = repo.object_store[sha_a].tree
+    tree_b = repo.object_store[sha_b].tree
+    old_text = _blob_text_at_path(repo, tree_a, rel_path)
+    new_text = _blob_text_at_path(repo, tree_b, rel_path)
+    return _normalize_newlines(old_text), _normalize_newlines(new_text)
 
 
 def commit(folder: Path, message: str) -> str:
-    """Snapshots ``folder``'s current on-disk state as a plain, user-authored checkpoint (PROMPT.md:
-    "committing changes should require a commit message") -- the everyday counterpart to
-    :func:`stamp`; see this module's own docstring for what tells the two apart.
+    """Snapshots ``folder``'s *staged* changes only (PROMPT.md, a later pass: "changes should be
+    staged, and then committed") as a plain, user-authored checkpoint -- the everyday counterpart to
+    :func:`stamp`; see this module's own docstring for what tells the two apart. An unstaged
+    uncommitted change is left exactly as it was: still uncommitted, untouched on disk, simply not
+    part of this commit -- the resulting tree is ``HEAD``'s own tree with only the staged paths'
+    current on-disk content overlaid (a staged path missing from disk is a staged deletion).
 
     Raises:
-        ValueError: ``message`` is empty, ``folder`` has no history yet, or there's nothing
-            uncommitted to commit (the working tree already matches ``HEAD`` -- same "no empty
-            commits" rule :func:`uncommitted_changes` itself uses to report "nothing changed").
+        ValueError: ``message`` is empty, ``folder`` has no history yet, or nothing is staged (or
+            every staged path turned out to already match ``HEAD``, e.g. staged and then
+            hand-reverted -- same "no empty commits" rule :func:`uncommitted_changes` itself uses).
     """
     if not message.strip():
         raise ValueError("A commit needs a commit message.")
@@ -445,11 +678,22 @@ def commit(folder: Path, message: str) -> str:
         raise ValueError("This project has no history yet.")
     repo = _open(folder)
     parent = _head_commit(repo)
-    tree_sha = _build_tree(repo, _walk_files(folder))
+    staged = staged_paths(folder) & {c.path for c in uncommitted_changes(folder)}
+    if not staged:
+        raise ValueError("Nothing staged to commit -- stage changes first.")
+    merged: dict[str, Path | bytes] = dict(_flat_tree_blobs(repo, parent.tree if parent is not None else None))
+    for rel_path in staged:
+        real_path = folder / rel_path
+        if real_path.is_file():
+            merged[rel_path] = real_path
+        else:
+            merged.pop(rel_path, None)
+    tree_sha = _build_tree(repo, merged)
     if tree_sha is None or tree_sha == (parent.tree if parent is not None else None):
         raise ValueError("Nothing to commit -- the working tree matches the last commit.")
     sha = _commit(repo, tree_sha, message)
-    _logger.info("committed %s in %s (%r)", sha, folder, message)
+    unstage(folder, list(staged))
+    _logger.info("committed %s in %s (%r, %d staged file(s))", sha, folder, message, len(staged))
     return sha
 
 
@@ -499,7 +743,13 @@ def history(folder: Path) -> list[Snapshot]:
     repo = _open(folder)
     if _head_commit(repo) is None:
         return []
-    return [_to_snapshot(entry.commit) for entry in repo.get_walker()]
+    # order="topo" (rather than dulwich's own default, "date"), since a commit's own commit_time
+    # has only 1-second resolution -- plenty of same-second commits (a scripted setup, or a merge
+    # commit created right after both the commits it merges) tie on that alone, and a plain
+    # date-ordered walk doesn't guarantee a commit comes before its own parents when ties like that
+    # happen. Topological order does: a commit is never returned before every one of its own
+    # children has been.
+    return [_to_snapshot(entry.commit) for entry in repo.get_walker(order="topo")]
 
 
 def graph_history(folder: Path) -> list[Snapshot]:
@@ -524,7 +774,9 @@ def graph_history(folder: Path) -> list[Snapshot]:
     if not branch_tips:
         return []
     snapshots = []
-    for entry in repo.get_walker(include=list(branch_tips.keys())):
+    # order="topo" -- see the identical comment in history() above; matters even more here since a
+    # merge commit's own two parents are especially likely to share its exact commit_time.
+    for entry in repo.get_walker(include=list(branch_tips.keys()), order="topo"):
         commit_obj = entry.commit
         snapshots.append(
             _to_snapshot(
@@ -651,6 +903,59 @@ def diff(folder: Path, ref_a: str, ref_b: str) -> list[FileDiff]:
     return sorted((_file_diff(repo, change) for change in changes), key=lambda d: d.path)
 
 
+def _commit_and_parent_tree(repo: Repo, sha: str) -> tuple[Commit, bytes | None]:
+    """``(commit, parent's own tree sha)`` for ``sha`` -- ``None`` for the second element on a root
+    commit (no parent at all, i.e. diff against an empty tree). Shared by
+    :func:`commit_files_changed`/:func:`commit_file_diff`.
+
+    Raises:
+        ValueError: ``sha`` doesn't name a known commit.
+    """
+    if not _looks_like_sha(sha):
+        raise ValueError(f'Unknown snapshot: "{sha}".')
+    try:
+        commit_obj = repo.object_store[sha.encode("ascii")]
+    except KeyError as exc:
+        raise ValueError(f'Unknown snapshot: "{sha}".') from exc
+    parent_tree = repo.object_store[commit_obj.parents[0]].tree if commit_obj.parents else None
+    return commit_obj, parent_tree
+
+
+def commit_files_changed(folder: Path, sha: str) -> list[FileDiff]:
+    """Every file changed *by* commit ``sha`` itself -- the diff between it and its own first
+    parent (or against an empty tree, for a root commit with no parent at all) -- PROMPT.md: "please
+    make it so that when clicking in history on commits - it extends to show a list of files
+    changed". Sorted by path, same convention as :func:`diff`.
+
+    Raises:
+        ValueError: ``sha`` doesn't name a known commit.
+    """
+    from dulwich.diff_tree import tree_changes
+
+    repo = _open(folder)
+    commit_obj, parent_tree = _commit_and_parent_tree(repo, sha)
+    changes = tree_changes(repo.object_store, parent_tree, commit_obj.tree)
+    return sorted((_file_diff(repo, change) for change in changes), key=lambda d: d.path)
+
+
+def commit_file_diff(folder: Path, sha: str, rel_path: str) -> tuple[str | None, str | None]:
+    """``(old_text, new_text)`` for ``rel_path`` as changed *by* commit ``sha`` -- ``old_text`` is
+    its own first parent's content (``None`` for a root commit, or a newly added file), ``new_text``
+    is this commit's own content (``None`` if this commit removed it). What the Git panel's own
+    History section feeds :class:`~in_reach.ide.unified_diff_view.UnifiedDiffViewWidget` when a
+    changed file is clicked for a selected commit. Same shape as :func:`ref_file_diff`/
+    :func:`uncommitted_file_diff`.
+
+    Raises:
+        ValueError: ``sha`` doesn't name a known commit.
+    """
+    repo = _open(folder)
+    commit_obj, parent_tree = _commit_and_parent_tree(repo, sha)
+    old_text = _blob_text_at_path(repo, parent_tree, rel_path)
+    new_text = _blob_text_at_path(repo, commit_obj.tree, rel_path)
+    return _normalize_newlines(old_text), _normalize_newlines(new_text)
+
+
 def restore_snapshot(folder: Path, sha: str) -> None:
     """Restores the project's files on disk to match a specific past snapshot -- any stamp or
     plain commit, on any branch -- without switching branches (PROMPT.md: "add any other
@@ -676,6 +981,7 @@ def restore_snapshot(folder: Path, sha: str) -> None:
     except KeyError as exc:
         raise ValueError(f'Unknown snapshot: "{sha}".') from exc
     _checkout_tree(repo, commit_obj.tree, folder)
+    _write_staged_paths(folder, set())
     tree_sha = _build_tree(repo, _walk_files(folder))
     parent = _head_commit(repo)
     if tree_sha is not None and tree_sha != (parent.tree if parent is not None else None):

@@ -1607,6 +1607,117 @@ def test_open_diff_is_not_included_in_dirty_tab_names_under(window: MainWindow, 
     assert window.main_panel.dirty_tab_names_under(tmp_path) == []
 
 
+# -- open_head_file (PROMPT.md: "in the changes it should be possible to right click the file and
+# then see: ... open file (HEAD) ...") -------------------------------------------------------------
+
+
+def test_open_head_file_adds_a_read_only_tab(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+
+    pane.open_head_file("settings/settings.json", "head content")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert pane.tabText(index) == "settings.json (HEAD)"
+    assert widget.toPlainText() == "head content"
+    assert widget.isReadOnly() is True
+
+
+def test_open_head_file_switches_to_an_already_open_tab_instead_of_duplicating(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_head_file("Notes.txt", "old content")
+    before = pane.count()
+
+    pane.open_head_file("Notes.txt", "old content")
+
+    assert pane.count() == before
+
+
+def test_open_head_file_refreshes_an_already_open_tabs_content(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_head_file("Notes.txt", "old content")
+
+    pane.open_head_file("Notes.txt", "new head content")
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "new head content"
+
+
+def test_open_head_file_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_head_file("Notes.txt", "head content")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
+def test_open_head_file_does_not_collide_with_open_file_for_the_same_path(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.txt"
+    source.write_text("current content\n", encoding="utf-8")
+    pane.open_head_file("Notes.txt", "head content")
+
+    pane.open_file(source)
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "current content\n"
+    assert widget.isReadOnly() is False
+
+
+# -- open_commit_diff (PROMPT.md, a later pass: "please make it so that when clicking in history on
+# commits - it extends to show a list of files changed (which can then be clicked on to view (please
+# note this should be a single (not split) view, see sample.png for styling))") -------------------
+
+
+def test_open_commit_diff_adds_a_unified_diff_tab(window: MainWindow) -> None:
+    from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert isinstance(widget, UnifiedDiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    assert widget.sha == "abcd1234ef"
+    assert pane.tabText(index) == "Notes.txt (abcd1234)"
+
+
+def test_open_commit_diff_switches_to_an_already_open_tab_for_the_same_commit(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    assert pane.count() == before
+
+
+def test_open_commit_diff_opens_a_separate_tab_for_a_different_commit(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_commit_diff("Notes.txt", "ffff9999ab", old_text="a\n", new_text="c\n")
+
+    assert pane.count() == before + 1
+
+
+def test_open_commit_diff_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
 def test_close_current_closes_the_active_tab(window: MainWindow) -> None:
     pane = window.main_panel.panes[0]
     before = pane.count()

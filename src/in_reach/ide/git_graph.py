@@ -1,16 +1,25 @@
 """A VSCode/``git log --graph``-style commit graph widget (PROMPT.md: "we also want to show a git
 graph of commits, branches and stamps instead in vscode style") -- replaces the Git panel's old flat
 ``QListWidget`` history list with a lane-painted canvas: one dot per commit, a colored vertical lane
-per branch, diagonal connectors where two branches share a fork point, a star marker on stamped
-commits, and each branch's name labelled at its own tip.
+per branch, diagonal connectors where two branches share a fork point (or a merge commit's own extra
+parent, see below), a star marker on stamped commits, and each branch's name labelled at its own
+tip.
 
 Lane assignment (:func:`compute_lanes`) is plain, framework-free logic over
 :func:`~in_reach.app.vcs.graph_history`'s own ``Snapshot.parents``/``Snapshot.branches`` -- kept
 separate from :class:`GitGraphWidget`'s painting so it's cheaply unit-testable without a live Qt
-event loop. This shadow VCS has no merge functionality at all yet (:mod:`in_reach.app.vcs` never
-gives a commit more than one parent), so the only "convergence" a lane ever needs to draw is two
-branches sharing a common ancestor further back in history -- never a true multi-parent merge commit
--- which is what keeps this algorithm considerably simpler than a general-purpose one.
+event loop.
+
+PROMPT.md (a later pass): "we also need buttons/functionality to: ... merge branch (this will need
+History Graph update to show merging of branches)" -- :func:`~in_reach.app.vcs.merge_branch` can now
+give a commit *two* parents (never more -- this shadow VCS only ever performs a plain two-branch
+merge, not git's own multi-parent octopus merge), so a row's own :attr:`LaneRow.parent_lanes` is a
+list, not a single "continues" flag: its first entry is always this row's own :attr:`LaneRow.lane`
+itself (a plain straight continuation), and a second entry (only present for a real merge commit) is
+a *new* lane the row's own dot also connects down into with a diagonal line -- the exact same
+lane-convergence machinery :attr:`LaneRow.incoming_lanes` already used for two branches sharing a
+fork point, just running forward (this row diverging into two future lanes) instead of backward
+(two past lanes converging into this row).
 """
 
 from __future__ import annotations
@@ -52,23 +61,35 @@ class LaneRow:
     #: drawn as a diagonal line into this row's dot, except the entry equal to :attr:`lane` itself,
     #: which is a plain straight vertical continuation.
     incoming_lanes: list[int] = field(default_factory=list)
-    #: This row's own lane continues to the next (older) row -- ``False`` for a root commit (no
-    #: parent), which simply ends its lane here.
-    continues: bool = True
+    #: One lane per parent, in parent order -- empty for a root commit (no parent), which simply
+    #: ends its lane here. The first entry is always this row's own :attr:`lane` itself (a plain
+    #: straight continuation); a second entry appears only for a merge commit's own second parent,
+    #: and points at a freshly-allocated lane this row's dot also diverges down into.
+    parent_lanes: list[int] = field(default_factory=list)
     #: How many lanes are simultaneously in play at this row -- the widest this row's own painting
     #: needs to reserve horizontal space for.
     active_lane_count: int = 1
 
+    @property
+    def continues(self) -> bool:
+        """Whether this row's own lane continues to the next (older) row at all -- ``False`` only
+        for a root commit. Kept as a convenience derived from :attr:`parent_lanes` rather than a
+        separately-tracked flag, so it can never disagree with the real parent-lane list."""
+        return bool(self.parent_lanes)
+
 
 def compute_lanes(snapshots: list[Snapshot]) -> list[LaneRow]:
     """Assigns each of ``snapshots`` (newest-first, as :func:`~in_reach.app.vcs.graph_history`
-    returns them) a lane index, plus enough topology (:attr:`LaneRow.incoming_lanes`) to draw
-    straight/diagonal connector lines between rows.
+    returns them) a lane index, plus enough topology (:attr:`LaneRow.incoming_lanes`,
+    :attr:`LaneRow.parent_lanes`) to draw straight/diagonal connector lines between rows.
 
-    Each of ``snapshots``' own :attr:`~in_reach.app.vcs.Snapshot.parents` is at most 1-entry (see
-    this module's own docstring for why) -- a commit with 0 parents is a branch root; one with 1
-    either continues its own lane (nothing else was already waiting for that parent) or converges
-    into a lane that reached the same parent first (two branches sharing a fork point).
+    Each of ``snapshots``' own :attr:`~in_reach.app.vcs.Snapshot.parents` is 0, 1, or (for a merge
+    commit from :func:`~in_reach.app.vcs.merge_branch`) 2 entries -- a commit with 0 parents is a
+    branch root; one with 1 either continues its own lane (nothing else was already waiting for that
+    parent) or converges into a lane that reached the same parent first (two branches sharing a fork
+    point); one with 2 does the same for its first parent *and* additionally diverges a brand new
+    lane down to its second parent, exactly like a fresh branch root would, except this one starts
+    from an already-existing row instead of the top of the graph.
     """
     active: dict[str, list[int]] = {}
     free_lanes: list[int] = []
@@ -88,11 +109,19 @@ def compute_lanes(snapshots: list[Snapshot]) -> list[LaneRow]:
             lane = next_lane
             next_lane += 1
 
-        continues = bool(snapshot.parents)
-        if continues:
-            parent = snapshot.parents[0]
-            active.setdefault(parent, []).append(lane)
-        else:
+        parent_lanes: list[int] = []
+        for position, parent in enumerate(snapshot.parents):
+            if position == 0:
+                parent_lane = lane
+            elif free_lanes:
+                free_lanes.sort()
+                parent_lane = free_lanes.pop(0)
+            else:
+                parent_lane = next_lane
+                next_lane += 1
+            parent_lanes.append(parent_lane)
+            active.setdefault(parent, []).append(parent_lane)
+        if not snapshot.parents:
             free_lanes.append(lane)
 
         active_count = max(
@@ -103,7 +132,7 @@ def compute_lanes(snapshots: list[Snapshot]) -> list[LaneRow]:
                 snapshot=snapshot,
                 lane=lane,
                 incoming_lanes=incoming or [lane],
-                continues=continues,
+                parent_lanes=parent_lanes,
                 active_lane_count=active_count,
             )
         )
@@ -223,7 +252,7 @@ class GitGraphWidget(QWidget):
     def _paint_connectors(self, painter: QPainter, row: LaneRow, index: int, y: int, center_y: int) -> None:
         # Straight continuation lines for every lane that's simply passing through this row
         # untouched (not this row's own incoming/outgoing lanes).
-        touched = set(row.incoming_lanes) | {row.lane}
+        touched = set(row.incoming_lanes) | {row.lane} | set(row.parent_lanes)
         for lane in range(row.active_lane_count):
             if lane in touched:
                 continue
@@ -245,11 +274,21 @@ class GitGraphWidget(QWidget):
                 path.cubicTo(x_from, center_y, x_to, y, x_to, center_y)
                 painter.strokePath(path, pen)
 
-        # This row's own lane continuing down to the next (older) row.
-        if row.continues:
-            x = self._lane_x(row.lane)
-            painter.setPen(QPen(_lane_color(row.lane), 2))
-            painter.drawLine(x, center_y, x, y + _ROW_HEIGHT)
+        # This row's own lane(s) continuing down to the next (older) row -- one entry per parent;
+        # the first is always this row's own straight-line continuation, any further entries (only
+        # for a merge commit) diverge diagonally into a freshly allocated lane.
+        for parent_lane in row.parent_lanes:
+            x_from = self._lane_x(row.lane)
+            x_to = self._lane_x(parent_lane)
+            pen = QPen(_lane_color(parent_lane), 2)
+            painter.setPen(pen)
+            if x_from == x_to:
+                painter.drawLine(x_from, center_y, x_to, y + _ROW_HEIGHT)
+            else:
+                path = QPainterPath()
+                path.moveTo(x_from, center_y)
+                path.cubicTo(x_from, y + _ROW_HEIGHT, x_to, center_y, x_to, y + _ROW_HEIGHT)
+                painter.strokePath(path, pen)
 
     def _paint_star(self, painter: QPainter, cx: int, cy: int) -> None:
         import math
