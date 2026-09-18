@@ -45,13 +45,15 @@ Supported:
 - Assignment, including every compound operator (``=``/``+=``/``-=``/``*=``/``/=``/``%=``).
 - ``if`` conditions: any of ``==``/``!=``/``<``/``>``/``<=``/``>=`` comparisons and/or boolean
   function-style condition calls (e.g. ``current_object.is_of_type(x)``), each optionally negated
-  with ``not``, combined with any mix of ``and``/``or`` up to one level of nesting (e.g.
-  ``a and b or c``, a real case confirmed in RCC Onslaught v13.bin) -- converted to the CNF shape the
-  engine's own flat ``or_group`` model actually needs (AND across groups, OR within one group) via
-  real distribution when a disjunct is itself an AND-chain, not just left as unsupported (see
-  ``_compile_condition``'s own docstring). A condition complex enough to need a second level of
-  distribution (e.g. an explicitly-parenthesized ``or`` nested inside an ``and`` that's itself inside
-  an ``or``) isn't supported yet. No ``altif``/``alt`` clauses, no ``|`` flag-combination.
+  with ``not``, combined with any mix of ``and``/``or``/``not`` nesting to any depth (e.g. a
+  parenthesized ``or`` nested inside an ``and`` that's itself inside a top-level ``or``) --
+  converted to the CNF shape the engine's own flat ``or_group`` model actually needs (AND across
+  groups, OR within one group) via full recursive distribution, not just a one-level special case
+  (see ``_to_cnf_clauses``'s own docstring). Capped at a small number of resulting groups, so a
+  pathologically large combination still fails fast with ``UnsupportedConstruct`` rather than
+  exploding. ``altif``/``alt`` clauses are supported (see ``_compile_if``'s own docstring for how
+  they're compiled -- each branch's own negation-accumulated gate condition goes through the same
+  ``_to_cnf_clauses`` conversion as any other condition). No ``|`` flag-combination.
 - ``for each object|player|team do ... end`` loops, including ``for each object with label N do``
   (``N`` an int label index, or a string matched against a real forge label's own name -- see
   ``mark_trigger_forge_label()``'s own docstring in the native source for the block_type/forge_label
@@ -111,9 +113,11 @@ Supported:
   valid as its own statement, never assigned or used as a condition). Compiled in two passes: every
   function gets its own subroutine trigger allocated *before* any body is compiled, so forward
   references and functions calling each other both resolve regardless of declaration order.
-- ``on <event>: <statement>`` for ``init``/``local init``/``host migration``/``object death``/
-  ``local``/``pregame`` (matching ``TriggerEntryType``'s own event members) -- top level only, real
-  Megalo has no nested event bindings.
+- ``on <event>: <statement>`` for ``init``/``local init``/``host migration``/``double host
+  migration``/``object death``/``local``/``pregame`` -- top level only, real Megalo has no nested
+  event bindings. ``double host migration`` shares ``TriggerEntryType.on_host_migration`` with
+  plain ``host migration`` and is told apart purely via a separate index field in the engine's own
+  entry-points table, not its own enum member -- see ``_EVENT_ENTRY_TYPES``'s own docstring.
 
 Not supported (raises :class:`UnsupportedConstruct`): ``alias``, ``|`` flag-combination, nested calls
 used as a sub-expression of another call/condition, and anything not listed above.
@@ -253,10 +257,72 @@ docstring), but the real stored bytes a format string compiles into need the *in
 parsing (``string_scanner::unescape()``) and the decompiler's own inverse (``string_scanner::
 escape()``, which re-escapes a literal backslash *already in the stored content*, doubling it on
 round-trip if the unescape step was skipped). See :func:`_unescape_string_literal`'s own docstring.
+
+## Fixed: two distinct native round-trip bugs (the ~14%-of-successful-compiles failure)
+
+A compile could, rarely, succeed with no exception and produce a variant that ``save()`` wrote
+without error yet neither this same native module's own ``load()`` nor the game itself could parse
+back -- confirmed via a full sweep of every real MCC-shipped built-in game/hopper variant (57 of 419
+attempted, ~14%, at the time this was root-caused) and root-caused via an ASAN-instrumented debug
+build of the native module plus manual bit-level ``fprintf`` tracing of ``Action``/``Condition``/
+``OpcodeArgValueAnyVariable::write()`` vs. ``read()`` (see the native source tree's own git history
+for the disposable instrumentation, since removed). ASAN itself reported nothing for any repro --
+correctly, since neither bug is memory corruption. Two independent, unrelated bugs were found stacked
+in the same code paths:
+
+**Bug 1 -- stale ``.object`` on a cloned, retargeted ``indexed_data``-scoped Variable.**
+``Variable::copy()`` (native, ``opcode_arg_types/variables/base.cpp``) copies a Variable's own
+``.object`` pointer verbatim from whatever it was cloned from. For an ``indexed_data``-scoped
+Variable (e.g. ``script_option[N]``, built via ``make_indexed_data_indicator()`` --
+``opcode_arg_types/variables/number.cpp``), ``.object`` is only ever (re)computed from ``.index``
+during the native ``read()`` path's own ``indexed_access_functor_t`` call -- a clone made via
+:func:`_retarget` (set ``.index`` directly in Python, never round-tripped through ``read()``) kept
+the ORIGINAL template's stale ``.object``, and ``Variable::write()`` preferred that stale
+``.object``'s own ``->index`` over the freshly retargeted ``.index`` when serializing -- silently
+writing the template's original slot instead of the one actually requested. This is a real,
+isolated, non-cascading value-only mismatch (same bit width either way) -- confirmed NOT the cause
+of the cascading failures below. **Fix**: a new native binding, ``Variable.clear_object()``, called
+from :func:`_retarget` immediately after setting ``.index``.
+
+**Bug 2 (the actual cause of every cascading "Failed to parse game variant" failure) -- a bare
+Variable stored where an AnyVariable wrapper was expected.** :func:`_scan_templates` deliberately
+registers some templates *raw* -- a ``_format_string`` token's own value, or a ``_waypoint_icon``'s
+own ``.number`` sub-field, are genuinely just a bare ``Variable``, never wrapped in an
+``AnyVariable`` to begin with -- under the very same ``("_any_variable", key)`` namespace that a
+genuinely ``_any_variable``-typed top-level slot (e.g. "Modify Variable"'s own "a"/"b" operands)
+also queries via :meth:`_Compiler._build_variable_arg`. ``Opcode.add_argument()`` (native) stores
+whatever concrete C++ type it's handed verbatim, with no check against the slot's own declared
+typeinfo -- so when the only available template for a shape happened to be one of these raw ones,
+the old code silently handed a bare Variable to an ``_any_variable`` slot. That argument's own
+polymorphic ``write()`` then skipped the leading 3-bit type-tag ``AnyVariable::write()`` always
+emits, desyncing the bitstream for every opcode written after it -- confirmed via ordinal (not
+bitpos-based) comparison of the write-side and read-side ``OpcodeArgValueAnyVariable`` traces for a
+real failing file: the first structural mismatch (a completely different scope shape read back than
+what was written) landed exactly at the "Modify Variable" action whose "b" operand's only available
+template was one of these raw ones, and every anyvar entry after it in the read trace was corrupted.
+**Fix**: a new native binding, ``AnyVariable.wrap(value)`` (clones ``value`` and adopts it as the
+wrapper's own ``.variable``), called from :meth:`_Compiler._ensure_any_variable_wrapper` for every
+``_any_variable``-typed argument this compiler builds -- see its own docstring.
+
+Re-running the same 475-file sweep after both fixes: 0 crashes (was 57), 408/419 full success (was
+351, 97.4% vs. 83.8%). Of the remaining 11 fallbacks: "double host migration" event support (see
+``_EVENT_ENTRY_TYPES``'s own docstring); preferring a plain Variable-property over a dedicated
+property_set action when a template for the former exists (see ``_compile_assign``'s own docstring
+-- a real case: a player's own "score" is ALSO a plain "%w.score" Variable scope, not exclusively
+the "Modify Score" action, and different real MCC-shipped variants use each encoding inconsistently
+for the exact same-looking source text); and ``script_option[]`` sourced as a "number"-typeinfo
+shape for a Shape's own dimension argument, needing NO existing loaded example at all via a new
+native binding, ``Variable.set_scope_by_format()`` (see
+:meth:`_Compiler._build_script_option_arg`'s own docstring) -- are all since fixed. Re-running the
+sweep again after all three: 419/419 full success, 0 fallbacks, 0 crashes.
+
+**Contained, not silent** even while both bugs were still present: :mod:`in_reach.app.rvt.compile`'s
+own save/reload verification catches this on every real compile before it's ever trusted, falling
+back to ``mp.compile_script()`` -- so this could degrade a build to the native compiler's own
+behavior, but could never ship a corrupt or unloadable ``.bin``.
 """
 from __future__ import annotations
 
-import itertools
 import os
 import re
 import tempfile
@@ -264,8 +330,14 @@ from dataclasses import dataclass, field
 
 from .megalo_ast import parse
 from .megalo_ast.lexer import MegaloLexError
+from .megalo_ast.nodes import BinaryOp, Identifier, SourceSpan, UnaryOp
 from .megalo_ast.parser import MegaloParseError
 from .megalo_ast.unparse import render_expr
+
+# Every real (parsed) AST node carries a source span for editor/syntax-highlighting purposes -- this
+# module never reads it back, so a synthetic node this compiler builds itself (see
+# _DISCARD_CONSTANTS's own docstring) uses this placeholder rather than a real location.
+_SYNTHETIC_SPAN = SourceSpan(start_line=0, start_col=0, end_line=0, end_col=0)
 
 # scope -> {type: pool size}, straight from TO_IMPLEMENT_(LATEST).md's "Storage pools" table
 # ("temporary (per-trigger scratch)" there is spelled "temporaries" in real Megalo source text).
@@ -277,6 +349,7 @@ _POOL_SIZES: dict[str, dict[str, int]] = {
     "temporaries": {"number": 10, "timer": 0, "team": 6, "player": 3, "object": 8},
 }
 _TEAM_CONSTANT_COUNT = 8  # team[0..7] -- Halo Reach's own fixed team count, not a per-scope pool.
+_SCRIPT_OPTION_COUNT = 16  # Megalo::Limits::max_script_options (limits.h) -- script_option[0..15].
 
 # Megalo::Limits::max_conditions/max_actions (limits.h) -- real, hard engine caps on the TOTAL
 # condition/action opcode count across the whole script (every trigger and every inline nested
@@ -295,6 +368,48 @@ _TEAM_CONSTANT_COUNT = 8  # team[0..7] -- Halo Reach's own fixed team count, not
 # Limits::max_triggers.
 _MAX_CONDITIONS = 512
 _MAX_ACTIONS = 1024
+
+# out-variable typeinfo family -> the bare null constant real Megalo writes when a call's own result
+# is deliberately discarded (a bare statement, e.g. "current_player.biped.place_at_me(...)" with no
+# "X = " at all) -- confirmed directly against a real compiled opcode (found via a full sweep of
+# every real MCC-shipped built-in game/hopper variant: a bare place_at_me() call's own "result"
+# out-argument decompiles as the literal constant "no_object", not left unset/omitted). Only object/
+# player/team have a confirmed real "discard" constant this way -- an out-variable of some other
+# family (e.g. a scalar/timer result) with no confirmed real bare-call example stays unsupported
+# rather than guessing at a constant that might not exist.
+_DISCARD_CONSTANTS = {"object": "no_object", "player": "no_player", "team": "no_team"}
+
+
+def _negate_expr(expr):
+    """De Morgan pushdown over a parsed condition expression: ``NOT(A and B)`` -> ``NOT(A) or
+    NOT(B)``, ``NOT(A or B)`` -> ``NOT(A) and NOT(B)``, ``NOT(NOT(A))`` -> ``A``, anything else
+    (a comparison, a boolean condition-function call, an identifier) gets wrapped in a fresh
+    synthetic ``not``. Used by :meth:`_Compiler._compile_if` to build each ``altif``/``alt``
+    branch's own gate expression (this branch's own condition, AND'd with the negation of every
+    earlier branch's own condition), and reused by :meth:`_Compiler._to_cnf_clauses` itself to
+    push a ``not`` wrapping a compound ``and``/``or`` expression inward before converting it --
+    :meth:`_Compiler._to_cnf_clauses`'s own recursive CNF distribution then flattens whatever
+    and/or tree this produces back into the right CNF-shaped group of real ``Condition`` opcodes,
+    same as it would for source text written directly with that same nesting."""
+    if expr.kind == "unary" and expr.op == "not":
+        return expr.operand
+    if expr.kind == "binary" and expr.op == "and":
+        return BinaryOp(op="or", left=_negate_expr(expr.left), right=_negate_expr(expr.right), span=_SYNTHETIC_SPAN)
+    if expr.kind == "binary" and expr.op == "or":
+        return BinaryOp(op="and", left=_negate_expr(expr.left), right=_negate_expr(expr.right), span=_SYNTHETIC_SPAN)
+    return UnaryOp(op="not", operand=expr, span=_SYNTHETIC_SPAN)
+
+
+def _and_expr(left, right):
+    return BinaryOp(op="and", left=left, right=right, span=_SYNTHETIC_SPAN)
+
+# "Modify Variable"'s own value argument's typeinfo.internal_name -- the generic "any variable"
+# family several other slots (format-string tokens, Modify Variable's own operand) build against
+# instead of one fixed concrete variable kind. Used as a plain string constant (not looked up via
+# self._modify_variable, since _scan_templates() is a module-level function with no _Compiler
+# instance) because it's confirmed stable across every real function this compiler has inspected
+# this way, not something project-specific that could plausibly change.
+_ANY_VARIABLE_TYPEINFO_NAME = "_any_variable"
 _SELF_SCOPE_ALIAS = {
     "current_player": "player",
     "current_object": "object",
@@ -323,6 +438,14 @@ _FOR_EACH_BLOCK_TYPES = {"object", "player", "team"}  # -> TriggerBlockType.for_
 
 # "on <event>:" text -> TriggerEntryType member name -- confirmed against RCC Onslaught v13.bin's
 # own real "on init:"/"on local:" usage; the rest match TriggerEntryType's own naming 1:1.
+# "double host migration" is deliberately NOT in this table -- it shares TriggerEntryType.
+# on_host_migration with plain "host migration" (confirmed directly: trigger.h's own entry_type
+# enum comment reads "on_host_migration, // host migrations and double host migrations") and is
+# told apart purely by which of TriggerEntryPoints' own two separate index fields (indices.
+# hostMigrate vs. indices.doubleHostMigrate) points at the trigger -- a genuinely different, non-
+# enum-driven wiring path this dict's own uniform "look up the TriggerEntryType member name" shape
+# can't express, handled as a special case in _compile_event_trigger via the dedicated
+# bind_trigger_as_double_host_migration_handler() native binding instead.
 _EVENT_ENTRY_TYPES = {
     "init": "on_init",
     "local init": "on_local_init",
@@ -349,6 +472,11 @@ _CALL_ARGUMENT_ORDER_OVERRIDES: dict[str, list[int]] = {
     # "play_sound_for(<who>, <sound>, <immediate>)", confirmed a real case in RCC Onslaught v13.bin
     # -- puts "who" first. (metadata index 2, then 0, then 1.)
     "Play Sound": [2, 0, 1],
+    # "Set Object Progress Bar"'s own metadata order is [object(context), who(_player_set),
+    # timer(_object_timer_variable)], but its real call syntax --
+    # "current_object.set_progress_bar(0, no_one)", confirmed a real case found via a full sweep of
+    # every real MCC-shipped built-in game/hopper variant -- puts the timer value before "who".
+    "Set Object Progress Bar": [2, 1],
 }
 
 # ShapeArgument's own field names (ShapeArgument.radius doubles as "width" for box -- see its own
@@ -363,10 +491,12 @@ _SHAPE_TYPE_FIELDS = {
 }
 
 # "%x" placeholder -> OpcodeStringTokenType member name -- confirmed real cases in RCC Onslaught
-# v13.bin ("%n" for a number, "%p" for a player); any other placeholder character (team/object/timer
-# tokens all exist in the engine's own enum, see OpcodeStringTokenType, but have no confirmed real
-# example here to build the mapping from) is deliberately left out, not guessed at.
-_FORMAT_STRING_TOKEN_TYPES = {"%n": "number", "%p": "player"}
+# v13.bin ("%n" for a number, "%p" for a player) and a full sweep of every real MCC-shipped built-in
+# game/hopper variant ("%s" for a timer, e.g. "New Weapon In %s" with a real hud_player.timer[N]
+# token value); any other placeholder character (team/object tokens both exist in the engine's own
+# enum, see OpcodeStringTokenType, but have no confirmed real example here to build the mapping
+# from) is deliberately left out, not guessed at.
+_FORMAT_STRING_TOKEN_TYPES = {"%n": "number", "%p": "player", "%s": "timer"}
 
 _METER_TYPE_FIELDS = {
     "none": [],
@@ -464,7 +594,13 @@ def _decompiled_key(rvt, arg, text: str) -> str:
     regardless of its actual value, since the value itself varies per compile and can't be part of a
     stable template key."""
     inner = arg.variable if hasattr(arg, "variable") else arg
-    if isinstance(inner, rvt.ScalarVariable) and inner.scope.format == "%i":
+    # inner.scope can be None for an embedded composite sub-field that's present in memory (e.g. a
+    # MeterParametersArgument's own "timer" field even when .type == number, so "timer" is never
+    # actually populated) but was never itself constructed/copy_from()'d -- confirmed a real crash
+    # here (not hypothetical): _scan_templates()'s own _meter_parameters sub-field walk calls this
+    # on every field regardless of whether the composite's .type actually uses it, found via a full
+    # sweep of every real MCC-shipped built-in game/hopper variant.
+    if isinstance(inner, rvt.ScalarVariable) and inner.scope is not None and inner.scope.format == "%i":
         return "INT_LITERAL"
     m = re.fullmatch(r"(.+)\[-?\d+\]", text)
     return f"{m.group(1)}[]" if m else text
@@ -553,6 +689,63 @@ def _scan_templates(rvt, variant, mp) -> _Templates:
                             (field_typeinfo_name, _decompiled_key(rvt, field_value, field_text)), field_value.clone()
                         )
                         templates.literal_variables.setdefault((field_typeinfo_name, field_text), field_value.clone())
+                if arg_infos[ai].typeinfo.internal_name == "_format_string":
+                    # A format string's own %n/%p token value(s) are, same as _meter_parameters'
+                    # sub-fields just above, otherwise invisible to this flat, top-level-arguments-
+                    # only scan -- confirmed a real, previously-blocking case (found via a full sweep
+                    # of every real MCC-shipped built-in game/hopper variant): assault_054.bin's own
+                    # "game.round_limit"/"game.score_to_win" are used *only* as a %n token's own
+                    # value (inside set_objective_description()'s own call), never as a plain
+                    # top-level argument anywhere else in the script -- without digging in here,
+                    # there would be no template to source either opaque reference from at all.
+                    # _build_format_string_argument builds a token's own value against the generic
+                    # "_any_variable" family (see its own docstring for why -- unlike
+                    # _meter_parameters' sub-fields, a token's value can be any of several concrete
+                    # variable kinds, not one fixed family), so registering under that same typeinfo
+                    # name here (not token.value.get_variable_typeinfo(), which would register under
+                    # the wrong key and never be found) is what actually makes this reachable.
+                    for i in range(getattr(arg, "token_count", 0)):
+                        token_value = arg.token(i).value
+                        if token_value is None:
+                            continue
+                        try:
+                            token_text = token_value.decompile(variant)
+                        except Exception:  # noqa: BLE001 -- an unset/default token can't decompile
+                            continue
+                        templates.variables.setdefault(
+                            (_ANY_VARIABLE_TYPEINFO_NAME, _decompiled_key(rvt, token_value, token_text)),
+                            token_value.clone(),
+                        )
+                        templates.literal_variables.setdefault(
+                            (_ANY_VARIABLE_TYPEINFO_NAME, token_text), token_value.clone()
+                        )
+                if arg_infos[ai].typeinfo.internal_name == "_waypoint_icon":
+                    # A WaypointIconArgument's own "number" sub-field (only populated for icons that
+                    # need one, e.g. "territory_a") is, same as the composite sub-fields just above,
+                    # otherwise invisible to this flat, top-level-arguments-only scan -- confirmed a
+                    # real, previously-blocking case found via a full sweep of every real MCC-shipped
+                    # built-in game/hopper variant: "current_object.spawn_sequence" is used as a
+                    # waypoint icon's own number value in some scripts (e.g.
+                    # "set_waypoint_icon(territory_a, current_object.spawn_sequence)"), never as a
+                    # plain top-level argument anywhere else in those same scripts -- unlike a
+                    # format-string token's value (any of several concrete variable kinds, hence the
+                    # generic "_any_variable" family), .number's own real natural typeinfo (see
+                    # _build_waypoint_icon_argument's own use of .get_variable_typeinfo()) is the
+                    # correct key here, same reasoning as _meter_parameters' own sub-fields.
+                    number_value = arg.number
+                    try:
+                        number_text = number_value.decompile(variant)
+                    except Exception:  # noqa: BLE001 -- an unset/default sub-field can't decompile
+                        number_text = None
+                    if number_text is not None:
+                        number_typeinfo_name = number_value.get_variable_typeinfo().internal_name
+                        templates.variables.setdefault(
+                            (number_typeinfo_name, _decompiled_key(rvt, number_value, number_text)),
+                            number_value.clone(),
+                        )
+                        templates.literal_variables.setdefault(
+                            (number_typeinfo_name, number_text), number_value.clone()
+                        )
                 try:
                     text = arg.decompile(variant)
                 except Exception:  # noqa: BLE001 -- some argument kinds can't decompile in isolation
@@ -577,8 +770,8 @@ def _scan_strings(rvt, mp) -> dict[str, object]:
 
     - Walking opcodes to find strings means visiting ``FormatStringArgument`` opcode arguments via
       ``Opcode.argument(i)`` (``reference_internal``) -- exactly the trigger/argument-exposure
-      pattern that made the native crash documented in this module's "Known issue" section possible
-      in the first place. Reading the table directly touches no trigger/opcode/argument object at
+      pattern that made the native crash documented in this module's "Fixed: an intermittent native
+      crash scanning-then-clearing the same triggers" section possible in the first place. Reading the table directly touches no trigger/opcode/argument object at
       all, so it carries none of that risk regardless of when ``clear_triggers()`` runs relative to
       this scan.
     - A ``ReachString`` found by walking the *scan copy*'s own opcodes would belong to that separate
@@ -643,6 +836,14 @@ def _retarget(variant, template_arg, index: int):
         inner.which = (inner.which - original_index) + index
     else:
         inner.index = index
+        # `Variable::copy()` (native) copies `.object` verbatim from the clone source. For an
+        # `indexed_data`-scoped Variable (e.g. script_option[N]), `.object` is only ever (re)computed
+        # from `.index` during `read()` -- a clone-and-retarget never goes through `read()`, so it
+        # keeps the ORIGINAL template's stale `.object`, and `Variable::write()` prefers a non-null
+        # `.object`'s own `->index` over this freshly-set `.index`, silently writing the wrong value.
+        # Confirmed via native bit-level tracing (see rvt/native's own `Variable.clear_object()` doc).
+        if hasattr(inner, "clear_object"):
+            inner.clear_object()
     try:
         text = clone.decompile(variant)
     except Exception:  # noqa: BLE001 -- treat "can't even decompile" the same as "didn't take"
@@ -668,6 +869,8 @@ def _normalize_ast_ref(expr) -> tuple[str, int | None] | None:
         target = expr.target
         if target.kind == "identifier" and target.name == "team":
             return "team[]", n
+        if target.kind == "identifier" and target.name == "script_option":
+            return "script_option[]", n
         if target.kind == "member" and target.target.kind == "identifier":
             prefix = target.target.name
             if prefix in _POOL_SIZES or prefix in _SELF_SCOPE_ALIAS:
@@ -686,6 +889,8 @@ def _normalize_ast_ref(expr) -> tuple[str, int | None] | None:
 def _pool_size_for_key(key: str) -> int | None:
     if key == "team[]":
         return _TEAM_CONSTANT_COUNT
+    if key == "script_option[]":
+        return _SCRIPT_OPTION_COUNT
     m = re.fullmatch(r"([a-z_]+)\.([a-z]+)\[\]", key)
     if not m:
         return None
@@ -694,36 +899,79 @@ def _pool_size_for_key(key: str) -> int | None:
     return _POOL_SIZES.get(scope, {}).get(type_name)
 
 
-def _find_function(rvt, *, name: str | None = None, primary_name: str | None = None, condition: bool, call_arg_count: int | None = None):
-    """``call_arg_count``, when given, disambiguates a genuine overload -- confirmed a real case:
-    ``add_weapon`` is shared by both "Add Weapon to Player" (1 non-context argument) and "Add Weapon
-    To Biped" (2), only distinguishable by how many call-syntax values are actually given (RCC
-    Onslaught v13.bin's own ``current_player.biped.add_weapon(dmr, force)`` needs the 2-argument
-    one; matching by name alone, first-found, silently picked the wrong one). Falls back to the
-    first match by name if no candidate's own non-context/non-out argument count matches exactly
-    (either because ``call_arg_count`` wasn't given, or the real match uses a variable-arity
-    argument this shallow count doesn't account for) -- unambiguous for every other function this
-    compiler has used all along, which is why this isn't the only/default matching strategy.
+def _find_function(
+    rvt,
+    *,
+    name: str | None = None,
+    primary_name: str | None = None,
+    condition: bool,
+    call_arg_count: int | None = None,
+    context_expr=None,
+    can_build_context=None,
+):
+    """Two independent, tiered disambiguation layers for a genuine overload -- real functions that
+    share the same ``mapping.primary_name`` -- applied only when the simpler layer above it leaves
+    more than one candidate:
+
+    1. ``call_arg_count``, when given: confirmed a real case, ``add_weapon`` is shared by both "Add
+       Weapon to Player" (1 non-context argument) and "Add Weapon To Biped" (2), only distinguishable
+       by how many call-syntax values are actually given (RCC Onslaught v13.bin's own
+       ``current_player.biped.add_weapon(dmr, force)`` needs the 2-argument one).
+    2. ``context_expr``/``can_build_context``, when given: confirmed a separate real case that (1)
+       alone can't resolve -- ``set_primary_respawn_object`` is shared by "...for Team" (context
+       typeinfo ``team``) and "...for Player" (context typeinfo ``player``), each with exactly 1
+       non-context argument, so arity ties between them (found via a full sweep of every real
+       MCC-shipped built-in game/hopper variant: ``2nvasion_slayer_054.bin``'s own
+       ``current_player.set_primary_respawn_object(global.object[2])`` was silently picking "for
+       Team" -- whichever happened to come first in the engine's own function table -- and then
+       failing to build ``current_player`` as a team reference at all). Resolved by actually trying
+       to build ``context_expr`` against each remaining candidate's own context-argument typeinfo
+       (via the caller-supplied ``can_build_context``, since building an argument needs a live
+       ``_Compiler`` instance this module-level function doesn't have) and keeping whichever
+       candidate that succeeds for, uniquely.
+
+    Falls back to the first candidate matching just the name if neither layer narrows it down to
+    exactly one (either because the relevant parameter wasn't given, or because the real match uses
+    something neither layer accounts for) -- unambiguous for every other function this compiler has
+    used all along, which is why this isn't the only/default matching strategy.
     """
     count = rvt.condition_function_count() if condition else rvt.action_function_count()
     get = rvt.condition_function if condition else rvt.action_function
-    first_match = None
-    for i in range(count):
-        f = get(i)
-        if name is not None and f.name == name:
-            return f
-        if primary_name is not None and f.mapping.type.name == "function" and f.mapping.primary_name == primary_name:
-            if first_match is None:
-                first_match = f
-            if call_arg_count is not None:
-                positional_count = sum(
-                    1
-                    for j in range(len(f.arguments))
-                    if j != f.mapping.arg_context and not f.arguments[j].is_out_variable
-                )
-                if positional_count == call_arg_count:
-                    return f
-    return first_match
+    if name is not None:
+        for i in range(count):
+            f = get(i)
+            if f.name == name:
+                return f
+        return None
+
+    candidates = [
+        f
+        for f in (get(i) for i in range(count))
+        if primary_name is not None and f.mapping.type.name == "function" and f.mapping.primary_name == primary_name
+    ]
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else None
+
+    def _positional_count(f) -> int:
+        return sum(1 for j in range(len(f.arguments)) if j != f.mapping.arg_context and not f.arguments[j].is_out_variable)
+
+    if call_arg_count is not None:
+        arity_matches = [f for f in candidates if _positional_count(f) == call_arg_count]
+    else:
+        arity_matches = candidates
+    if len(arity_matches) == 1:
+        return arity_matches[0]
+
+    if len(arity_matches) > 1 and context_expr is not None and can_build_context is not None:
+        context_matches = [
+            f
+            for f in arity_matches
+            if f.mapping.arg_context >= 0 and can_build_context(context_expr, f.arguments[f.mapping.arg_context].typeinfo)
+        ]
+        if len(context_matches) == 1:
+            return context_matches[0]
+
+    return arity_matches[0] if arity_matches else candidates[0]
 
 
 def _find_property_function(rvt, variant, primary_name: str, *, kind: str):
@@ -791,7 +1039,8 @@ class _Compiler:
     def _scan_copy(rvt, variant):
         """Returns ``(scan_variant, scan_variant.multiplayer)`` -- a separate, throwaway *copy* of
         ``variant``'s own current bytecode, freshly re-loaded from a temp file, never ``variant``
-        itself. See module docstring's "Known issue" section for the full mechanism this avoids:
+        itself. See module docstring's "Fixed: an intermittent native crash scanning-then-clearing
+        the same triggers" section for the full mechanism this avoids:
         ``_scan_templates()`` exposes every argument it visits to Python via a ``reference_internal``
         binding, and ``compile()`` calls ``MultiplayerData.clear_triggers()`` on ``variant`` itself
         immediately afterward, which raw-deletes every Trigger/Opcode/Argument it owns with no
@@ -826,6 +1075,18 @@ class _Compiler:
         if f is None:
             raise UnsupportedConstruct(f"engine has no condition function named {name!r}")
         return f
+
+    def _can_build_context(self, context_expr, typeinfo) -> bool:
+        """Probe for ``_find_function``'s own context-typed overload disambiguation (see its
+        docstring) -- tries building ``context_expr`` against ``typeinfo`` and reports whether it
+        would have worked, without keeping the result. Safe to call speculatively: everything
+        ``_build_argument`` reaches (variable templates, forge labels, enum brute-force) only reads
+        state, it never mutates ``self._mp``/the variant being built."""
+        try:
+            self._build_argument(context_expr, typeinfo)
+        except UnsupportedConstruct:
+            return False
+        return True
 
     def _add_trigger(self):
         # Trigger::max_triggers (320) is a real engine-level cap, not a bug -- see
@@ -896,6 +1157,17 @@ class _Compiler:
 
     def _compile_event_trigger(self, stmt) -> None:
         # "on <event>: <statement>" is top-level only -- real Megalo has no nested event bindings.
+        # "double host migration" (see _EVENT_ENTRY_TYPES' own docstring for why it's handled
+        # separately here rather than through that lookup table like every other event) shares
+        # TriggerEntryType.on_host_migration with plain "host migration" -- bind_trigger_as_event()'s
+        # own generic entry_type -> index mapping can't reach the separate doubleHostMigrate slot at
+        # all, so this needs the dedicated native binding instead.
+        if stmt.event == "double host migration":
+            self._add_trigger()
+            index = self._mp.trigger_count - 1
+            self._mp.bind_trigger_as_double_host_migration_handler(index)
+            self._compile_statement(stmt.body, self._mp.trigger(index), tail=True)
+            return
         entry_type = _EVENT_ENTRY_TYPES.get(stmt.event)
         if entry_type is None:
             raise UnsupportedConstruct(f"event {stmt.event!r} is not supported yet")
@@ -941,6 +1213,34 @@ class _Compiler:
 
     # -- variable/constant reference resolution -----------------------------------------------
 
+    def _ensure_any_variable_wrapper(self, typeinfo, built):
+        """Regression fix for a real, previously-undiscovered bug (found via native bit-level
+        tracing of the 475-file MCC validation sweep's remaining round-trip failures, the actual
+        cause of the cascading "Failed to parse game variant" desync, not just an isolated wrong
+        value): ``_scan_templates()`` deliberately registers some templates *raw* -- a
+        ``_format_string`` token's own value or a ``_waypoint_icon``'s own ``.number`` sub-field are
+        genuinely just a bare ``Variable`` (``OpcodeArgValueScalar``/etc), never wrapped in an
+        ``AnyVariable`` container in the first place -- under the SAME ``("_any_variable", key)``
+        template-dict namespace that a genuinely ``_any_variable``-typed top-level argument slot
+        (e.g. "Modify Variable"'s own "a"/"b" operands) also queries via ``_build_variable_arg``.
+        ``Opcode.add_argument()`` (native) stores whatever concrete C++ type it's handed verbatim,
+        with no check against the slot's own declared typeinfo -- so if the only available template
+        for a given reference shape happens to be one of these raw ones, ``_build_variable_arg``
+        would silently hand back a bare ``Variable`` for an ``_any_variable`` slot, and
+        ``Action`` /``Condition``'s own ``write()`` would then call that bare Variable's own
+        ``write()`` directly, skipping the leading 3-bit type-tag ``AnyVariable::write()`` always
+        emits -- desyncing the bitstream for every opcode written after it, with no crash and no
+        ASan report (not memory corruption, just the wrong concrete C++ type in that slot). Wrapping
+        here, once, right where every ``_any_variable``-typed argument gets built, closes this for
+        every caller (not just the "Modify Variable" case this was found through) -- a bare Variable
+        already carrying an AnyVariable wrapper (the ordinary, non-raw-template case) is untouched.
+        """
+        if typeinfo.internal_name != _ANY_VARIABLE_TYPEINFO_NAME or hasattr(built, "variable"):
+            return built
+        wrapper = typeinfo.create()
+        wrapper.wrap(built)
+        return wrapper
+
     def _build_variable_arg(self, expr, typeinfo):
         ref = _normalize_ast_ref(expr)
         if ref is None:
@@ -958,11 +1258,48 @@ class _Compiler:
                 # real case: "place_at_me(280, ...)") use a bare number directly instead. Let the
                 # caller's own enum-resolution fallback have a try before giving up.
                 return None
+            if key == "script_option[]" and index is not None:
+                built = self._build_script_option_arg(typeinfo, index)
+                if built is not None:
+                    return built
             raise UnsupportedConstruct(
                 f"this variant's own script has no existing {key!r}-shaped reference in a "
                 f"{typeinfo.internal_name!r}-typed argument slot to source a template from"
             )
         return template.clone() if index is None else _retarget(self._variant, template, index)
+
+    def _build_script_option_arg(self, typeinfo, index: int):
+        """Directly constructs a ``script_option[index]`` reference for ``typeinfo`` with NO
+        existing loaded example to clone-and-retarget from at all -- unlike every other indexed
+        pool reference this compiler resolves, which always needs a real, already-compiled example
+        of that exact ``(typeinfo, key)`` pairing SOMEWHERE in the target variant's own script (see
+        ``_scan_templates()``'s own docstring). Found via a full sweep of every real MCC-shipped
+        built-in game/hopper variant: ctf_054.bin's own ``set_shape(cylinder, script_option[6], 10,
+        10)`` needs a ``number``-typeinfo ``script_option[]`` reference for the shape's own radius
+        argument, but that script's every OTHER ``script_option[]`` reference is typed
+        ``_any_variable`` (plain condition compares) or ``timer`` (a declare initializer) -- no
+        ``number``-typeinfo one anywhere to source a template from, even though the engine itself
+        obviously supports it (every OTHER script_option-indexed pool slot works the exact same way
+        regardless of typeinfo).
+
+        Uses the new ``Variable.set_scope_by_format()`` native binding to look up
+        ``"script_option[%i]"`` directly in this concrete type's own fixed scope list (see that
+        binding's own docstring) -- returns ``None`` (not :class:`UnsupportedConstruct`, the
+        caller's own generic "no template" message already covers this) for any ``typeinfo`` that
+        either isn't a plain ``Variable`` subtype at all (e.g. ``_any_variable``/``_player_or_group``
+        -- ``.create()`` returns a composite wrapper with no ``set_scope_by_format`` method of its
+        own) or genuinely has no ``script_option[%i]`` scope in its own family (the native call
+        raises for that, converted here into the same "try something else" signal).
+        """
+        candidate = typeinfo.create()
+        set_scope = getattr(candidate, "set_scope_by_format", None)
+        if set_scope is None:
+            return None
+        try:
+            set_scope("script_option[%i]", index)
+        except RuntimeError:
+            return None
+        return candidate
 
     def _build_opaque_variable_arg(self, expr, typeinfo):
         """A reference shape this compiler doesn't structurally parse -- most importantly, a
@@ -1079,6 +1416,54 @@ class _Compiler:
             "no_one/everyone/allies/enemies/mod_player"
         )
 
+    def _build_waypoint_icon_argument(self, exprs, typeinfo):
+        """A WaypointIconArgument (``set_waypoint_icon``'s own argument, e.g. real
+        ``current_player.biped.set_waypoint_icon(vip)``/``set_waypoint_icon(territory_a,
+        current_player.number[0])`` calls found via a full sweep of every real MCC-shipped built-in
+        game/hopper variant) is a composite type -- an ``icon`` field that's a plain Python ``int``
+        (not an enum wrapper with its own ``.value``, so the generic ``_build_enum_arg`` brute force
+        doesn't apply -- confirmed directly: RVT's own decompiled icon names are a completely
+        different, unrelated vocabulary from the official reference's own ``hud_widget_icons.txt``
+        list, e.g. index 9 decompiles as ``vip`` in both, but index 0 is ``speaker`` here vs.
+        ``ctf`` there -- so this brute-forces the *same* way ``_build_enum_arg`` does, against
+        RVT's own decompiled text, not the official reference) plus an optional ``number`` (a plain
+        ``ScalarVariable``, only used by icons that need one, e.g. ``territory_a``'s own territory
+        index). Returns ``(values consumed, the built argument)``.
+        """
+        if not exprs or exprs[0].kind != "identifier":
+            raise UnsupportedConstruct("a waypoint-icon argument's first call value must be an identifier")
+        name = exprs[0].name
+        arg = typeinfo.create()
+        cache_key = ("_waypoint_icon", name)
+        cached = self._enum_cache.get(cache_key)
+        if cached is not None:
+            arg.icon = cached
+        else:
+            # -1 ("none", a real confirmed case) is a sentinel outside the brute-force loop's own
+            # 0..N range below -- .icon is a plain signed int8_t-width field, not a scoped enum with
+            # its own "no value" member the generic search would ever reach starting from 0.
+            for k in (-1, *range(_ENUM_BRUTE_FORCE_LIMIT)):
+                try:
+                    arg.icon = k
+                    # Some icons (e.g. "territory_a") always need a .number value, and decompile
+                    # a bare, unset .number as a trailing ", " -- confirmed directly (real case:
+                    # icon 11 decompiles as "territory_a, " with .number left untouched, vs. icon
+                    # 12 "territory_b" with no trailing comma at all) -- comparing against just the
+                    # icon-name portion (before any comma) handles both shapes uniformly.
+                    text = arg.decompile(self._variant).split(",", 1)[0].strip()
+                except Exception:  # noqa: BLE001 -- signals "value out of range for this family"
+                    raise UnsupportedConstruct(f"unknown waypoint icon name {name!r}") from None
+                if text == name:
+                    self._enum_cache[cache_key] = k
+                    break
+            else:
+                raise UnsupportedConstruct(f"unknown waypoint icon name {name!r}")
+        if len(exprs) == 1:
+            return 1, arg
+        built = self._build_argument(exprs[1], arg.number.get_variable_typeinfo())
+        arg.number.copy_from(built)
+        return 2, arg
+
     def _build_format_string_argument(self, exprs, typeinfo):
         """A format string (e.g. ``set_objective_text``'s own argument, quoted in call syntax) is a
         real, persistent entry in the variant's own string table (``mp.script_strings.add_new()``,
@@ -1145,7 +1530,13 @@ class _Compiler:
             token = arg.token(i)
             token.type = getattr(self._rvt.OpcodeStringTokenType, token_type_name)
             wrapped = self._build_argument(exprs[1 + i], any_variable_typeinfo)
-            token.value = wrapped.variable.clone()
+            # Ordinarily `wrapped` is a real AnyVariable wrapper (built from a plain top-level
+            # "_any_variable"-typed opcode argument, unwrapped via .variable) -- but a template
+            # sourced from ANOTHER token's own value (see _scan_templates' own "_format_string"
+            # section) is the token's raw, already-unwrapped Variable itself (that's what
+            # token(i).value naturally is), with no .variable to unwrap further.
+            inner = wrapped.variable if hasattr(wrapped, "variable") else wrapped
+            token.value = inner.clone()
         return 1 + len(token_types), arg
 
     def _raise_string_table_full(self):
@@ -1161,13 +1552,81 @@ class _Compiler:
             return built
         built = self._build_variable_arg(expr, typeinfo)
         if built is not None:
-            return built
+            return self._ensure_any_variable_wrapper(typeinfo, built)
         built = self._build_enum_arg(expr, typeinfo)
+        if built is not None:
+            return built
+        built = self._build_object_timer_literal_arg(expr, typeinfo)
+        if built is not None:
+            return built
+        built = self._build_fireteam_list_arg(expr, typeinfo)
         if built is not None:
             return built
         raise UnsupportedConstruct(
             f"no way to build a {typeinfo.internal_name!r} argument from expression kind {expr.kind!r}"
         )
+
+    def _build_fireteam_list_arg(self, expr, typeinfo):
+        """``_fireteam_list`` (e.g. ``set_spawn_location_fireteams``'s own argument, confirmed real
+        cases found via a full sweep of every real MCC-shipped built-in game/hopper variant) has a
+        ``.value`` field, but unlike every other plain-enum family ``_build_enum_arg`` already
+        handles, it's a *bitmask* (one bit per fireteam), not a small ordinal -- confirmed directly:
+        ``.value = 1`` (bit 0 set) decompiles as ``"0"`` (fireteam index 0), ``.value = 2`` (bit 1)
+        as ``"1"``, ``.value = 3`` (bits 0+1) as ``"0, 1"``, etc. -- so a bare-int call value ``N``
+        (real call syntax, e.g. ``set_spawn_location_fireteams(0)``, always names a single fireteam
+        index, never a raw mask) needs ``.value = 1 << N``, not ``.value = N`` directly the way
+        ``_build_enum_arg``'s own int-literal branch assumes for every other enum family. An
+        identifier (e.g. ``all``, a real confirmed case meaning every fireteam) still resolves via
+        the same brute-force-and-compare-decompiled-text approach as any other named enum value."""
+        if typeinfo.internal_name != "_fireteam_list":
+            return None
+        trial = typeinfo.create()
+        if expr.kind == "int":
+            try:
+                trial.value = 1 << expr.value
+                text = trial.decompile(self._variant)
+            except Exception:  # noqa: BLE001
+                return None
+            return trial if text == str(expr.value) else None
+        if expr.kind != "identifier":
+            return None
+        cache_key = ("_fireteam_list", expr.name)
+        cached = self._enum_cache.get(cache_key)
+        if cached is not None:
+            trial.value = cached
+            return trial
+        for k in range(_ENUM_BRUTE_FORCE_LIMIT):
+            try:
+                trial.value = k
+                text = trial.decompile(self._variant)
+            except Exception:  # noqa: BLE001 -- signals "value out of range for this family"
+                break
+            if text == expr.name:
+                self._enum_cache[cache_key] = k
+                return trial
+        return None
+
+    def _build_object_timer_literal_arg(self, expr, typeinfo):
+        """``_object_timer_variable`` (e.g. ``set_progress_bar``'s own "timer" argument) is a
+        composite, ``OpcodeArgValue``-derived type (``base_scope``/``base_type``/``index``, not a
+        ``Variable``) with no confirmed real example of anything but a bare literal-constant shape --
+        checked across every real ``set_progress_bar(...)`` call in every MCC-shipped built-in game/
+        hopper variant, every single one decompiles as a plain integer (0-3 in practice), with
+        ``base_scope``/``base_type`` fixed at ``global``/``scalar`` and ``index`` exactly equal to
+        the literal value (confirmed directly, not guessed: constructing one from scratch with
+        ``base_scope=global``/``base_type=scalar``/``index=N`` decompiles back to the literal ``N``).
+        Unlike every other embedded-Variable gap this module works around, ``base_scope``/
+        ``base_type`` both have real setters, so this needs no clone-from-a-real-example template at
+        all -- a fresh ``typeinfo.create()`` is enough."""
+        if expr.kind != "int":
+            return None
+        if typeinfo.internal_name != "_object_timer_variable":
+            return None
+        arg = typeinfo.create()
+        arg.base_scope = getattr(self._rvt.VariableScope, "global")
+        arg.base_type = self._rvt.VariableType.scalar
+        arg.index = expr.value
+        return arg
 
     def _build_trigger_ref(self, child_index: int):
         if self._templates.trigger_ref is None:
@@ -1195,9 +1654,46 @@ class _Compiler:
 
     # -- assignment -----------------------------------------------------------------------------
 
+    def _add_modify_variable_action(self, trigger, target_arg, value_arg, op: str) -> None:
+        action = self._rvt.Action()
+        action.function = self._modify_variable
+        action.add_argument(target_arg)
+        action.add_argument(value_arg)
+        operator_arg = self._modify_variable.arguments[2].typeinfo.create()
+        operator_arg.value = _ASSIGN_OPERATOR_VALUES[op]
+        action.add_argument(operator_arg)
+        trigger.add_opcode(action)
+
     def _compile_assign(self, stmt, trigger) -> None:
         if stmt.op not in _ASSIGN_OPERATOR_VALUES:
             raise UnsupportedConstruct(f"assignment operator {stmt.op!r} is not supported yet")
+
+        if stmt.target.kind == "member" and stmt.value.kind not in ("call", "member"):
+            # Some properties (e.g. "score") are ALSO directly addressable as a plain Variable
+            # scope, not exclusively through a dedicated property_set action -- confirmed real:
+            # a player's own "score" has a genuine "%w.score" scope (has_which, no derivable
+            # formula, same opaque literal-text match _build_opaque_variable_arg already uses for
+            # "biped"/"team"). Prefer that when the target variant's own script already has a
+            # matching template, since that's what the real compiler/decompiler actually emit for
+            # those fields (confirmed a real, previously-blocking case: slayer_team_hotshot_054.
+            # bin's own "global.player[0].score += 1" compiles, in the ORIGINAL file, as plain
+            # "Modify Variable" -- not "Modify Score", a real action with primary_name "score" that
+            # this compiler's own _find_property_function below would otherwise reach for, whose
+            # context argument (typeinfo "_player_or_group") this compiler has no template to build
+            # from). The exact same statement's own real, already-compiled bytecode is itself the
+            # template _scan_templates() sourced for the plain path, so trying it first succeeds
+            # where property_set can't. A genuine property_set-only field (e.g. "shields", no plain-
+            # Variable form) has no such template, so this probe just fails and falls through to the
+            # dedicated-action path below, same as always -- a non-mutating probe, safe to attempt
+            # and discard (see _can_build_context's own docstring for the same pattern elsewhere).
+            try:
+                target_arg = self._build_argument(stmt.target, self._modify_variable.arguments[0].typeinfo)
+            except UnsupportedConstruct:
+                target_arg = None
+            if target_arg is not None:
+                value_arg = self._build_argument(stmt.value, self._modify_variable.arguments[1].typeinfo)
+                self._add_modify_variable_action(trigger, target_arg, value_arg, stmt.op)
+                return
 
         # A property (e.g. "current_player.biped.shields = 200") isn't a stored variable at all --
         # it decompiles looking exactly like a plain assignment, but is really its own dedicated
@@ -1254,15 +1750,7 @@ class _Compiler:
 
         target_arg = self._build_argument(stmt.target, self._modify_variable.arguments[0].typeinfo)
         value_arg = self._build_argument(stmt.value, self._modify_variable.arguments[1].typeinfo)
-
-        action = self._rvt.Action()
-        action.function = self._modify_variable
-        action.add_argument(target_arg)
-        action.add_argument(value_arg)
-        operator_arg = self._modify_variable.arguments[2].typeinfo.create()
-        operator_arg.value = _ASSIGN_OPERATOR_VALUES[stmt.op]
-        action.add_argument(operator_arg)
-        trigger.add_opcode(action)
+        self._add_modify_variable_action(trigger, target_arg, value_arg, stmt.op)
 
     def _compile_property_set(self, function, context_expr, op, value_expr, trigger, *, selector=None) -> None:
         arg_infos = function.arguments
@@ -1328,7 +1816,12 @@ class _Compiler:
             return
 
         function = _find_function(
-            self._rvt, primary_name=method_name, condition=False, call_arg_count=len(expr.args)
+            self._rvt,
+            primary_name=method_name,
+            condition=False,
+            call_arg_count=len(expr.args),
+            context_expr=context_expr,
+            can_build_context=self._can_build_context,
         )
         if function is None:
             raise UnsupportedConstruct(f"no action function found for call {method_name!r}")
@@ -1352,7 +1845,14 @@ class _Compiler:
         RVT's "Set Object Shape" is the same underlying Shape argument type -- and against real
         ``set_shape(...)`` calls in RCC Onslaught v13.bin): ``none`` takes no more, ``sphere`` takes
         1 (radius), ``cylinder`` takes 3 (radius, bottom, top), ``box`` takes 4 (width [=radius],
-        length, bottom, top). Returns ``(values consumed including the type, the built argument)``.
+        length, bottom, top). A dimension accepts any ordinary variable/literal expression, not just
+        a bare int literal -- confirmed a real case found via a full sweep of every real MCC-shipped
+        built-in game/hopper variant: ``ctf_054.bin``'s own ``set_shape(cylinder, script_option[6],
+        10, 10)`` uses a scripted-option reference for its radius. Built the same way as
+        ``_build_meter_parameters_argument``'s own numerator/denominator/timer (``_build_argument``
+        against the field's own natural typeinfo, then ``copy_from()`` into the embedded,
+        constructor-less field). Returns ``(values consumed including the type, the built
+        argument)``.
         """
         if not exprs or exprs[0].kind != "identifier" or exprs[0].name not in _SHAPE_TYPE_FIELDS:
             raise UnsupportedConstruct(
@@ -1362,20 +1862,13 @@ class _Compiler:
         field_names = _SHAPE_TYPE_FIELDS[shape_type_name]
         if len(exprs) - 1 < len(field_names):
             raise UnsupportedConstruct(f"{shape_type_name!r} shape needs {len(field_names)} more call value(s)")
-        if self._templates.literal_scalar is None:
-            raise UnsupportedConstruct(
-                "this variant's own script has no existing integer literal to source a Shape's "
-                "dimensions from"
-            )
 
         shape = typeinfo.create()
         shape.shape_type = getattr(self._rvt.ShapeType, shape_type_name)
         for field_name, value_expr in zip(field_names, exprs[1:]):
-            if value_expr.kind != "int":
-                raise UnsupportedConstruct("a Shape's dimensions must be plain integer literals yet")
             field_arg = getattr(shape, field_name)
-            field_arg.copy_from(self._templates.literal_scalar)
-            field_arg.index = value_expr.value
+            built = self._build_argument(value_expr, field_arg.get_variable_typeinfo())
+            field_arg.copy_from(built)
         return 1 + len(field_names), shape
 
     def _build_meter_parameters_argument(self, exprs, typeinfo):
@@ -1428,10 +1921,16 @@ class _Compiler:
         # which sentinel or whether a decorative prefix happened to parse into context_expr at all.
         if context_index >= 0 and context_expr is None:
             raise UnsupportedConstruct(f"{function.name!r} needs a call target before the dot")
-        if (out_index is not None) != (out_target is not None):
-            raise UnsupportedConstruct(
-                f"{function.name!r} {'requires' if out_index is not None else 'has no'} a result to assign"
-            )
+        if out_target is None and out_index is not None:
+            # A bare statement call (no "X = ") deliberately discarding the result -- see
+            # _DISCARD_CONSTANTS's own docstring for why this is a real, common, supported pattern,
+            # not a call missing its assignment.
+            discard_name = _DISCARD_CONSTANTS.get(arg_infos[out_index].typeinfo.internal_name)
+            if discard_name is None:
+                raise UnsupportedConstruct(f"{function.name!r} requires a result to assign")
+            out_target = Identifier(name=discard_name, span=_SYNTHETIC_SPAN)
+        elif out_target is not None and out_index is None:
+            raise UnsupportedConstruct(f"{function.name!r} has no result to assign")
 
         positional_indices = _CALL_ARGUMENT_ORDER_OVERRIDES.get(function.name) or [
             i for i in range(len(arg_infos)) if i != context_index and i != out_index
@@ -1440,17 +1939,39 @@ class _Compiler:
         opcode = self._rvt.Condition() if is_condition else self._rvt.Action()
         opcode.function = function
         built_by_index = {}
-        if context_index >= 0:
-            built_by_index[context_index] = self._build_argument(context_expr, arg_infos[context_index].typeinfo)
-        if out_index is not None:
-            built_by_index[out_index] = self._build_argument(out_target, arg_infos[out_index].typeinfo)
-
         # Most positional slots consume exactly one call-syntax value each, but a Vector3 (e.g.
         # attach_to's "offset", written "0, 0, -2" -- confirmed via Vector3Argument.x/y/z) always
         # consumes 3, and a Shape (see _build_shape_argument's own docstring) consumes a variable
         # number depending on its own first value -- so this has to be a single forward pass with a
         # running cursor, not a separate up-front count check against a per-position constant.
         call_arg_cursor = 0
+        if context_index >= 0:
+            context_typeinfo = arg_infos[context_index].typeinfo
+            if context_typeinfo.internal_name == "_object_player_variable":
+                # A rare (confirmed exactly one real function, "Set Shape Owner"/its own real
+                # primary_name "apply_shape_color_from_player_member") composite context: the
+                # context slot itself packs BOTH the usual receiver ("object", from context_expr,
+                # the part before the dot) AND a "player_index" that's the call's own first
+                # (only) value -- confirmed a real case found via a full sweep of every real
+                # MCC-shipped built-in game/hopper variant: "current_object.
+                # apply_shape_color_from_player_member(0)" decompiles its own context argument's
+                # WHOLE text as just "0" (the player_index alone), with .object holding
+                # "current_object" separately, not rendered as part of the call syntax at all.
+                if not call_args or call_args[0].kind != "int":
+                    raise UnsupportedConstruct(
+                        f"{function.name!r}'s own player-index value must be a plain integer literal"
+                    )
+                context_arg = context_typeinfo.create()
+                built = self._build_argument(context_expr, context_arg.object.get_variable_typeinfo())
+                context_arg.object.copy_from(built)
+                context_arg.player_index = call_args[0].value
+                built_by_index[context_index] = context_arg
+                call_arg_cursor = 1
+            else:
+                built_by_index[context_index] = self._build_argument(context_expr, context_typeinfo)
+        if out_index is not None:
+            built_by_index[out_index] = self._build_argument(out_target, arg_infos[out_index].typeinfo)
+
         for i in positional_indices:
             typeinfo = arg_infos[i].typeinfo
             if call_arg_cursor >= len(call_args):
@@ -1476,6 +1997,10 @@ class _Compiler:
                 call_arg_cursor += consumed
             elif typeinfo.internal_name == "_meter_parameters":
                 consumed, built = self._build_meter_parameters_argument(call_args[call_arg_cursor:], typeinfo)
+                built_by_index[i] = built
+                call_arg_cursor += consumed
+            elif typeinfo.internal_name == "_waypoint_icon":
+                consumed, built = self._build_waypoint_icon_argument(call_args[call_arg_cursor:], typeinfo)
                 built_by_index[i] = built
                 call_arg_cursor += consumed
             else:
@@ -1504,20 +2029,57 @@ class _Compiler:
         ]
         return (max(existing) + 1) if existing else 0
 
-    def _split_conjuncts(self, expr) -> list:
-        if expr.kind == "binary" and expr.op == "and":
-            return [*self._split_conjuncts(expr.left), *self._split_conjuncts(expr.right)]
-        return [expr]
+    def _to_cnf_clauses(self, expr) -> list[list]:
+        """Full recursive CNF conversion (AND of ORs) over an arbitrary ``and``/``or``/``not``
+        condition expression tree -- each returned clause is a flat list of atomic terms
+        (comparisons/calls, each optionally ``not``-prefixed) meant to share one engine
+        ``or_group`` (OR within), the returned list of clauses meant to AND together (across
+        groups) via :func:`_next_or_group` -- exactly the shape real Megalo's own flat
+        conditions model needs (confirmed via :func:`_next_or_group`'s own docstring).
 
-    def _split_disjuncts(self, expr) -> list:
+        Standard recursive CNF distribution, generalized to any depth (not just the single level
+        the previous version of this function handled) -- confirmed a real, previously-blocking
+        case found via a full sweep of every real MCC-shipped built-in game/hopper variant: a
+        parenthesized ``or`` nested inside an ``and`` that's itself inside a top-level ``or``
+        (e.g. ``(a or b) and c or d``) used to fall through to :func:`_compile_term`'s own "not
+        supported" case, since the old one-level heuristic only expanded a *conjunct* that was
+        itself a flat OR when that conjunct was reached via the top-level split, never a conjunct
+        reached one level deeper than that.
+
+        - A leaf (comparison/call, or ``not`` directly wrapping one) is its own single-term clause.
+        - ``not`` wrapping a compound (``and``/``or``) expression is pushed inward first via
+          :func:`_negate_expr` (De Morgan), then re-converted -- same transform
+          :meth:`_compile_if` already relies on for ``altif``/``alt``, reused here rather than
+          duplicated.
+        - ``A and B``: CNF(A) concatenated with CNF(B) -- AND trivially distributes over a list of
+          already-ANDed clauses.
+        - ``A or B``: the cartesian product of CNF(A)'s and CNF(B)'s own clauses, each pair merged
+          into one combined OR-clause -- ``(P1 and P2) or Q`` == ``(P1 or Q) and (P2 or Q)``.
+
+        Capped at a small number of resulting clauses so a pathological expression fails fast with
+        :class:`UnsupportedConstruct` (checked by the caller) rather than exploding -- real
+        conditions in every MCC-shipped built-in game/hopper variant checked stay well under this.
+        """
+        if expr.kind == "unary" and expr.op == "not":
+            if expr.operand.kind == "binary" and expr.operand.op in ("and", "or"):
+                return self._to_cnf_clauses(_negate_expr(expr.operand))
+            return [[expr]]
+        if expr.kind == "binary" and expr.op == "and":
+            return [*self._to_cnf_clauses(expr.left), *self._to_cnf_clauses(expr.right)]
         if expr.kind == "binary" and expr.op == "or":
-            return [*self._split_disjuncts(expr.left), *self._split_disjuncts(expr.right)]
-        return [expr]
+            left = self._to_cnf_clauses(expr.left)
+            right = self._to_cnf_clauses(expr.right)
+            if len(left) * len(right) > 16:
+                raise UnsupportedConstruct(
+                    "this condition's and/or combination is too large to expand safely"
+                )
+            return [l_clause + r_clause for l_clause in left for r_clause in right]
+        return [[expr]]
 
     def _compile_term(self, expr, trigger, *, or_group: int) -> None:
         """A single condition opcode -- one ``==``/``!=``/``<``/``>``/``<=``/``>=`` comparison or
         boolean condition-function call, optionally ``not``-negated. ``or_group`` is passed in
-        (never computed here) so a whole flat OR-chain of terms (see :func:`_split_disjuncts`) can
+        (never computed here) so a whole OR-clause of terms (see :func:`_to_cnf_clauses`) can
         share the one group real Megalo's own bytecode uses for "any of these" -- confirmed directly
         against RCC Onslaught v13.bin's own already-compiled conditions, not guessed: real siblings
         that share an ``or_group`` are exactly its own ``a or b`` pairs/chains."""
@@ -1542,7 +2104,12 @@ class _Compiler:
                 raise UnsupportedConstruct("this condition call's target shape is not supported yet")
             context_expr, method_name = split
             function = _find_function(
-                self._rvt, primary_name=method_name, condition=True, call_arg_count=len(expr.args)
+                self._rvt,
+                primary_name=method_name,
+                condition=True,
+                call_arg_count=len(expr.args),
+                context_expr=context_expr,
+                can_build_context=self._can_build_context,
             )
             if function is None:
                 raise UnsupportedConstruct(f"no condition function found for call {method_name!r}")
@@ -1559,46 +2126,27 @@ class _Compiler:
     def _compile_condition(self, condition_expr, trigger) -> None:
         """Builds ``condition_expr`` as one or more ``Condition`` opcodes with the right
         ``or_group`` values for the engine's own flat model (AND across groups, OR within one) --
-        see :func:`_next_or_group`'s own docstring for how that was confirmed.
-
-        The grammar's own precedence (``or_expr := and_expr ("or" and_expr)*``) means ``or`` is
-        always the *outermost* operator wherever it appears without explicit parens -- so splitting
-        on top-level ``or`` first (:func:`_split_disjuncts`) and then each resulting disjunct on top-
-        level ``and`` (:func:`_split_conjuncts`) already reaches every simple term for an ordinary,
-        unparenthesized condition, with no deeper recursion needed. When there's genuinely only one
-        disjunct (no top-level ``or`` at all), each of its conjuncts gets its own group directly
-        (the common case, and also what already correctly handles a *conjunct* that's itself a flat
-        OR, e.g. ``(a or b) and c`` -- unaffected by anything below). When there's more than one
-        disjunct and at least one of them is itself an AND-chain (e.g. ``a and b or c`` -- confirmed
-        a real case in RCC Onslaught v13.bin), the flat model can't represent that directly and needs
-        real CNF distribution: ``(a and b) or c`` == ``(a or c) and (b or c)`` -- the cartesian
-        product across each disjunct's own conjunct list gives exactly that, generalized to any
-        number of disjuncts/conjuncts. Capped at a small number of resulting groups so a
-        pathological expression fails fast with :class:`UnsupportedConstruct` rather than exploding.
-        A conjunct that's itself compound in a way this doesn't cover (parenthesized ``or`` nested
-        inside an ``and`` that's itself inside an ``or``) safely falls through to
-        :func:`_compile_term`'s own "not supported" case rather than being handled wrong.
-        """
-        disjuncts = self._split_disjuncts(condition_expr)
-        if len(disjuncts) == 1:
-            for conjunct in self._split_conjuncts(disjuncts[0]):
-                or_group = self._next_or_group(trigger)
-                for term in self._split_disjuncts(conjunct):
-                    self._compile_term(term, trigger, or_group=or_group)
-            return
-
-        clauses = [self._split_conjuncts(d) for d in disjuncts]
-        total_groups = 1
-        for clause in clauses:
-            total_groups *= len(clause)
-            if total_groups > 16:
-                raise UnsupportedConstruct(
-                    "this condition's and/or combination is too large to expand safely"
-                )
-        for combination in itertools.product(*clauses):
+        see :func:`_next_or_group`'s own docstring for how that was confirmed. All the actual
+        ``and``/``or``/``not`` structure is handled by :func:`_to_cnf_clauses` (arbitrary depth,
+        not just one level) -- this just assigns each resulting clause its own fresh ``or_group``
+        and compiles every term in it under that group, one clause AND'd after another."""
+        for clause in self._to_cnf_clauses(condition_expr):
             or_group = self._next_or_group(trigger)
-            for term in combination:
+            for term in clause:
                 self._compile_term(term, trigger, or_group=or_group)
+
+    @staticmethod
+    def _if_branches(stmt):
+        """``stmt`` (an ``if``/``altif``/``alt`` chain) as a flat list of ``(condition, body)``
+        pairs in source order -- the main ``if`` first, then each ``altif`` clause, then the
+        ``alt`` clause last (as ``(None, body)``) if present. A plain ``if`` with no ``altif``/
+        ``alt`` at all is just the 1-element case, same shape either way."""
+        branches = [(stmt.condition, stmt.body)]
+        for clause in stmt.altif_clauses:
+            branches.append((clause.condition, clause.body))
+        if stmt.alt_body is not None:
+            branches.append((None, stmt.alt_body))
+        return branches
 
     def _compile_if(self, stmt, trigger, *, tail: bool = False) -> None:
         """A Megalo trigger's conditions gate *every* opcode that follows them in that same
@@ -1621,14 +2169,59 @@ class _Compiler:
         this removes. Still deterministic over the parsed AST alone (not recovered from lossy
         decompiled text) -- "is this the last statement in its own tail-positioned list" is a
         structural fact about the source, not a guess.
+
+        ``altif``/``alt`` (see :class:`IfStatement`'s own docstring for why those, not the reserved
+        ``elseif``/``else``) are compiled as a sequence of *independent, self-contained* synthetic
+        ``if``s, each gated by its own condition AND'd with the negation of every earlier branch's
+        own condition (``if A ... altif B ... alt ... end`` becomes, in effect, ``if A``, ``if NOT(A)
+        and B``, ``if NOT(A) and NOT(B)``) -- exactly the same "condition into this trigger, body
+        isolated in its own nested scope unless in tail position" shape :meth:`_if_branches`'s own
+        1-element case already uses for a plain ``if``, just applied once per branch. This is safe
+        for exactly the same reason two independent sibling ``if`` statements already are (an
+        already-tested, already-working case): each non-tail branch's own body lives entirely inside
+        its own isolated ``scope_arg.data`` (see :meth:`_compile_nested_body`), never touching
+        ``trigger``'s own flat opcode list at all, so chaining any number of them back-to-back in one
+        trigger can never let one branch's gate bleed into another's. Only the structurally *last*
+        branch can ever use the no-wrapper tail optimization, and only when this whole ``if`` is
+        itself in tail position -- every earlier branch is always wrapped, regardless of ``tail``,
+        since something (at minimum the next branch's own condition opcodes) always follows it in
+        ``trigger``. An earlier branch's condition is still folded into every later branch's own
+        negation-accumulator even when that earlier branch's own body is empty (and therefore never
+        actually compiled at all, see below) -- the exclusion it implies for later branches is a pure
+        fact about the source, independent of whether this compiler bothered emitting opcodes for it.
         """
-        if stmt.altif_clauses or stmt.alt_body is not None:
-            raise UnsupportedConstruct("'altif'/'alt' clauses are not supported yet")
-        self._compile_condition(stmt.condition, trigger)
-        if tail:
-            self._compile_statements(stmt.body, trigger, tail=True)
-        else:
-            self._compile_nested_body(stmt.body, trigger)
+        branches = self._if_branches(stmt)
+        last_index = len(branches) - 1
+        accumulated_negation = None
+        for i, (condition, body) in enumerate(branches):
+            if condition is None:
+                gate = accumulated_negation
+            elif accumulated_negation is None:
+                gate = condition
+            else:
+                gate = _and_expr(accumulated_negation, condition)
+
+            if body:
+                # A genuinely empty body ("if X then end") is a true no-op regardless of X -- Megalo
+                # conditions have no side effect beyond gating, so there's nothing for this branch to
+                # do either way. Skipping it entirely (not even compiling its own gate) also
+                # sidesteps a real, reproducible native crash: an empty body compiled in non-tail
+                # position builds a zero-opcode "Run Inline Nested Trigger" scope, which segfaults
+                # the native module during save() (found via a fresh MCC-variant-derived native
+                # investigation; root cause not pinned down -- most likely an unguarded dereference
+                # somewhere in Action::write()/CodeBlock::write() for a scope whose own
+                # actionCount/conditionCount is 0). Not a workaround for that crash specifically --
+                # this is the correct compilation regardless, the crash is just further,
+                # independent confirmation it's safe to skip.
+                self._compile_condition(gate, trigger)
+                if tail and i == last_index:
+                    self._compile_statements(body, trigger, tail=True)
+                else:
+                    self._compile_nested_body(body, trigger)
+
+            if condition is not None and i != last_index:
+                negated = _negate_expr(condition)
+                accumulated_negation = negated if accumulated_negation is None else _and_expr(accumulated_negation, negated)
 
     # -- for each ------------------------------------------------------------------------------
 

@@ -71,6 +71,27 @@ def test_compiles_assignment_condition_and_end_round_end_to_end(juggernaut) -> N
     assert "game.end_round()" in text
 
 
+def test_an_if_with_a_genuinely_empty_body_compiles_to_nothing(juggernaut) -> None:
+    """"if X then end" (no body statements at all) is a true no-op -- Megalo conditions have no side
+    effect beyond gating, so there's nothing for it to do either way -- and this compiler skips it
+    entirely rather than emitting the condition plus an empty wrapper. Also sidesteps a real,
+    reproducible native crash found this session: an empty body compiled in non-tail position (via
+    "Run Inline Nested Trigger") segfaults the native module during save() -- root cause not pinned
+    down, but not relevant to why this is skipped (which is a correctness call, not a workaround)."""
+    rvt, variant = juggernaut
+    mp = variant.multiplayer
+    source = "if global.number[0] == 1 then\r\nend\r\nglobal.number[1] = 2\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    top = mp.trigger(mp.trigger_count - 1)
+    assert not any(isinstance(top.opcode(i), rvt.Condition) for i in range(top.opcode_count))
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "global.number[1] = 2" in text
+    assert "global.number[0] == 1" not in text
+
+
 def test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_trigger(juggernaut) -> None:
     """An "if" that's the last statement in its own tail-positioned body -- here, the whole script,
     so trivially true -- compiles its condition and body directly into the enclosing trigger: no "Run
@@ -231,6 +252,80 @@ def test_and_inside_or_condition_is_supported(juggernaut) -> None:
     # reconstructs *some* textually-equivalent CNF/DNF reading of the same flat or_group structure,
     # not necessarily the one the source happened to be written in -- the or_group/count assertions
     # above already verify the structure itself is correct.
+    reloaded = _save_and_reload(rvt, variant)
+    assert "game.end_round()" in reloaded.decompile_script()
+
+
+def test_two_levels_of_and_or_nesting_is_supported(juggernaut) -> None:
+    """A parenthesized ``or`` nested inside an ``and`` that's itself inside a top-level ``or`` --
+    ``(A or B) and C or D`` -- needs a second level of CNF distribution beyond what
+    ``test_and_inside_or_condition_is_supported`` above exercises (a single level): standard
+    distribution gives ``(P and Q) or D`` == ``(P or D) and (Q or D)`` where ``P = (A or B)`` and
+    ``Q = C``, i.e. ``((A or B) or D) and (C or D)`` == ``(A or B or D) and (C or D)`` -- 2 groups,
+    ``{A, B, D}`` and ``{C, D}``, confirmed algebraically correct (not just "no exception raised")
+    and confirmed directly against the actual compiled or_group structure here, same as the
+    single-level case above. See :meth:`_Compiler._to_cnf_clauses`'s own docstring for the general
+    recursive distribution that replaced the old one-level-only special case."""
+    rvt, variant = juggernaut
+    mp = variant.multiplayer
+    source = (
+        "if (global.number[0] == 1 or global.number[1] == 2) and global.number[0] == 3 or "
+        "global.number[1] == 4 then\r\n"
+        "   game.end_round()\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    top = mp.trigger(mp.trigger_count - 1)  # the if's body is inline -- no separate trigger for it
+    conditions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Condition)]
+    assert len(conditions) == 5
+    groups = {}
+    for c in conditions:
+        groups.setdefault(c.or_group, []).append(c.decompile(variant))
+    assert len(groups) == 2
+    (group_a, group_b) = sorted(groups.values(), key=len)
+    assert len(group_a) == 2 and len(group_b) == 3
+    assert group_a == ["global.number[0] == 3", "global.number[1] == 4"]
+    assert group_b == ["global.number[0] == 1", "global.number[1] == 2", "global.number[1] == 4"]
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "game.end_round()" in reloaded.decompile_script()
+
+
+def test_not_wrapping_a_compound_condition_pushes_the_negation_inward(juggernaut) -> None:
+    """``not (A or B) and C`` -- a leading ``not`` wrapping a parenthesized compound expression,
+    not just a single comparison/call -- must be pushed inward via De Morgan
+    (``NOT(A or B) == NOT(A) and NOT(B)``) before CNF conversion, giving 3 independent AND-groups
+    (``NOT(A)``, ``NOT(B)``, ``C``), each a single term with no ``or`` at all -- not, as an earlier
+    version of this compiler's own ``_to_cnf_clauses`` briefly mis-implemented it (re-negating the
+    already-``not``-wrapped node instead of its inner operand, which cancelled back out to the
+    un-negated ``(A or B) and C`` via double negation -- confirmed via a direct check of the actual
+    compiled or_group/inverted structure, not just that no exception was raised, exactly the kind
+    of silent-wrong-semantics bug that wouldn't show up as a test failure without checking the
+    real opcode structure)."""
+    rvt, variant = juggernaut
+    mp = variant.multiplayer
+    source = (
+        "if not (global.number[0] == 1 or global.number[1] == 2) and global.number[0] == 3 then\r\n"
+        "   game.end_round()\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    top = mp.trigger(mp.trigger_count - 1)
+    conditions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Condition)]
+    assert len(conditions) == 3
+    groups = {}
+    for c in conditions:
+        groups.setdefault(c.or_group, []).append((c.decompile(variant), c.inverted))
+    assert len(groups) == 3
+    all_terms = [term for group in groups.values() for term in group]
+    assert ("not global.number[0] == 1", True) in all_terms
+    assert ("not global.number[1] == 2", True) in all_terms
+    assert ("global.number[0] == 3", False) in all_terms
+
     reloaded = _save_and_reload(rvt, variant)
     assert "game.end_round()" in reloaded.decompile_script()
 
@@ -478,6 +573,46 @@ def test_property_set_with_compound_operator_is_supported(juggernaut) -> None:
     assert "current_player.biped.shields += 50" in reloaded.decompile_script()
 
 
+def test_plain_variable_property_is_preferred_over_a_dedicated_property_set_action(juggernaut) -> None:
+    """Some properties (e.g. a player's own "score") are ALSO directly addressable as a plain
+    Variable scope ("%w.score", has_which, no derivable formula -- the same opaque literal-text
+    match _build_opaque_variable_arg already uses for "biped"/"team"), not exclusively through a
+    dedicated property_set action. Real MCC-shipped built-in game/hopper variants are genuinely
+    inconsistent about which encoding they use for the exact same-looking source text -- confirmed
+    directly: juggernaut.bin's own real "global.player[2].score += script_option[0]" compiles as
+    "Modify Score" (a real property_set action, primary_name "score", context typeinfo
+    "_player_or_group"), while slayer_team_hotshot_054.bin's own real "global.player[0].score += 1"
+    compiles as plain "Modify Variable" instead -- found via a full sweep of every real MCC-shipped
+    built-in game/hopper variant (slayer_team_hotshot_054.bin's own case previously fell back
+    entirely, since this compiler had no template to build "Modify Score"'s own "_player_or_group"-
+    typed context argument from). juggernaut.bin's own script has no existing "_any_variable"-typed
+    reference to "global.player[2].score" (only the "Modify Score" action's own "_player_or_group"-
+    typed one) to demonstrate the preference through a fully natural round trip here -- this
+    injects one directly (a control-flow proof: confirms _compile_assign tries and prefers the
+    plain path once a matching template exists, not a claim that this specific donor value is
+    semantically meaningful) and confirms both that "Modify Variable" (not "Modify Score") gets
+    used AND that the resulting opcode still saves/reloads cleanly. The existing shields tests
+    above are the control for the opposite case: juggernaut has no plain-Variable template for
+    "current_player.biped.shields" either, so that probe still correctly falls through to
+    property_set, unaffected by this preference."""
+    rvt, variant = juggernaut
+    compiler = megalo_compiler._Compiler(rvt, variant)
+    donor = compiler._templates.variables[("_any_variable", "current_player")]
+    compiler._templates.literal_variables[("_any_variable", "global.player[2].score")] = donor.clone()
+
+    script = megalo_compiler.parse("global.player[2].score += 1\r\n")
+    compiler.compile(script)
+
+    mp = variant.multiplayer
+    top = mp.trigger(mp.trigger_count - 1)
+    actions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Action)]
+    assert len(actions) == 1
+    assert actions[0].function.name == "Modify Variable"
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert reloaded is not None
+
+
 def test_assigning_a_call_result_into_a_property_raises(juggernaut) -> None:
     rvt, variant = juggernaut
     with pytest.raises(megalo_compiler.UnsupportedConstruct):
@@ -497,6 +632,22 @@ def test_format_string_argument_with_no_tokens_is_supported(juggernaut) -> None:
 
     reloaded = _save_and_reload(rvt, variant)
     assert 'current_player.set_objective_text("You are the Juggernaut")' in reloaded.decompile_script()
+
+
+def test_decompiled_key_does_not_crash_on_an_unset_composite_sub_fields_none_scope(juggernaut) -> None:
+    """A MeterParametersArgument's own embedded numerator/denominator/timer sub-field starts with
+    scope=None until populated (same "no constructor for an embedded Variable member" gap
+    Variable.copy_from()'s own native docstring documents elsewhere) -- confirmed a real crash here,
+    not hypothetical: found via a full sweep of every real MCC-shipped built-in game/hopper variant,
+    7 of which use a real "Set Meter Parameters" call whose own unused sub-field(s)
+    _scan_templates()'s own composite-argument walk still visits unconditionally, and
+    _decompiled_key's own "is this a literal-scope scalar" check used to dereference
+    inner.scope.format with no None guard."""
+    rvt, variant = juggernaut
+    function = megalo_compiler._find_function(rvt, name="Set Meter Parameters", condition=False)
+    arg = function.arguments[1].typeinfo.create()
+    assert arg.timer.scope is None
+    assert megalo_compiler._decompiled_key(rvt, arg.timer, "whatever") == "whatever"
 
 
 @pytest.mark.parametrize(
@@ -576,6 +727,27 @@ def test_format_string_argument_with_too_few_token_values_raises(juggernaut) -> 
         megalo_compiler.compile_script(
             rvt, variant, 'current_player.set_objective_text("%n and %n", global.number[0])\r\n'
         )
+
+
+def test_scan_templates_finds_templates_inside_format_string_tokens(juggernaut) -> None:
+    """A format string's own %n/%p token value(s) are otherwise invisible to _scan_templates()'s
+    flat, top-level-arguments-only walk -- confirmed a real, previously-blocking case (found via a
+    full sweep of every real MCC-shipped built-in game/hopper variant): a scalar reference used ONLY
+    as a token's own value, never elsewhere in a script, had no template for the compiler to source
+    a fresh use of it from at all. Verified directly here (not just "the sweep now finds fewer
+    gaps"): compile a script whose only use of a scalar is as a %n token's own value, save/reload,
+    then confirm _scan_templates() on the resulting variant actually finds it -- clear_triggers()'s
+    own "replace the whole script" semantics (see compile()'s own docstring) mean this one statement
+    really is the reloaded variant's *entire* script, so there's no other occurrence this could be
+    sourced from by coincidence."""
+    rvt, variant = juggernaut
+    source = 'current_player.set_objective_text("%n", global.number[2])\r\n'
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    templates = megalo_compiler._scan_templates(rvt, reloaded, reloaded.multiplayer)
+    assert (megalo_compiler._ANY_VARIABLE_TYPEINFO_NAME, "global.number[]") in templates.variables
 
 
 def test_format_string_argument_reuses_an_existing_matching_string(juggernaut) -> None:
@@ -663,6 +835,66 @@ def test_second_call_argument_order_override_is_supported(juggernaut) -> None:
     assert "game.play_sound_for(all_players, announce_slayer, true)" in reloaded.decompile_script()
 
 
+def test_third_call_argument_order_override_is_supported(juggernaut) -> None:
+    """"Set Object Progress Bar"'s own metadata order is [object(context), who(_player_set),
+    timer(_object_timer_variable)], but its real call syntax -- "set_progress_bar(<timer>, <who>)",
+    confirmed a real case found via a full sweep of every real MCC-shipped built-in game/hopper
+    variant -- puts the timer value before "who". Without this override, the _player_set builder was
+    handed the timer's own remaining call values too (["0", "no_one"]) and failed on the timer value
+    not being a recognized player-set identifier."""
+    rvt, variant = juggernaut
+    source = "current_object.set_progress_bar(3, allies)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_progress_bar(3, allies)" in reloaded.decompile_script()
+
+
+def test_object_timer_variable_literal_is_supported(juggernaut) -> None:
+    """``_object_timer_variable`` (e.g. "Set Object Progress Bar"'s own "timer" argument) is a
+    composite, non-Variable type with no confirmed real example of anything but a bare literal-
+    constant shape -- checked across every real set_progress_bar(...) call in every MCC-shipped
+    built-in game/hopper variant, every one decompiles as a plain integer with base_scope/base_type
+    fixed at global/scalar. Unlike most embedded-composite gaps this module works around,
+    base_scope/base_type both have real setters, so a fresh typeinfo.create() is enough -- no
+    clone-from-a-real-example template needed. See _build_object_timer_literal_arg."""
+    rvt, variant = juggernaut
+    source = "current_object.set_progress_bar(0, no_one)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_progress_bar(0, no_one)" in reloaded.decompile_script()
+
+
+def test_fireteam_list_argument_with_a_single_index_is_supported(juggernaut) -> None:
+    """``_fireteam_list`` (e.g. "set_spawn_location_fireteams"'s own argument, confirmed real cases
+    found via a full sweep of every real MCC-shipped built-in game/hopper variant) has a ``.value``
+    field, but unlike a plain enum ordinal, it's a *bitmask* -- a bare call value ``N`` (a single
+    fireteam index) needs ``.value = 1 << N``, not ``.value = N`` directly. See
+    _build_fireteam_list_arg's own docstring."""
+    rvt, variant = juggernaut
+    source = "current_object.set_spawn_location_fireteams(0)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_spawn_location_fireteams(0)" in reloaded.decompile_script()
+
+
+def test_fireteam_list_argument_with_all_is_supported(juggernaut) -> None:
+    """"all" (every fireteam) resolves via the same brute-force-and-compare-decompiled-text approach
+    as any other named enum value, not the bit-shift math the bare-int case needs."""
+    rvt, variant = juggernaut
+    source = "current_object.set_spawn_location_fireteams(all)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_spawn_location_fireteams(all)" in reloaded.decompile_script()
+
+
 def test_unknown_enum_name_raises_cleanly_not_a_raw_type_error(juggernaut) -> None:
     """The generic brute-force enum search (see _build_enum_arg) tries increasing integer values
     until decompile() confirms a text match or the family's own range is exhausted -- confirmed a
@@ -676,6 +908,118 @@ def test_unknown_enum_name_raises_cleanly_not_a_raw_type_error(juggernaut) -> No
         megalo_compiler.compile_script(
             rvt, variant, "game.play_sound_for(all_players, not_a_real_sound_name, true)\r\n"
         )
+
+
+def test_waypoint_icon_argument_with_no_number_is_supported(juggernaut) -> None:
+    """A WaypointIconArgument (set_waypoint_icon's own argument, found via a full sweep of every
+    real MCC-shipped built-in game/hopper variant) is a composite type whose own "icon" field is a
+    plain int, not an enum wrapper -- the generic _build_enum_arg brute force doesn't apply (no
+    .value to set). See _build_waypoint_icon_argument's own docstring, including why RVT's own
+    decompiled icon names are a completely unrelated vocabulary from the official reference's own
+    hud_widget_icons.txt list."""
+    rvt, variant = juggernaut
+    source = "current_player.biped.set_waypoint_icon(vip)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_player.biped.set_waypoint_icon(vip)" in reloaded.decompile_script()
+
+
+def test_waypoint_icon_none_sentinel_is_supported(juggernaut) -> None:
+    """"none" is icon value -1, outside the brute-force loop's own 0..N range -- .icon is a plain
+    signed int8_t-width field, not a scoped enum with its own "no value" member the generic search
+    would ever reach starting from 0."""
+    rvt, variant = juggernaut
+    source = "current_player.biped.set_waypoint_icon(none)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_player.biped.set_waypoint_icon(none)" in reloaded.decompile_script()
+
+
+def test_waypoint_icon_argument_with_a_number_is_supported(juggernaut) -> None:
+    """Some icons (e.g. "territory_a") always need a .number value, and decompile a bare, unset
+    .number as a trailing ", " -- confirmed directly (real case: icon 11 decompiles as
+    "territory_a, " with .number left untouched, vs. icon 12 "territory_b" with no trailing comma
+    at all) -- so matching against just the icon-name portion (before any comma) is required, not
+    an exact full-text match. juggernaut.bin's own script has no existing 'number'-typed template
+    for 'current_player.number[0]' specifically to source one from, so this still falls back here --
+    but the failure message itself is this test's own regression target: it's now trying to resolve
+    the *number* value specifically (proving the icon itself -- "territory_a" -- was already
+    resolved correctly, past the comma-matching fix), not raising "unknown waypoint icon name"."""
+    rvt, variant = juggernaut
+    source = "current_player.biped.set_waypoint_icon(territory_a, current_player.number[0])\r\n"
+    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="current_player.number"):
+        megalo_compiler.compile_script(rvt, variant, source)
+
+
+def test_waypoint_icon_argument_with_a_literal_number_is_supported(juggernaut) -> None:
+    """The full "icon needs a .number value" path, end to end, not just the icon-name resolution --
+    a literal int works the same way it does for Shape's own dimensions (a real "number"-typed
+    INT_LITERAL template already exists in juggernaut.bin's own script from other constructs)."""
+    rvt, variant = juggernaut
+    source = "current_object.set_waypoint_icon(territory_a, 7)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_waypoint_icon(territory_a, 7)" in reloaded.decompile_script()
+
+
+def test_scan_templates_finds_templates_inside_waypoint_icon_number_field(juggernaut) -> None:
+    """A WaypointIconArgument's own "number" sub-field (only populated for icons that need one, e.g.
+    "territory_a") is otherwise invisible to _scan_templates()'s flat, top-level-arguments-only walk
+    -- confirmed a real, previously-blocking case (found via a full sweep of every real MCC-shipped
+    built-in game/hopper variant): "current_object.spawn_sequence" is used as a waypoint icon's own
+    number value in some scripts, never as a plain top-level argument anywhere else in those same
+    scripts. Verified directly here (not just "the sweep now finds fewer gaps"), the same way as the
+    analogous format-string-token test: compile a script whose only use of a scalar is as a waypoint
+    icon's own number value, save/reload, then confirm _scan_templates() on the resulting variant
+    actually finds it."""
+    rvt, variant = juggernaut
+    source = "current_object.set_waypoint_icon(territory_a, 7)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    templates = megalo_compiler._scan_templates(rvt, reloaded, reloaded.multiplayer)
+    assert ("number", "INT_LITERAL") in templates.variables
+
+
+def test_format_string_timer_token_is_supported(juggernaut) -> None:
+    """"%s" is a real format-string token placeholder mapping to OpcodeStringTokenType.timer, not
+    just %n (number)/%p (player) -- confirmed a real case found via a full sweep of every real
+    MCC-shipped built-in game/hopper variant ("New Weapon In %s" with a real hud_player.timer[N]
+    token value). juggernaut.bin's own script has no existing '_any_variable'-typed reference to
+    'player.timer[0]' to source a template from, so this still falls back here -- but the failure
+    message itself is this test's own regression target: it's now trying to resolve the token's own
+    value (proving "%s" is a recognized placeholder at all), not raising "format-string token '%s'
+    is not supported yet"."""
+    rvt, variant = juggernaut
+    source = 'current_player.set_objective_text("%s", player.timer[0])\r\n'
+    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="player.timer"):
+        megalo_compiler.compile_script(rvt, variant, source)
+
+
+def test_object_player_variable_composite_context_is_supported(juggernaut) -> None:
+    """"Set Shape Owner" (real primary_name "apply_shape_color_from_player_member") is the one
+    confirmed real function whose own CONTEXT argument is a composite type
+    (ObjectPlayerVariableArgument, typeinfo "_object_player_variable"): it packs both the usual
+    receiver ("object", from the call's own dot-prefix) AND a "player_index" that's the call's own
+    first (and only) positional value -- confirmed a real case found via a full sweep of every real
+    MCC-shipped built-in game/hopper variant: "current_object.
+    apply_shape_color_from_player_member(0)" decompiles its own context argument's whole text as
+    just "0" (the player_index alone), with .object holding "current_object" separately, not
+    rendered as part of the call syntax at all."""
+    rvt, variant = juggernaut
+    source = "current_object.apply_shape_color_from_player_member(0)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.apply_shape_color_from_player_member(0)" in reloaded.decompile_script()
 
 
 def test_function_overload_disambiguated_by_biped_context_and_two_args(juggernaut) -> None:
@@ -703,6 +1047,46 @@ def test_function_overload_disambiguated_by_player_context_and_one_arg(juggernau
 
     reloaded = _save_and_reload(rvt, variant)
     assert "current_player.add_weapon(global.object[0])" in reloaded.decompile_script()
+
+
+def test_function_overload_disambiguated_by_context_type_not_just_arity(juggernaut) -> None:
+    """"set_primary_respawn_object" is shared by two real functions with the *same* non-context
+    argument count (1) but different context typeinfo -- "...for Team" (team) vs "...for Player"
+    (player) -- so call_arg_count alone can't disambiguate them. Confirmed a real case, found via a
+    full sweep of every real MCC-shipped built-in game/hopper variant: 2nvasion_slayer_054.bin's own
+    current_player.set_primary_respawn_object(global.object[2]) was silently resolving to the "for
+    Team" overload (whichever the engine's own function table happened to list first) and then
+    failing outright, since current_player isn't a team reference at all. See _find_function's own
+    context_expr/can_build_context disambiguation tier."""
+    rvt, variant = juggernaut
+    source = "current_player.set_primary_respawn_object(global.object[0])\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_player.set_primary_respawn_object(global.object[0])" in reloaded.decompile_script()
+
+
+def test_a_bare_call_discarding_an_out_variable_result_resolves_to_the_null_constant(juggernaut) -> None:
+    """A bare statement call (no "X = ") to a function with an out-variable slot -- e.g. a real
+    place_at_me()/"Create Object" call whose own result is deliberately unused -- is real, common
+    Megalo, not a missing assignment: confirmed directly against a real compiled opcode (found via a
+    full sweep of every real MCC-shipped built-in game/hopper variant) that the engine's own "result
+    discarded" convention is the literal null constant matching the out-variable's own family
+    ("no_object" for an object result), not an unset/omitted argument. See _DISCARD_CONSTANTS's own
+    docstring.
+
+    juggernaut.bin's own script has no existing 'object'-typed 'no_object' reference to source a
+    template from (this compiler can only clone-and-retarget from a real example already present in
+    the target script -- see module docstring), so this specific call still falls back here -- but
+    the failure message itself is the proof the fix works: it's now trying to build 'no_object'
+    specifically (this test's own regression target), not raising the old, unconditional "requires a
+    result to assign" for every bare call regardless of whether the engine itself supports
+    discarding one."""
+    rvt, variant = juggernaut
+    source = "current_player.biped.place_at_me(skull, none, never_garbage_collect, 0, 0, 5, none)\r\n"
+    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="no_object"):
+        megalo_compiler.compile_script(rvt, variant, source)
 
 
 def test_vector3_collapsed_call_argument_is_supported(juggernaut) -> None:
@@ -747,6 +1131,139 @@ def test_shape_argument_cylinder_is_supported(juggernaut) -> None:
 
     reloaded = _save_and_reload(rvt, variant)
     assert "current_object.set_shape(cylinder, 360, 1000, 1000)" in reloaded.decompile_script()
+
+
+def test_shape_argument_dimension_from_script_option_is_supported(juggernaut) -> None:
+    """The last genuine gap from the 475-file MCC validation sweep, now closed: a Shape's own
+    dimension argument (``number``-typeinfo) sourced from ``script_option[N]`` -- confirmed a real
+    case: ctf_054.bin's own ``set_shape(cylinder, script_option[6], 10, 10)``. Every OTHER
+    ``script_option[]`` reference in that same script is typed ``_any_variable`` (plain condition
+    compares, see test_script_option_reference_is_supported above) or ``timer`` (a declare
+    initializer) -- no ``number``-typeinfo one anywhere to clone-and-retarget from, even though the
+    engine obviously supports it the same way for every other typeinfo. Unlike every other indexed
+    pool reference this compiler resolves, this needs NO existing loaded example at all: fixed via
+    a new native binding, ``Variable.set_scope_by_format()``, that looks up a concrete Variable
+    type's own known ``"script_option[%i]"`` scope directly (see
+    :meth:`_Compiler._build_script_option_arg`'s own docstring) rather than requiring a real,
+    already-compiled example to clone. juggernaut.bin's own script has no ``set_shape(...,
+    script_option[N], ...)`` of its own, but the engine's function table itself doesn't require one
+    -- this compiles and round-trips cleanly regardless."""
+    rvt, variant = juggernaut
+    source = "current_object.set_shape(cylinder, script_option[6], 10, 10)\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "current_object.set_shape(cylinder, script_option[6], 10, 10)" in reloaded.decompile_script()
+
+
+def test_shape_argument_dimension_accepts_a_variable_reference_not_just_a_literal(juggernaut) -> None:
+    """A Shape's own dimension fields accept any ordinary variable/literal expression, not just a
+    bare int literal -- confirmed a real case found via a full sweep of every real MCC-shipped
+    built-in game/hopper variant: ctf_054.bin's own set_shape(cylinder, script_option[6], 10, 10)
+    uses a scripted-option reference for its radius. juggernaut.bin's own script has no existing
+    'number'-typed template for 'global.number[0]' specifically to source one from, so this still
+    falls back here -- but the failure message itself is this test's own regression target: it's now
+    trying to resolve a real variable reference (proving the generalization ran), not raising the
+    old, unconditional "must be plain integer literals" for any non-literal dimension. See
+    _build_shape_argument's own docstring."""
+    rvt, variant = juggernaut
+    source = "current_object.set_shape(sphere, global.number[0])\r\n"
+    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="global.number"):
+        megalo_compiler.compile_script(rvt, variant, source)
+
+
+def test_script_option_reference_is_supported(juggernaut) -> None:
+    """``script_option[N]`` -- a scripted (Forge-configurable) option's own current value -- is a
+    real, first-class indexed variable scope the engine supports (confirmed directly against a real
+    compiled opcode: its own scope.format is "script_option[%i]", the same indexed clone-and-
+    retarget shape every other pool reference uses, just with a different fixed prefix and pool size
+    -- Megalo::Limits::max_script_options is 16), not previously recognized at all. Found via a full
+    sweep of every real MCC-shipped built-in game/hopper variant (ctf_054.bin's own
+    "set_shape(cylinder, script_option[6], 10, 10)"). juggernaut.bin's own script has no existing
+    '_any_variable'-typed reference to 'script_option[]' to source a template from (only its own
+    declare statements mention one, which this module's own declare handling is a pure no-op over --
+    see module docstring's "declare" bullet -- so nothing gets scanned from it), so this still falls
+    back here -- but the failure message itself is this test's own regression target: it's now
+    recognized as a 'script_option[]'-shaped reference at all (previously not a recognized reference
+    shape in the first place)."""
+    rvt, variant = juggernaut
+    source = "global.number[0] = script_option[0]\r\n"
+    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="script_option"):
+        megalo_compiler.compile_script(rvt, variant, source)
+
+
+def test_script_option_retarget_to_a_different_index_round_trips_correctly(juggernaut) -> None:
+    """Regression test for a real native bug (found via bit-level ASAN/trace debugging of the 475-
+    file MCC validation sweep's remaining round-trip failures): ``Variable::copy()`` (native) copies
+    an ``indexed_data``-scoped Variable's ``.object`` pointer verbatim from whatever it was cloned
+    from. ``.object`` is only ever (re)computed from ``.index`` during the native ``read()`` path --
+    a clone made via ``_retarget()`` (set ``.index`` directly in Python, never round-tripped through
+    ``read()``) kept the ORIGINAL template's stale ``.object``, and ``Variable::write()`` preferred
+    that stale ``.object``'s own ``->index`` over the freshly retargeted ``.index``, so the SAVED file
+    silently kept referencing the template's original slot instead of the one actually requested.
+    juggernaut.bin's own script has a "declare global.timer[0] = script_option[2]" (see
+    test_property_get_is_supported's own docstring for why juggernaut's only usable template for this
+    shape is the assignment-target ("number"-typeinfo) one, not an ``_any_variable``-typed one) --
+    retargeting to script_option[5] here (a different index than the template's own [2]) is exactly
+    the clone-and-retarget shape the bug required. Fixed via a new native binding,
+    ``Variable.clear_object()``, called from ``_retarget()`` right after setting ``.index``."""
+    rvt, variant = juggernaut
+    source = "script_option[5] = current_player.biped.health\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "script_option[5] = current_player.biped.health" in text
+    assert "script_option[2] = current_player.biped.health" not in text
+
+
+def test_any_variable_argument_from_a_raw_unwrapped_template_is_wrapped_before_use(juggernaut) -> None:
+    """Regression test for the actual root cause of the cascading "Failed to parse game variant"
+    round-trip failures found via the 475-file MCC validation sweep (distinct from, and far more
+    serious than, the ``.object``-staleness value mismatch the previous test covers): confirmed via
+    native bit-level tracing (comparing a save's own write-side opcode trace against the immediate
+    reload's read-side trace, ordinally) that the actual desync originates at a "Modify Variable"
+    action whose value ("b") operand ends up a bare, unwrapped ``Variable`` (e.g. a
+    ``ScalarVariable``) instead of a proper ``AnyVariable`` wrapper.
+
+    ``_scan_templates()`` deliberately registers some templates *raw* -- a ``_format_string``
+    token's own value, or a ``_waypoint_icon``'s own ``.number`` sub-field, are genuinely just a bare
+    ``Variable``, never wrapped in an ``AnyVariable`` to begin with -- under the very same
+    ``("_any_variable", key)`` template-dict namespace that a genuinely ``_any_variable``-typed
+    top-level slot (e.g. "Modify Variable"'s own "a"/"b" operands) also queries via
+    ``_build_variable_arg``. ``Opcode.add_argument()`` (native) stores whatever concrete C++ type
+    it's handed verbatim, with no check against the slot's own declared typeinfo -- so when the only
+    available template for a shape happens to be one of these raw ones, the old code silently handed
+    a bare Variable to a "_any_variable" slot. That argument's own polymorphic ``write()`` then skips
+    the leading 3-bit type-tag ``AnyVariable::write()`` always emits, desyncing the bitstream for
+    every opcode written after it -- with no crash and no ASan report (not memory corruption, just
+    the wrong concrete C++ type in that slot).
+
+    juggernaut.bin's own script has no existing ``_any_variable``-typed reference to
+    ``script_option[]`` at all (only a "number"-typeinfo one, see test_property_get_is_supported's
+    own docstring) -- this test injects a raw clone of that "number"-typeinfo template directly into
+    the ``_any_variable`` family, simulating exactly what ``_scan_templates()`` would produce if the
+    *only* real-world source for this shape were a format-string token/waypoint-icon field (the
+    actual shape of every one of the sweep's 57 crashing files), and confirms building
+    "global.number[0] = script_option[3]" (whose value slot is genuinely ``_any_variable``-typed)
+    both succeeds AND round-trips correctly through a real save/reload -- proof the bitstream isn't
+    desynced, not just that no exception was raised. Fixed via a new native binding,
+    ``AnyVariable.wrap()``, called from ``_Compiler._ensure_any_variable_wrapper()`` for every
+    ``_any_variable``-typed argument this compiler builds.
+    """
+    rvt, variant = juggernaut
+    compiler = megalo_compiler._Compiler(rvt, variant)
+    raw_template = compiler._templates.variables[("number", "script_option[]")]
+    assert not hasattr(raw_template, "variable")
+    compiler._templates.variables[("_any_variable", "script_option[]")] = raw_template.clone()
+
+    script = megalo_compiler.parse("global.number[0] = script_option[3]\r\n")
+    compiler.compile(script)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "global.number[0] = script_option[3]" in reloaded.decompile_script()
 
 
 def test_shape_argument_with_too_few_dimension_values_raises(juggernaut) -> None:
@@ -909,6 +1426,35 @@ def test_on_init_event_trigger_is_supported(juggernaut) -> None:
     assert mp.entry_points.get_index_of_event(rvt.TriggerEntryType.on_init) != -1
 
 
+def test_on_double_host_migration_event_trigger_is_supported(juggernaut) -> None:
+    """"double host migration" (the second consecutive host migration in one match) has no
+    ``TriggerEntryType`` member of its own -- confirmed directly against the vendored engine's own
+    ``trigger.h`` (``entry_type::on_host_migration``'s own comment: "host migrations and double
+    host migrations"): a trigger bound to either event carries the exact same ``entry_type``, told
+    apart purely by which of the engine's own two separate ``TriggerEntryPoints`` index fields
+    (``indices.hostMigrate`` vs. ``indices.doubleHostMigrate``) points at it. Found via a full
+    sweep of every real MCC-shipped built-in game/hopper variant (a real case: race_054.bin's own
+    "on double host migration:" trigger) -- previously fell back to the native compiler entirely
+    since ``TriggerEntryType`` genuinely has no matching member to look up. Fixed via a dedicated
+    native binding, ``bind_trigger_as_double_host_migration_handler()``, that sets
+    ``indices.doubleHostMigrate`` directly rather than going through the generic (and, for this one
+    event, structurally incapable) ``bind_trigger_as_event()`` path -- see
+    ``_EVENT_ENTRY_TYPES``'s own docstring for why this event is handled separately from every
+    other one in ``_compile_event_trigger``."""
+    rvt, variant = juggernaut
+    mp = variant.multiplayer
+    source = "on double host migration:\r\n   global.number[0] = 1\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "on double host migration: do\r\n   global.number[0] = 1\r\nend" in text
+    # A double-host-migration-bound trigger must NOT also register as the plain "host migration"
+    # handler -- they're mutually exclusive index fields, not two names for the same slot.
+    assert mp.entry_points.get_index_of_event(rvt.TriggerEntryType.on_host_migration) == -1
+
+
 def test_unsupported_event_name_raises(juggernaut) -> None:
     rvt, variant = juggernaut
     with pytest.raises(megalo_compiler.UnsupportedConstruct):
@@ -1028,21 +1574,17 @@ def test_duplicate_function_declaration_raises(juggernaut) -> None:
         ),
         pytest.param("global.number[99] = 1\r\n", id="out-of-range index"),
         pytest.param(
+            # "elseif" (unlike the real, working "altif" -- see test_altif_alt_chain_compiles_*
+            # below) is a reserved word that doesn't actually parse, same as "else" -- see
+            # megalo_ast's own module docstring for how that was confirmed against the native
+            # text compiler directly. This is a parse error, not an UnsupportedConstruct from
+            # this compiler's own altif/alt handling.
             "if global.number[0] == 1 then\r\n"
             "   game.end_round()\r\n"
             "elseif global.number[0] == 2 then\r\n"
             "   game.end_round()\r\n"
             "end\r\n",
-            id="altif clause",
-        ),
-        pytest.param(
-            # A second level of and/or nesting -- one level deep (the CNF distribution
-            # _compile_condition() does) is supported, see test_and_inside_or_condition_is_supported.
-            "if (global.number[0] == 1 or global.number[1] == 2) and global.number[0] == 3 or "
-            "global.number[1] == 4 then\r\n"
-            "   game.end_round()\r\n"
-            "end\r\n",
-            id="two levels of and/or nesting",
+            id="elseif is still a reserved, non-working keyword",
         ),
         pytest.param(
             # send_incident takes exactly 3 call arguments -- 2 given is a plain arity mismatch,
@@ -1057,6 +1599,96 @@ def test_raises_unsupported_construct(juggernaut, source: str) -> None:
     rvt, variant = juggernaut
     with pytest.raises(megalo_compiler.UnsupportedConstruct):
         megalo_compiler.compile_script(rvt, variant, source)
+
+
+def test_if_alt_chain_compiles_with_a_negated_gate(juggernaut) -> None:
+    """The simplest ``altif``/``alt`` case: a bare ``if ... alt ... end`` (real Megalo "else",
+    see :class:`IfStatement`'s own docstring for why not the reserved ``else``). Compiled as two
+    independent, self-contained synthetic ``if``s (see ``_compile_if``'s own docstring) -- the
+    ``alt`` branch's own gate is just the negation of the main branch's condition, with no
+    ``and`` needed (only one prior branch to exclude)."""
+    rvt, variant = juggernaut
+    source = (
+        "if global.number[0] == 0 then\r\n"
+        "   global.number[1] = 1\r\n"
+        "alt\r\n"
+        "   global.number[1] = 2\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "if global.number[0] == 0 then" in text
+    assert "global.number[1] = 1" in text
+    assert "if not global.number[0] == 0 then" in text
+    assert "global.number[1] = 2" in text
+
+
+def test_altif_alt_chain_compiles_with_correct_negation_accumulated_gates(juggernaut) -> None:
+    """A full ``if``/``altif``/``altif``/``alt`` chain -- each branch becomes its own independent,
+    self-contained synthetic ``if`` (see ``_compile_if``'s own docstring), gated by its own
+    condition AND'd with the negation of every earlier branch's own condition (``altif`` #2's own
+    gate is ``NOT(main) AND NOT(altif #1) AND (altif #2's own condition)``, etc.) -- exactly
+    reproducing ordinary if/elseif/else "exactly one branch runs" semantics using only real Megalo
+    constructs (no native "else" support at all). Confirmed directly against the real decompiled
+    structure after a save/reload, not just that no exception was raised -- the accumulated
+    negation is exactly what makes this differ from 4 independent, unconditional ``if``s."""
+    rvt, variant = juggernaut
+    source = (
+        "if global.number[0] == 0 then\r\n"
+        "   global.number[1] = 1\r\n"
+        "altif global.number[0] == 1 then\r\n"
+        "   global.number[1] = 2\r\n"
+        "altif global.number[0] == 2 then\r\n"
+        "   global.number[1] = 3\r\n"
+        "alt\r\n"
+        "   global.number[1] = 4\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "if global.number[0] == 0 then" in text
+    assert "global.number[1] = 1" in text
+    assert "if not global.number[0] == 0 and global.number[0] == 1 then" in text
+    assert "global.number[1] = 2" in text
+    assert "if not global.number[0] == 0 and not global.number[0] == 1 and global.number[0] == 2 then" in text
+    assert "global.number[1] = 3" in text
+    assert (
+        "if not global.number[0] == 0 and not global.number[0] == 1 and not global.number[0] == 2 then"
+        in text
+    )
+    assert "global.number[1] = 4" in text
+
+
+def test_altif_with_an_empty_leading_branch_still_folds_its_condition_into_later_gates(
+    juggernaut,
+) -> None:
+    """An empty branch body (e.g. the main ``if`` here) compiles no opcodes of its own at all
+    (see ``_compile_if``'s own docstring for why, and the native crash this also sidesteps) --
+    but its own condition must still be excluded by every later branch's own gate, purely as a
+    fact about the source, independent of whether this compiler bothered emitting anything for
+    it. Regression target: before this was handled, the accumulator was only updated alongside
+    actually compiling a branch's body, which would have let a later branch's gate wrongly omit
+    an earlier, empty branch's own exclusion."""
+    rvt, variant = juggernaut
+    source = (
+        "if global.number[0] == 0 then\r\n"
+        "altif global.number[0] == 1 then\r\n"
+        "   global.number[1] = 2\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    text = reloaded.decompile_script()
+    assert "if not global.number[0] == 0 and global.number[0] == 1 then" in text
+    assert "global.number[1] = 2" in text
 
 
 def test_raises_when_the_variant_has_no_existing_templates_to_source_from() -> None:

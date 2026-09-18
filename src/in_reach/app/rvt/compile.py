@@ -252,21 +252,17 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             try:
                 megalo_compiler.compile_script(rvt, variant, source)
                 # A successful compile_script() call isn't, on its own, proof that `variant` is
-                # actually a valid, reloadable game variant -- confirmed a real, if rare, case: a
-                # large, deeply-nested real script (RCC Onslaught v13.bin's own full script) compiled
-                # without error but produced a `variant` that `save()` would write successfully yet
-                # the game (and even this same native module's own `load()`) could not parse back.
-                # Root-caused (not a mystery any more, see megalo_compiler's own module docstring):
-                # the compiled script exceeded Megalo::Limits::max_actions/max_conditions, which the
-                # native save() path never checks (only the fixed aggregate bit budget) -- and
-                # megalo_compiler.py's own compile() now checks this proactively and raises
-                # UnsupportedConstruct for it, the same way it already does for Limits::max_triggers,
-                # so this probe should no longer be the thing that catches that *specific* case. It
-                # stays as a real, if now mostly redundant, defense-in-depth: verifying the actual
-                # round trip here -- before this compile is ever trusted -- is what PROMPT.md's own
-                # "I want a working compiler/decompiler we can rely on" requires: never ship a build
-                # neither this app nor the game itself can load back, silently, for *any* reason,
-                # including ones not yet discovered.
+                # actually a valid, reloadable game variant -- confirmed real, if rare, cases: a
+                # script that exceeds Megalo::Limits::max_actions/max_conditions used to save()
+                # without error yet fail to load() back -- megalo_compiler.py's own compile() now
+                # checks that proactively (see its own module docstring), so this probe usually isn't
+                # what catches that specific case any more. Two more native round-trip bugs this probe
+                # used to be the only defense against (see megalo_compiler's own "Fixed: two distinct
+                # native round-trip bugs" section) are now fixed at the source -- but this probe stays
+                # as defense in depth regardless. Verifying the actual round trip here -- before this
+                # compile is ever trusted -- is what PROMPT.md's own "I want a working compiler/
+                # decompiler we can rely on" requires: never ship a build neither this app nor the game
+                # itself can load back, silently, for *any* reason, including ones not yet discovered.
                 probe_fd, probe_path_str = tempfile.mkstemp(suffix=".bin")
                 os.close(probe_fd)  # mkstemp's own fd must be closed before anything else opens this
                 # path on Windows, or save()/load() below (and the unlink() in `finally`) can fail
