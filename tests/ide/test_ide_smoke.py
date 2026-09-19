@@ -379,12 +379,24 @@ def test_dragging_the_sidebar_to_a_midrange_width_actually_lands_there(
     folder.mkdir()
     project_window._on_project_opened(folder)
     QApplication.processEvents()
-    assert project_window.primary_sidebar.isVisible() is True
+    sidebar = project_window.primary_sidebar
+    assert sidebar.isVisible() is True
 
-    project_window._side_splitter.setSizes([300, 1000])
+    # A modest, comfortably-in-range target -- clearly above the flat _SIDEBAR_MIN_DRAG_WIDTH floor
+    # (200) and clearly below _SIDEBAR_DEFAULT_WIDTH (420), but still small enough to stay under
+    # _SIDEBAR_MAX_WIDTH_FRACTION's own ceiling (a fraction of the *screen's* own width -- see
+    # main_window.py's own _build_primary_sidebar) even on a narrow CI/headless virtual display,
+    # where that ceiling can sit well below a larger "wide" target and silently clamp it -- a
+    # failure that has nothing to do with dragging actually working.
+    from in_reach.ide.main_window import _SIDEBAR_MIN_DRAG_WIDTH
+
+    target = _SIDEBAR_MIN_DRAG_WIDTH + 50
+    assert target < sidebar.maximumWidth()  # would silently invalidate this test otherwise
+
+    project_window._side_splitter.setSizes([target, 1000])
     QApplication.processEvents()
 
-    assert project_window.primary_sidebar.width() == 300
+    assert sidebar.width() == target
 
 
 def test_side_splitter_uses_non_opaque_resize(window: MainWindow) -> None:
