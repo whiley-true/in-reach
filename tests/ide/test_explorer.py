@@ -857,10 +857,14 @@ def test_builtin_folder_buttons_emit_open_builtin_folder_requested(
 
 def test_builtin_buttons_are_laid_out_two_per_row(panel: ExplorerPanel) -> None:
     # PROMPT.md: "col a / col b" -- Game Variants/Map Variants, Hopper Variants/Hopper Maps, User
-    # Games/User Maps, each pair sharing a row.
+    # Games/User Maps, each pair sharing a row. A fourth row holds "Open In-Reach Maps" alone,
+    # spanning both columns (PROMPT.md: "a button for In-Reach maps ... quick launch built-in
+    # buttons").
     grid = panel.game_variants_button.parentWidget().layout()
-    assert grid.rowCount() == 3
+    assert grid.rowCount() == 4
     assert grid.columnCount() == 2
+    position = grid.getItemPosition(grid.indexOf(panel.inreach_maps_button))
+    assert position == (3, 0, 1, 2)
 
 
 # -- heading/subheading emphasis (PROMPT.md: "please update dashbaord so headings are bold and

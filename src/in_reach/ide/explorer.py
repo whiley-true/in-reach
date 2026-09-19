@@ -22,6 +22,12 @@ back in a different form as Quick Launch's own "Built-in" buttons above -- :mod:
 system_verify` is still the one place their folders are actually resolved, same as the Welcome
 tab's own Verify System Settings flow.
 
+A fifth box, "Notepad" (PROMPT.md: "in dashboard please add a 'Notepad' section that should be box at
+the bottom"), takes whatever vertical room is left at the bottom of the panel: a line-numbered,
+autosaving view of the project's own ``Notes.txt`` (see :mod:`in_reach.ide.notepad`), with buttons that
+hand the same file to a real editor tab or a popout window. Quick Launch also carries an "Open
+In-Reach Maps" button, opening in-reach's own ``.in-reach/maps`` folder.
+
 The Settings tree is a plain ``QFileSystemModel``/``QTreeView`` pair (so it reflects live disk
 changes for free) with a custom icon provider (:mod:`in_reach.ide.file_icons`) swapped in for the
 platform's own generic file icons.
@@ -52,6 +58,7 @@ from in_reach.app.rvt import settings_io, strings_io
 from in_reach.ide.collapsible_section import CollapsibleSection as _CollapsibleSection
 from in_reach.ide.collapsible_section import SECTION_HEADER_STYLE
 from in_reach.ide.file_icons import ExplorerIconProvider
+from in_reach.ide.notepad import NotepadBox
 
 _NO_PROJECT_TEXT = "No project opened yet -- create or load one from the Welcome tab."
 _NO_STATS_TEXT = "No build stats yet -- Apply (or launch RVT) once this gametype compiles."
@@ -287,6 +294,14 @@ class ExplorerPanel(QWidget):
     #: labor as export_requested/launch_rvt_requested above.
     open_builtin_folder_requested = pyqtSignal(str)
 
+    #: PROMPT.md: "it should be possible to load in editor tab or in popout window" -- the Notepad
+    #: box's own two buttons (see :class:`~in_reach.ide.notepad.NotepadBox`); MainWindow owns
+    #: actually opening either.
+    notepad_open_in_editor_requested = pyqtSignal()
+    notepad_open_in_window_requested = pyqtSignal()
+    #: Emitted with the notepad file's path right after the box autosaves it.
+    notepad_saved = pyqtSignal(Path)
+
     #: PROMPT.md: "please tweak the default explorer text scale to be +10%" -- relative to the
     #: app's own current zoom-scaled font (see :meth:`refresh_font_scale`), not a fixed point size.
     TEXT_SCALE = 1.1
@@ -458,6 +473,9 @@ class ExplorerPanel(QWidget):
         self.hopper_maps_button = _folder_button("Open Hopper Maps")
         self.user_games_button = _folder_button("Open User Games")
         self.user_maps_button = _folder_button("Open User Maps")
+        # PROMPT.md: "please also add a button for In-Reach maps (which should be added to settings
+        # and quick launch built-in buttons) ... it should point to .in-reach maps".
+        self.inreach_maps_button = _folder_button("Open In-Reach Maps")
         for button, key in (
             (self.game_variants_button, system_verify.STANDARD_VARIANTS_KEY),
             (self.map_variants_button, system_verify.STANDARD_MAP_VARIANTS_KEY),
@@ -465,6 +483,7 @@ class ExplorerPanel(QWidget):
             (self.hopper_maps_button, system_verify.HOPPER_MAP_VARIANTS_KEY),
             (self.user_games_button, system_verify.PERSONAL_VARIANTS_KEY),
             (self.user_maps_button, system_verify.PERSONAL_MAPS_KEY),
+            (self.inreach_maps_button, system_verify.INREACH_MAPS_KEY),
         ):
             button.clicked.connect(lambda _checked=False, k=key: self.open_builtin_folder_requested.emit(k))
         builtin_grid = QGridLayout()
@@ -476,6 +495,7 @@ class ExplorerPanel(QWidget):
         builtin_grid.addWidget(self.hopper_maps_button, 1, 1)
         builtin_grid.addWidget(self.user_games_button, 2, 0)
         builtin_grid.addWidget(self.user_maps_button, 2, 1)
+        builtin_grid.addWidget(self.inreach_maps_button, 3, 0, 1, 2)
         builtin_grid_widget = QWidget()
         builtin_grid_widget.setLayout(builtin_grid)
         quick_launch_layout.addWidget(builtin_grid_widget)
@@ -500,7 +520,20 @@ class ExplorerPanel(QWidget):
         self.settings_section.hide()
         layout.addWidget(self.settings_section)
 
-        layout.addStretch(1)
+        # PROMPT.md: "in dashboard please add a 'Notepad' section that should be box at the bottom
+        # that loads the contents of a notepad (with line nums)" -- takes this layout's leftover
+        # vertical space (stretch 1) rather than a trailing addStretch() doing so, which is what
+        # keeps it pinned to the bottom of the sidebar while the boxes above stay packed at the top.
+        self.notepad = NotepadBox()
+        for button in (self.notepad.open_in_editor_button, self.notepad.open_in_window_button):
+            button.setAutoRaise(False)
+            button.setStyleSheet(_DASHBOARD_BUTTON_STYLE)
+        self.notepad.open_in_editor_requested.connect(self.notepad_open_in_editor_requested.emit)
+        self.notepad.open_in_window_requested.connect(self.notepad_open_in_window_requested.emit)
+        self.notepad.saved.connect(self.notepad_saved.emit)
+        self.notepad_section = _CollapsibleSection("Notepad", self.notepad, collapsed=False)
+        self.notepad_section.hide()
+        layout.addWidget(self.notepad_section, 1)
 
         self.settings_tree.clicked.connect(
             lambda index: self._on_tree_clicked(self._settings_model, index)
@@ -530,6 +563,7 @@ class ExplorerPanel(QWidget):
         self.settings_section.set_header_font(header_font)
         self.stats_section.set_header_font(header_font)
         self.quick_launch_section.set_header_font(header_font)
+        self.notepad_section.set_header_font(header_font)
 
         settings_tree_font = QFont(font)
         settings_tree_font.setPointSizeF(font.pointSizeF() * self.SETTINGS_TREE_TEXT_SCALE)
@@ -585,6 +619,8 @@ class ExplorerPanel(QWidget):
         self._no_project_spacer.setVisible(not has_project)
         self.quick_launch_section.setVisible(has_project)
         self.settings_section.setVisible(has_project)
+        self.notepad_section.setVisible(has_project)
+        self.notepad.set_path(folder / new_project.NOTES_FILENAME if has_project else None)
         _point_tree_at(
             self.settings_tree, self._settings_model, self._ensure_subdir(folder, new_project.SETTINGS_DIRNAME)
         )

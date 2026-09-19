@@ -355,6 +355,21 @@ def test_close_all_skips_pinned_tabs(window: MainWindow) -> None:
     assert pane.tabText(0) == "Welcome"
 
 
+def test_close_all_tabs_is_a_public_wrapper_for_close_all(window: MainWindow) -> None:
+    # PROMPT.md: "add command palette shortcuts and entries for all present functionality" --
+    # close_all_tabs() is what MainWindow's own command palette entry calls, since the tab context
+    # menu's own "Close All" (_close_all) has no specific tab to have been right-clicked from there.
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    pane._toggle_pin(0)
+    main_panel.new_tab_in(pane)
+
+    pane.close_all_tabs()
+
+    assert pane.count() == 1
+    assert pane.tabText(0) == "Welcome"
+
+
 # -- pin --------------------------------------------------------------------------------------
 
 
@@ -632,6 +647,35 @@ def test_context_menu_split_actions_grey_out_once_maxed(window: MainWindow, monk
 
     by_text = {action.text(): action for action in captured["menu"].actions()}
     assert by_text["Split Right"].isEnabled() is False
+
+
+def test_split_active_tab_right_splits_without_needing_a_right_click(window: MainWindow) -> None:
+    # PROMPT.md: "add command palette shortcuts and entries for all present functionality" -- what
+    # the new Ctrl+\ shortcut/command-palette entry calls, acting on whichever tab is active rather
+    # than the tab context menu's own per-tab "Split Right" (which needs one already right-clicked).
+    pane = window.main_panel.panes[0]
+
+    pane.split_active_tab_right()
+
+    assert window.main_panel.split_count == 1
+
+
+def test_split_active_tab_right_is_a_no_op_once_maxed(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    for _ in range(_MAX_H_SPLITS):
+        pane.split_button.click()
+
+    pane.split_active_tab_right()
+
+    assert window.main_panel.split_count == _MAX_H_SPLITS
+
+
+def test_split_active_tab_down_splits_without_needing_a_right_click(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+
+    pane.split_active_tab_down()
+
+    assert pane.group.vsplit_count == 1
 
 
 def _actions_from_context_menu(pane: TabPane, index: int, monkeypatch) -> list:

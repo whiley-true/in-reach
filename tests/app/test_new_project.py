@@ -84,9 +84,10 @@ def test_create_gametype_project_names_the_folder_with_a_generated_id_not_the_ti
         "!valid_maps.json\n"
     )
 
-    # PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
-    notes = (folder / "Notes.txt").read_text(encoding="utf-8")
-    assert notes.splitlines()[0] == "Use this space for free form notes."
+    # Notes.txt is the Dashboard Notepad's backing file (PROMPT.md: "add a 'Notepad' section ... with
+    # a placeholder") -- created empty, so the Notepad's own placeholder text is what a new project
+    # shows rather than a pre-filled first line.
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == ""
     # PROMPT.md: "please also add a second stubbed README.md file in the generated project
     # folder" -- a plain stub, distinct from the old title-carrying one PROMPT.md previously asked
     # to remove entirely (test_read_project_title_reads_back_settings_jsons_own_meta_title, below,

@@ -29,29 +29,16 @@ def test_settings_dialog_system_tab_is_a_stub(qtbot) -> None:
     assert dialog.system_tab.isEnabled() is True  # the tab itself, just its stub label is muted
 
 
-def test_settings_dialog_ui_tab_shows_the_notes_format_preference(qtbot) -> None:
-    from in_reach.app import notes_settings
+def test_settings_dialog_ui_tab_no_longer_offers_a_notes_format_choice(qtbot) -> None:
+    # PROMPT.md: "in the documentation- please remove the previous functionality where we spawned a
+    # notes.txt or .md and also had a settings entry allowing user to switch between txt and md".
+    from PyQt6.QtWidgets import QComboBox
 
-    dialog = SettingsDialog(notes_format=notes_settings.FORMAT_MD)
+    dialog = SettingsDialog()
     qtbot.addWidget(dialog)
 
-    combo = dialog.ui_tab.notes_format_combo
-    assert combo.currentData() == notes_settings.FORMAT_MD
-
-
-def test_settings_dialog_ui_tab_notifies_on_notes_format_change(qtbot) -> None:
-    from in_reach.app import notes_settings
-
-    changed = []
-    dialog = SettingsDialog(
-        notes_format=notes_settings.FORMAT_TXT, on_notes_format_changed=changed.append
-    )
-    qtbot.addWidget(dialog)
-
-    combo = dialog.ui_tab.notes_format_combo
-    combo.setCurrentIndex(combo.findData(notes_settings.FORMAT_MD))
-
-    assert changed == [notes_settings.FORMAT_MD]
+    assert not hasattr(dialog.ui_tab, "notes_format_combo")
+    assert dialog.ui_tab.findChildren(QComboBox) == []
 
 
 def test_settings_dialog_close_button_accepts(qtbot) -> None:

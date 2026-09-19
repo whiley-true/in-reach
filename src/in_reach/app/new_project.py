@@ -64,9 +64,12 @@ SCHEMA_DIRNAME = "schemas"
 BUILD_DIRNAME = "build"
 BUILD_DIST_SUBDIR = "dist"
 INIT_GAMETYPE_DIRNAME = "init_gametype"
-#: PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
+#: PROMPT.md: "please also add a Notes.txt" -- since then the backing file of the Dashboard's
+#: "Notepad" box (see :mod:`in_reach.ide.notepad`), whose own placeholder text is what a fresh
+#: project shows, so it starts empty (an earlier "Use this space for free form notes." first line
+#: would have hidden that placeholder).
 NOTES_FILENAME = "Notes.txt"
-NOTES_TEMPLATE = "Use this space for free form notes.\n"
+NOTES_TEMPLATE = ""
 #: PROMPT.md: "please also add a second stubbed README.md file in the generated project folder"
 #: -- distinct from (and, unlike the old one this module's docstring mentions removing, carries no
 #: copy of) the title: a plain stub, same treatment as the .in-reach-level one (see

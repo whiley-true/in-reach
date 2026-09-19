@@ -67,7 +67,7 @@ def _make_local_files(home: Path, *reach_strings: str) -> Path:
 # -- the checklist itself ---------------------------------------------------------------------------
 
 
-def test_steps_are_the_twelve_asked_for_in_order() -> None:
+def test_steps_are_the_thirteen_asked_for_in_order() -> None:
     assert [step.label for step in system_verify.STEPS] == [
         "Tesseract OCR Installed on Path",
         "Steam Install Location",
@@ -81,6 +81,7 @@ def test_steps_are_the_twelve_asked_for_in_order() -> None:
         "Steam Account Uuid (and user)",
         "Personal Game Variants Folder",
         "Personal Map Variants Folder",
+        "In-Reach Maps Folder",
     ]
 
 
@@ -301,6 +302,86 @@ def test_the_personal_map_folder_needs_the_gametype_folder_first(project_dir: Pa
     run = _run(project_dir, tmp_path, which=lambda _name: None)
 
     assert run.check(_step(system_verify.PERSONAL_MAPS_KEY)).outcome == Outcome.MISSING
+
+
+# -- in-reach's own maps folder (PROMPT.md: "a button for In-Reach maps ... point to .in-reach maps") --
+
+
+def test_the_inreach_maps_folder_defaults_to_maps_inside_the_in_reach_folder(project_dir: Path, tmp_path: Path) -> None:
+    run = _run(project_dir, tmp_path, which=lambda _name: None)
+
+    result = run.check(_step(system_verify.INREACH_MAPS_KEY))
+
+    assert result.outcome == Outcome.FOUND
+    assert result.value == str(project_dir / "maps")
+    assert "Will be created" in result.detail
+
+
+def test_the_inreach_maps_folder_resolves_even_on_a_machine_with_no_halo(project_dir: Path, tmp_path: Path) -> None:
+    # Unlike every Halo-derived step, nothing upstream has to be verified first.
+    run = _run(project_dir, tmp_path, which=lambda _name: None)
+
+    assert run.check(_step(system_verify.STEAM_KEY)).outcome == Outcome.MISSING
+    assert run.check(_step(system_verify.INREACH_MAPS_KEY)).outcome == Outcome.FOUND
+
+
+def test_accepting_the_inreach_maps_folder_creates_it_and_ticks_the_step(project_dir: Path, tmp_path: Path) -> None:
+    run = _run(project_dir, tmp_path, which=lambda _name: None)
+    target = project_dir / "maps"
+    assert not target.exists()
+
+    run.accept(_step(system_verify.INREACH_MAPS_KEY), str(target))
+
+    assert target.is_dir()
+    assert system_verify.verified_keys(project_dir)[system_verify.INREACH_MAPS_KEY] is True
+
+
+def test_an_existing_inreach_maps_folder_reads_as_found_at(project_dir: Path, tmp_path: Path) -> None:
+    (project_dir / "maps").mkdir()
+    run = _run(project_dir, tmp_path, which=lambda _name: None)
+
+    assert run.check(_step(system_verify.INREACH_MAPS_KEY)).detail == f"Found at {project_dir / 'maps'}"
+
+
+def test_a_stored_inreach_maps_folder_wins_over_the_default(project_dir: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "my-maps"
+    elsewhere.mkdir()
+    env_file.update_env_value(project_dir / ".env", system_verify.INREACH_MAPS_KEY, str(elsewhere))
+    run = _run(project_dir, tmp_path, which=lambda _name: None)
+
+    result = run.check(_step(system_verify.INREACH_MAPS_KEY))
+
+    assert result.value == str(elsewhere)
+    assert result.detail.startswith("Already set")
+
+
+def test_inreach_maps_dir_defaults_and_is_created_on_demand(project_dir: Path) -> None:
+    path = system_verify.inreach_maps_dir(project_dir)
+
+    assert path == project_dir / "maps"
+    assert path.is_dir()
+
+
+def test_inreach_maps_dir_honours_the_verified_setting(project_dir: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "custom" / "maps"
+    env_file.update_env_value(project_dir / ".env", system_verify.INREACH_MAPS_KEY, str(elsewhere))
+
+    assert system_verify.inreach_maps_dir(project_dir) == elsewhere
+    assert elsewhere.is_dir()
+
+
+def test_clear_entries_also_clears_the_inreach_maps_setting(project_dir: Path) -> None:
+    env_file.update_env_value(project_dir / ".env", system_verify.INREACH_MAPS_KEY, "somewhere")
+
+    system_verify.clear_entries(project_dir)
+
+    assert system_verify.verified_keys(project_dir)[system_verify.INREACH_MAPS_KEY] is False
+
+
+def test_the_packaged_env_template_lists_the_inreach_maps_key() -> None:
+    template = Path(system_verify.__file__).resolve().parents[1] / ".in-reach" / "example.env"
+
+    assert f"{system_verify.INREACH_MAPS_KEY}=" in template.read_text(encoding="utf-8")
 
 
 # -- misc -------------------------------------------------------------------------------------------

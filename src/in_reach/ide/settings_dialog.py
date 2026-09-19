@@ -11,9 +11,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QTabWidget,
@@ -21,13 +19,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from in_reach.app import notes_settings
 from in_reach.ide.theme import Theme
 from in_reach.ide.theme_picker import ThemePickerRow
 
 _SYSTEM_PLACEHOLDER_TEXT = "System settings -- coming soon."
-
-_NOTES_FORMAT_LABELS = {notes_settings.FORMAT_TXT: "Text (.txt)", notes_settings.FORMAT_MD: "Markdown (.md)"}
+_UI_PLACEHOLDER_TEXT = "UI settings -- coming soon."
 
 
 def _stub_tab(text: str) -> QWidget:
@@ -47,8 +43,6 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
         *,
         on_theme_changed: Callable[[Theme], None] | None = None,
-        notes_format: str = notes_settings.DEFAULT_NOTES_FORMAT,
-        on_notes_format_changed: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -60,7 +54,7 @@ class SettingsDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.system_tab = _stub_tab(_SYSTEM_PLACEHOLDER_TEXT)
-        self.ui_tab = _build_ui_tab(notes_format, on_notes_format_changed)
+        self.ui_tab = _stub_tab(_UI_PLACEHOLDER_TEXT)
         self.theme_tab = _build_theme_tab(on_theme_changed)
         self.tabs.addTab(self.system_tab, "System")
         self.tabs.addTab(self.ui_tab, "UI")
@@ -82,31 +76,6 @@ class SettingsDialog(QDialog):
             frame = self.frameGeometry()
             frame.moveCenter(avail.center())
             self.move(frame.topLeft())
-
-
-def _build_ui_tab(notes_format: str, on_notes_format_changed: Callable[[str], None] | None) -> QWidget:
-    """PROMPT.md: "Notes" "launches editor in notes.txt OR notes.md (can be set in settings or
-    command palette)" -- this is the "in settings" half; see
-    ``MainWindow.build_command_palette_commands`` for the matching "Set Notes Format" palette
-    entries."""
-    tab = QWidget()
-    layout = QVBoxLayout(tab)
-    notes_row = QHBoxLayout()
-    notes_row.addWidget(QLabel("Notes format"))
-    combo = QComboBox()
-    for value, label in _NOTES_FORMAT_LABELS.items():
-        combo.addItem(label, value)
-    combo.setCurrentIndex(combo.findData(notes_format))
-    if on_notes_format_changed is not None:
-        combo.currentIndexChanged.connect(lambda index: on_notes_format_changed(combo.itemData(index)))
-    notes_row.addWidget(combo)
-    notes_row.addStretch(1)
-    layout.addLayout(notes_row)
-    layout.addStretch(1)
-    # Exposed the same way theme_tab exposes its own picker -- a test seam, not part of the
-    # dialog's own public API.
-    tab.notes_format_combo = combo
-    return tab
 
 
 def _build_theme_tab(on_theme_changed: Callable[[Theme], None] | None) -> QWidget:

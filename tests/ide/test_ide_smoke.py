@@ -917,6 +917,7 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
         "documentation",
         "kanban",
         "testing",
+        "playtest",
         "llm",
     ]
 
@@ -931,7 +932,7 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts/documentation/kanban/testing/llm aren't named in the saved order at all --
+    # git/scripts/documentation/kanban/testing/playtest/llm aren't named in the saved order at all --
     # appended after it, in their existing (default) relative order, same as any other icon added
     # after a user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should
     # be stuck to the top") -- it sorts to the front regardless of where the saved order put it.
@@ -945,6 +946,7 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
         "documentation",
         "kanban",
         "testing",
+        "playtest",
         "llm",
     ]
 
@@ -974,6 +976,7 @@ def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path
         "documentation",
         "kanban",
         "testing",
+        "playtest",
         "maps",
         "llm",
         "search",
@@ -2873,69 +2876,163 @@ def test_compare_command_offers_a_two_level_pick_and_opens_the_diff_dialog(
     assert len(opened) == 1
 
 
-# -- Documentation section / Notes (PROMPT.md) ---------------------------------------------------
+# -- Notepad (PROMPT.md: "in dashboard please add a 'Notepad' section ... load in editor tab or in
+# popout window") + removal of the old Notes.txt/.md spawning ----------------------------------------
 
 
-def test_open_notes_opens_notes_txt_by_default(project_window: MainWindow, tmp_path: Path) -> None:
+def _open_project_with_notes(project_window: MainWindow, tmp_path: Path, text: str = "hi\n") -> Path:
     folder = _make_project_with_settings(tmp_path)
-    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    (folder / "Notes.txt").write_text(text, encoding="utf-8")
     project_window._on_project_opened(folder)
+    return folder
 
-    project_window.open_notes()
 
+def test_the_old_open_notes_and_notes_format_commands_are_gone(project_window: MainWindow) -> None:
+    labels = [c.label for c in project_window.build_command_palette_commands()]
+
+    assert "Open Notes" not in labels
+    assert "Set Notes Format" not in labels
+    assert not hasattr(project_window, "open_notes")
+
+
+def test_open_notepad_commands_are_in_the_palette(project_window: MainWindow) -> None:
+    labels = [c.label for c in project_window.build_command_palette_commands()]
+
+    assert "Open Notepad in Editor" in labels
+    assert "Open Notepad in Window" in labels
+
+
+def test_the_dashboard_notepad_loads_the_projects_notes_file(project_window: MainWindow, tmp_path: Path) -> None:
+    _open_project_with_notes(project_window, tmp_path, "remember the milk\n")
+
+    notepad = project_window.explorer_panel.notepad
+
+    assert notepad.edit.toPlainText() == "remember the milk\n"
+    assert project_window.explorer_panel.notepad_section.isHidden() is False
+
+
+def test_open_notepad_in_editor_opens_notes_txt_in_a_tab(project_window: MainWindow, tmp_path: Path) -> None:
     from in_reach.ide.editor import TextEditorWidget
+
+    folder = _open_project_with_notes(project_window, tmp_path)
+
+    project_window.open_notepad_in_editor()
 
     widget = project_window.main_panel.active_pane.currentWidget()
     assert isinstance(widget, TextEditorWidget)
     assert widget.path == folder / "Notes.txt"
 
 
-def test_open_notes_opens_an_editable_notes_md_when_that_format_is_set(
+def test_notepad_editor_button_opens_the_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _open_project_with_notes(project_window, tmp_path)
+
+    project_window.explorer_panel.notepad.open_in_editor_button.click()
+
+    assert project_window.main_panel.active_pane.currentWidget().path == folder / "Notes.txt"
+
+
+def test_open_notepad_in_editor_flushes_text_typed_but_not_yet_autosaved(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
-    from in_reach.app import notes_settings
-    from in_reach.ide.editor import TextEditorWidget
+    folder = _open_project_with_notes(project_window, tmp_path, "")
+    project_window.explorer_panel.notepad.edit.setPlainText("fresh thought")
 
-    folder = _make_project_with_settings(tmp_path)
-    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
-    project_window._on_project_opened(folder)
-    notes_settings.set_notes_format(project_window._notes_format_env_path(), notes_settings.FORMAT_MD)
-
-    project_window.open_notes()
+    project_window.open_notepad_in_editor()
 
     widget = project_window.main_panel.active_pane.currentWidget()
-    assert isinstance(widget, TextEditorWidget)  # editable, not the read-only preview
-    assert widget.path == folder / "Notes.md"
-    assert widget.isReadOnly() is False
+    assert widget.toPlainText() == "fresh thought"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "fresh thought"
 
 
-def test_open_notes_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
-    window.open_notes()  # should not raise
-
-
-def test_set_notes_format_command_persists_the_choice(project_window: MainWindow) -> None:
-    from in_reach.app import notes_settings
-
-    commands = project_window.build_command_palette_commands()
-    notes_format_command = next(c for c in commands if c.label == "Set Notes Format")
-    markdown = next(c for c in notes_format_command.children if c.label == "Markdown (.md)")
-
-    markdown.action()
-
-    assert notes_settings.get_notes_format(project_window._notes_format_env_path()) == notes_settings.FORMAT_MD
-
-
-def test_open_notes_command_opens_the_active_projects_notes_file(project_window: MainWindow, tmp_path: Path) -> None:
+def test_open_notepad_in_editor_creates_a_missing_notes_file(project_window: MainWindow, tmp_path: Path) -> None:
     folder = _make_project_with_settings(tmp_path)
-    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
     project_window._on_project_opened(folder)
+    assert not (folder / "Notes.txt").exists()
 
-    commands = project_window.build_command_palette_commands()
-    open_notes_command = next(c for c in commands if c.label == "Open Notes")
-    open_notes_command.action()
+    project_window.open_notepad_in_editor()
 
-    widget = project_window.main_panel.active_pane.currentWidget()
-    assert widget.path == folder / "Notes.txt"
+    assert (folder / "Notes.txt").is_file()
+
+
+def test_open_notepad_in_editor_leaves_a_tab_with_unsaved_edits_alone(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    _open_project_with_notes(project_window, tmp_path, "on disk\n")
+    project_window.open_notepad_in_editor()
+    tab = project_window.main_panel.active_pane.currentWidget()
+    tab.setPlainText("unsaved edit in the tab")
+    tab.document().setModified(True)  # setPlainText() itself resets the flag
+
+    project_window.open_notepad_in_editor()
+
+    assert project_window.main_panel.active_pane.currentWidget().toPlainText() == "unsaved edit in the tab"
+
+
+def test_open_notepad_in_window_moves_the_tab_into_a_popout(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _open_project_with_notes(project_window, tmp_path)
+    floating_before = len(project_window.main_panel._floating_panes)
+
+    project_window.open_notepad_in_window()
+
+    assert len(project_window.main_panel._floating_panes) == floating_before + 1
+    popout_pane = project_window.main_panel._floating_panes[-1]
+    assert popout_pane.widget(0).path == folder / "Notes.txt"
+    for window in list(project_window.main_panel._popout_windows.values()):
+        window.force_close()
+
+
+def test_open_notepad_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    before = window.main_panel.active_pane.count()
+
+    window.open_notepad_in_editor()
+    window.open_notepad_in_window()
+
+    assert window.main_panel.active_pane.count() == before
+    assert len(window.main_panel._floating_panes) == 0
+
+
+def test_notepad_autosave_refreshes_an_open_editor_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    _open_project_with_notes(project_window, tmp_path, "one\n")
+    project_window.open_notepad_in_editor()
+    tab = project_window.main_panel.active_pane.currentWidget()
+
+    project_window.explorer_panel.notepad.edit.setPlainText("two\n")
+    project_window.explorer_panel.notepad.flush()
+
+    assert tab.toPlainText() == "two\n"
+
+
+def test_saving_the_notes_tab_refreshes_the_dashboard_notepad(project_window: MainWindow, tmp_path: Path) -> None:
+    _open_project_with_notes(project_window, tmp_path, "one\n")
+    project_window.open_notepad_in_editor()
+    tab = project_window.main_panel.active_pane.currentWidget()
+    tab.setPlainText("edited in the tab\n")
+
+    project_window.main_panel.active_pane.save_current()
+
+    assert project_window.explorer_panel.notepad.edit.toPlainText() == "edited in the tab\n"
+
+
+def test_closing_the_window_flushes_a_pending_notepad_edit(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _open_project_with_notes(project_window, tmp_path, "")
+    project_window.explorer_panel.notepad.edit.setPlainText("typed just before closing")
+
+    project_window.close()
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "typed just before closing"
+
+
+def test_search_only_in_open_editors_sees_the_real_open_tabs(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = _open_project_with_notes(project_window, tmp_path, "needle in notes\n")
+    (folder / "settings" / "settings.json").write_text('{"needle": 1}\n', encoding="utf-8")
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    search = project_window.search_panel
+
+    search.only_open_editors_button.setChecked(True)
+    search.search_edit.setText("needle")
+
+    assert search.results_list.count() == 1
+    assert "Notes.txt" in search.results_list.item(0).text()
 
 
 # -- View Output.txt / Export RVT File (PROMPT.md: "Underneath project tabs please add the
@@ -4742,6 +4839,113 @@ def test_testing_button_switches_the_sidebar_to_its_own_panel(
     assert project_window.activity_bar.testing_button.isChecked() is True
 
 
+def test_playtest_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please add an icon under testing for playtest which should be the icon of a
+    # sprinting man (please add entry under view too)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.playtest_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.playtest_panel
+    assert project_window.activity_bar.playtest_button.isChecked() is True
+
+
+def test_playtest_icon_sits_directly_under_testing_and_is_not_blank(qtbot) -> None:
+    bar = ActivityBar()
+    qtbot.addWidget(bar)
+    order = bar._icon_strip.order
+
+    assert order.index("playtest") == order.index("testing") + 1
+    image = bar.playtest_button.icon().pixmap(28, 28).toImage()
+    opaque = sum(1 for x in range(image.width()) for y in range(image.height()) if image.pixelColor(x, y).alpha() > 0)
+    assert opaque > 40  # a real drawn glyph, not the blank fallback for an unknown icon name
+
+
+def test_playtest_view_menu_entry_switches_to_the_playtest_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    menu = project_window.top_bar.view_menu_button.menu()
+
+    next(a for a in menu.actions() if a.text() == "Playtest").trigger()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.playtest_panel
+
+
+def test_playtest_command_palette_entry_switches_to_the_playtest_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    next(c for c in project_window.build_command_palette_commands() if c.label == "Playtest").action()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.playtest_panel
+
+
+# -- Sidebar panel headers (PROMPT.md: "add a header to each panel") --------------------------------
+
+
+_HEADER_VIEWS = (
+    ("explorer_button", "Dashboard"),
+    ("search_button", "Search"),
+    ("git_button", "Git"),
+    ("scripts_button", "Scripts"),
+    ("maps_button", "Map Files"),
+    ("documentation_button", "Documentation"),
+    ("kanban_button", "Kanban"),
+    ("testing_button", "Testing"),
+    ("playtest_button", "Playtest"),
+    ("llm_button", "LLM"),
+)
+
+
+def test_sidebar_header_starts_on_the_default_view(project_window: MainWindow) -> None:
+    assert project_window.sidebar_header.text() == "Dashboard"
+
+
+@pytest.mark.parametrize(("button", "title"), _HEADER_VIEWS)
+def test_sidebar_header_names_whichever_panel_is_showing(
+    project_window: MainWindow, tmp_path: Path, button: str, title: str
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    button_widget = getattr(project_window.activity_bar, button)
+    if button_widget.isChecked():  # the default view starts checked -- a click would collapse it
+        project_window.activity_bar.testing_button.click()
+    button_widget.click()
+
+    assert project_window.sidebar_header.text() == title
+    assert project_window.sidebar_header.isVisibleTo(project_window.primary_sidebar)
+
+
+def test_sidebar_header_shows_even_with_no_project_open(window: MainWindow) -> None:
+    window.activity_bar.git_button.click()
+
+    assert window.sidebar_header.text() == "Git"
+    assert window._sidebar_stack.currentWidget() is window._no_project_page
+
+
+def test_sidebar_header_follows_reveal_in_dashboard(project_window: MainWindow, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    project_window.activity_bar.git_button.click()
+
+    project_window._reveal_in_explorer_view()
+
+    assert project_window.sidebar_header.text() == "Dashboard"
+
+
 def test_llm_button_switches_the_sidebar_to_its_own_panel(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
@@ -4901,6 +5105,7 @@ def test_file_menu_has_every_action_prompt_md_asks_for(project_window: MainWindo
         "Open Recent",
         "Save",
         "Save All",
+        "Apply",
         "Close Project",
         "Close Editor",
         "Close Window",
@@ -4914,6 +5119,7 @@ def test_file_menu_shortcuts_match_prompt_md(project_window: MainWindow) -> None
     assert shortcuts["New Window"] == "Ctrl+Shift+N"
     assert shortcuts["Open Folder..."] == "Ctrl+K"
     assert shortcuts["Save"] == "Ctrl+S"
+    assert shortcuts["Apply"] == "Ctrl+Shift+B"
     assert shortcuts["Close Editor"] == "Ctrl+F4"
     assert shortcuts["Close Window"] == "Alt+F4"
     # "Close Project" was left for in-reach to pick its own shortcut -- just assert it got one.
@@ -4971,13 +5177,17 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
     # glass to come under dashboard ... and move in view topbar tap"; "under documentation please
     # add an icon for Kanban ... please move tests to come before llm (and re-arrange order in
     # view)") moved Search up under Dashboard, added Kanban right after Documentation, and moved
-    # Testing to sit directly ahead of LLM.
+    # Testing to sit directly ahead of LLM. A further pass ("add command palette shortcuts and
+    # entries for all present functionality") added Settings and Toggle Sidebar/Toggle Panel.
     menu = project_window.top_bar.view_menu_button.menu()
     top_level = [action.text() for action in menu.actions() if not action.isSeparator()]
 
     assert top_level == [
         "Command Palette",
+        "Settings",
         "Appearance",
+        "Toggle Sidebar",
+        "Toggle Panel",
         "Dashboard",
         "Search",
         "Git",
@@ -4986,11 +5196,21 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
         "Documentation",
         "Kanban",
         "Testing",
+        "Playtest",
         "LLM",
         "View Logs",
     ]
     command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")
     assert command_palette_action.shortcut().toString() == "Ctrl+Shift+P"
+    settings_action = next(a for a in menu.actions() if a.text() == "Settings")
+    assert settings_action.shortcut().toString() == "Ctrl+,"
+    assert next(a for a in menu.actions() if a.text() == "Toggle Sidebar").shortcut().toString() == "Ctrl+B"
+    assert next(a for a in menu.actions() if a.text() == "Toggle Panel").shortcut().toString() == "Ctrl+J"
+    assert next(a for a in menu.actions() if a.text() == "Dashboard").shortcut().toString() == "Ctrl+Shift+E"
+    assert next(a for a in menu.actions() if a.text() == "Search").shortcut().toString() == "Ctrl+Shift+F"
+    assert next(a for a in menu.actions() if a.text() == "Git").shortcut().toString() == "Ctrl+Shift+G"
+    assert next(a for a in menu.actions() if a.text() == "Scripts").shortcut().toString() == ""
+    assert next(a for a in menu.actions() if a.text() == "View Logs").shortcut().toString() == "Ctrl+Shift+U"
 
 
 def test_view_menu_appearance_submenu_has_set_theme_and_set_ui_scale(project_window: MainWindow) -> None:
@@ -5434,3 +5654,204 @@ def test_close_editor_closes_the_active_panes_current_tab(project_window: MainWi
     project_window.close_editor()
 
     assert pane.count() == before - 1
+
+
+# -- command palette / shortcut coverage for existing functionality (PROMPT.md: "add command
+# palette shortcuts and entries for all present functionality[.] please use equivalent vscode
+# shortcuts whenever possible") ------------------------------------------------------------------
+
+
+def test_toggle_sidebar_flips_the_sidebars_visibility(project_window: MainWindow) -> None:
+    before = project_window.primary_sidebar.isVisible()
+
+    project_window.toggle_sidebar()
+
+    assert project_window.primary_sidebar.isVisible() is not before
+
+
+def test_toggle_panel_flips_the_bottom_panels_visibility(project_window: MainWindow) -> None:
+    before = project_window.top_bar.panel_toggle.isChecked()
+
+    project_window.toggle_panel()
+
+    assert project_window.top_bar.panel_toggle.isChecked() is not before
+
+
+def test_view_menu_toggle_sidebar_and_toggle_panel_actions_work(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.view_menu_button.menu()
+    sidebar_before = project_window.primary_sidebar.isVisible()
+    panel_before = project_window.top_bar.panel_toggle.isChecked()
+
+    next(a for a in menu.actions() if a.text() == "Toggle Sidebar").trigger()
+    next(a for a in menu.actions() if a.text() == "Toggle Panel").trigger()
+
+    assert project_window.primary_sidebar.isVisible() is not sidebar_before
+    assert project_window.top_bar.panel_toggle.isChecked() is not panel_before
+
+
+def test_view_menu_settings_action_opens_the_settings_dialog(
+    project_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Patches SettingsDialog.exec() itself (same proven seam as the activity bar's own settings
+    # cog tests just above) rather than MainWindow.open_settings_dialog -- a QAction created via
+    # menu.addAction(text, slot) doesn't re-resolve a monkeypatched *instance* attribute the way a
+    # bound-method connect() might, so patching the window's own method here wouldn't actually be
+    # exercised; the real SettingsDialog.exec() call is genuinely modal (blocks) and would hang.
+    from in_reach.ide.settings_dialog import SettingsDialog
+
+    opened = []
+    monkeypatch.setattr(SettingsDialog, "exec", lambda self: opened.append(self) or 0)
+    menu = project_window.top_bar.view_menu_button.menu()
+
+    next(a for a in menu.actions() if a.text() == "Settings").trigger()
+
+    assert len(opened) == 1
+    assert isinstance(opened[0], SettingsDialog)
+
+
+def test_file_menu_apply_action_calls_apply_settings_changes(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Patches the real compile pipeline's own module-level function (same proven seam as
+    # test_clicking_apply_runs_the_real_compile_and_disables_the_button_on_success above), not
+    # MainWindow.apply_settings_changes itself -- see the Settings test just above for why patching
+    # a bound instance method a QAction was already connected to doesn't actually get exercised.
+    from in_reach.app import apply_settings
+    from in_reach.app.rvt.compile import BuildResult
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    calls = []
+    monkeypatch.setattr(
+        apply_settings,
+        "apply_settings_changes",
+        lambda project_dir, target_folder: calls.append((project_dir, target_folder)) or BuildResult(success=True),
+    )
+    menu = project_window.top_bar.file_menu_button.menu()
+
+    next(a for a in menu.actions() if a.text() == "Apply").trigger()
+
+    assert len(calls) == 1
+    assert calls[0][1] == folder
+
+
+def test_split_right_and_split_down_shortcuts_split_the_active_tab(project_window: MainWindow) -> None:
+    project_window.split_active_tab_right()
+    assert project_window.main_panel.split_count == 1
+
+    project_window.split_active_tab_down()
+    assert project_window.main_panel.active_pane.group.vsplit_count == 1
+
+
+def test_close_all_tabs_closes_the_active_panes_tabs(project_window: MainWindow) -> None:
+    pane = project_window.main_panel.active_pane
+    project_window.main_panel.new_tab_in(pane)
+    assert pane.count() > 0
+
+    project_window.close_all_tabs()
+
+    assert pane.count() == 0
+
+
+@pytest.mark.parametrize(
+    ("label", "shortcut"),
+    [
+        ("Toggle Sidebar", "Ctrl+B"),
+        ("Toggle Panel", "Ctrl+J"),
+        ("Settings", "Ctrl+,"),
+        ("Apply", "Ctrl+Shift+B"),
+        ("View Logs", "Ctrl+Shift+U"),
+        ("Dashboard", "Ctrl+Shift+E"),
+        ("Search", "Ctrl+Shift+F"),
+        ("Git", "Ctrl+Shift+G"),
+        ("Split Right", "Ctrl+\\"),
+        ("Find", "Ctrl+F"),
+        ("Replace", "Ctrl+R"),
+        ("Select All", "Ctrl+A"),
+        ("Launch Halo MCC", "Ctrl+Shift+M"),
+        ("Launch RVT", "Ctrl+Shift+L"),
+    ],
+)
+def test_command_palette_entries_show_their_real_shortcut_as_detail(
+    project_window: MainWindow, label: str, shortcut: str
+) -> None:
+    commands = project_window.build_command_palette_commands()
+
+    command = next(c for c in commands if c.label == label)
+
+    assert command.detail == shortcut
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Load Welcome Tab",
+        "Save All",
+        "Split Down",
+        "Close All",
+        "Scripts",
+        "Map Files",
+        "Documentation",
+        "Kanban",
+        "Testing",
+        "Playtest",
+        "LLM",
+        "Stage All",
+        "Unstage All",
+        "Export RVT File",
+        "View Output.txt",
+    ],
+)
+def test_command_palette_entries_present_without_a_shortcut(project_window: MainWindow, label: str) -> None:
+    # These either collide with an existing binding (e.g. anything chorded off the already-bound
+    # Ctrl+K) or have no clean VSCode equivalent to model one on -- palette-only is correct, not a
+    # gap, but they must still actually be reachable from the palette.
+    commands = project_window.build_command_palette_commands()
+
+    command = next(c for c in commands if c.label == label)
+
+    assert command.detail == ""
+
+
+def test_command_palette_stage_all_and_unstage_all_click_the_real_git_panel_buttons(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs_module = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    project_window.git_panel.refresh()  # populates changes_list -- Stage All reads from it directly
+    commands = project_window.build_command_palette_commands()
+
+    next(c for c in commands if c.label == "Stage All").action()
+
+    assert vcs_module.staged_paths(folder) == {"Notes.txt"}
+
+    next(c for c in commands if c.label == "Unstage All").action()
+
+    assert vcs_module.staged_paths(folder) == set()
+
+
+def test_command_palette_panel_switch_entries_switch_the_sidebar(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    commands = project_window.build_command_palette_commands()
+
+    next(c for c in commands if c.label == "Git").action()
+
+    assert project_window.activity_bar.git_button.isChecked() is True
+    assert project_window._sidebar_stack.currentWidget() is project_window.git_panel
+
+
+def test_command_palette_view_logs_entry_opens_the_logs_tab(project_window: MainWindow) -> None:
+    project_window.top_bar.panel_toggle.setChecked(False)
+    commands = project_window.build_command_palette_commands()
+
+    next(c for c in commands if c.label == "View Logs").action()
+
+    assert project_window._bottom_panel_card.isVisible() is True
+    assert project_window.bottom_panel.currentWidget() is project_window.bottom_panel.logs_panel

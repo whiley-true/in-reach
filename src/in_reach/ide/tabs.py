@@ -54,6 +54,7 @@ from in_reach.app.new_project import is_generated_file
 from in_reach.ide import file_dialogs, icons, schema_check, style
 from in_reach.ide.diff_view import DiffViewWidget
 from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.kanban_board import KanbanBoardView
 from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.markdown_preview import MarkdownPreviewWidget
 from in_reach.ide.welcome import WelcomeTab
@@ -725,6 +726,25 @@ class TabPane(QTabWidget):
         self._track_tab(new_index, editor, state=_TabState(path=None))
         self.setCurrentIndex(new_index)
 
+    def open_kanban_board(self, store, board_id: int) -> None:
+        """Opens (or switches to, if already open in this pane) the Kanban board ``board_id`` as an
+        editor tab -- PROMPT.md: "when clicked it should load the default board in the editor view".
+        Tracked with ``_TabState(path=None)``, same reasoning as :meth:`open_diff` -- a board isn't a
+        file, so it must never collide with :meth:`open_file`'s own path-based dedup; matched by
+        :attr:`~in_reach.ide.kanban_board.KanbanBoardView.board_id` instead."""
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, KanbanBoardView) and widget.board_id == board_id:
+                self.setCurrentIndex(index)
+                return
+        board = store.get_board(board_id)
+        if board is None:
+            return
+        view = KanbanBoardView(store, board_id)
+        new_index = self.addTab(view, icons.icon("kanban", color=_SPLIT_ICON_COLOR), board.name)
+        self._track_tab(new_index, view, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
     def _reusable_tab_index(self) -> int | None:
         """The current tab's index, if it's safe for :meth:`open_file` to silently replace with a
         newly-opened file instead of adding a new tab alongside it -- never the Welcome tab or a
@@ -786,6 +806,28 @@ class TabPane(QTabWidget):
         if self.count() == 0:
             return False
         return self._maybe_close(self.currentIndex())
+
+    def close_all_tabs(self) -> None:
+        """"Close All" -- MainWindow's own command-palette entry for the tab context menu's
+        identically-named action (see :meth:`_close_all`), exposed here as a real public method so
+        it can be reached with no specific tab already right-clicked."""
+        self._close_all()
+
+    def split_active_tab_right(self) -> None:
+        """"Split Right" (Ctrl+\\, matching VSCode's own default "Split Editor" binding) -- splits
+        whichever tab is currently active, same as picking "Split Right" from that tab's own
+        context menu (see :meth:`_split_tab`) would, just without needing to right-click it first.
+        A no-op if this pane has no tabs, or is already at :data:`_MAX_H_SPLITS`."""
+        if self.count() == 0 or self.group is None or self._area.split_count >= _MAX_H_SPLITS:
+            return
+        self._split_tab(self.currentIndex(), vertical=False)
+
+    def split_active_tab_down(self) -> None:
+        """"Split Down" -- same as :meth:`split_active_tab_right`, just the vertical direction (no
+        VSCode default binding of its own -- "Split Editor Down" ships unbound there too)."""
+        if self.count() == 0 or self.group is None or self.group.vsplit_count >= _MAX_V_SPLITS:
+            return
+        self._split_tab(self.currentIndex(), vertical=True)
 
     def _close_many(self, widgets: list[QWidget]) -> None:
         for widget in widgets:
@@ -1289,6 +1331,41 @@ class MainPanelArea(QWidget):
         for pane in self.panes:
             pane.save_all()
 
+    def kanban_views(self) -> list[KanbanBoardView]:
+        """Every open Kanban board tab, across every pane (popout windows included)."""
+        return [
+            pane.widget(index)
+            for pane in self.panes
+            for index in range(pane.count())
+            if isinstance(pane.widget(index), KanbanBoardView)
+        ]
+
+    def refresh_kanban_tabs(self) -> None:
+        """Brings every open Kanban board tab's title in line with its board's current name, and
+        closes the tab of any board that no longer exists (deleted from the sidebar panel, say) --
+        called by MainWindow whenever the Kanban store changes."""
+        for pane in list(self.panes):
+            for index in reversed(range(pane.count())):
+                widget = pane.widget(index)
+                if not isinstance(widget, KanbanBoardView):
+                    continue
+                board = widget.store.get_board(widget.board_id)
+                if board is None:
+                    pane._close_tab(index)
+                elif pane.tabText(index) != board.name:
+                    pane.setTabText(index, board.name)
+
+    def open_file_paths(self) -> set[Path]:
+        """Every file path currently open in some tab, across every pane (popout windows
+        included) -- what the Search panel's "Search only in Open Editors" toggle searches."""
+        paths: set[Path] = set()
+        for pane in self.panes:
+            for index in range(pane.count()):
+                path = pane._tab_state_for(pane.widget(index)).path
+                if path is not None:
+                    paths.add(path)
+        return paths
+
     def _open_tab_locations(self, paths: set[Path]) -> list[tuple[TabPane, int]]:
         return [
             (pane, index)
@@ -1423,6 +1500,13 @@ class MainPanelArea(QWidget):
         elif isinstance(widget, MarkdownPreviewWidget):
             duplicate = MarkdownPreviewWidget(path=source_state.path)
             duplicate.setMarkdown(widget.toMarkdown())
+        elif isinstance(widget, KanbanBoardView):
+            # A second live view of the same board -- both redraw off the store's own change
+            # notifications, so they stay in step without sharing anything else.
+            duplicate = KanbanBoardView(widget.store, widget.board_id)
+            new_index = target.addTab(duplicate, icons.icon("kanban", color=_SPLIT_ICON_COLOR), label)
+            target._track_tab(new_index, duplicate, state=_TabState(path=None))
+            return
         else:
             duplicate = self._new_welcome_tab()
 

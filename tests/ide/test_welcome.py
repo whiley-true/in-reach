@@ -83,7 +83,7 @@ def test_the_verify_quadrant_has_a_steam_tab_and_an_empty_custom_tab(welcome: We
     assert labels == ["Steam (Halo MCC)", "Custom"]
 
 
-def test_a_fresh_project_shows_zero_of_twelve_verified(welcome: WelcomeTab) -> None:
+def test_a_fresh_project_shows_zero_of_thirteen_verified(welcome: WelcomeTab) -> None:
     total = len(system_verify.STEPS)
     assert welcome.verified_count_label.text() == f"0 of {total} settings verified."
 
@@ -580,18 +580,26 @@ def test_verify_dialog_walks_every_step_and_reports_what_it_could_not_find(
 ) -> None:
     dialog = _dialog_for(qtbot, root_dir, which=lambda _name: None)
 
-    # Nothing exists under this test's fake home/Program Files, so every step parks on MISSING and
-    # gets skipped -- which is the run reaching the end without a single answer being invented.
-    for _ in system_verify.STEPS:
+    # Nothing exists under this test's fake home/Program Files, so every Halo/Steam step parks on
+    # MISSING and gets skipped -- the run reaching the end without a single answer being invented.
+    # The one exception is the last step, in-reach's own maps folder: it's in-reach's to create, so
+    # it always resolves (and is accepted) with nothing upstream verified.
+    *halo_steps, inreach_step = system_verify.STEPS
+    assert inreach_step.env_key == system_verify.INREACH_MAPS_KEY
+    for _ in halo_steps:
         dialog.process_next_step()
         assert dialog.manual_button.isVisibleTo(dialog) is True
         dialog.skip_step()
+    dialog.process_next_step()  # accepts in-reach's own maps folder without asking
+    assert dialog.manual_button.isVisibleTo(dialog) is False
     dialog.process_next_step()
 
     assert dialog.close_button.text() == "Done"
-    assert dialog.detail_label.text() == f"0 of {len(system_verify.STEPS)} steps verified."
+    assert dialog.detail_label.text() == f"1 of {len(system_verify.STEPS)} steps verified."
     assert dialog.results_list.count() == len(system_verify.STEPS)
-    assert not any(system_verify.verified_keys(root_dir / ".in-reach").values())
+    verified = system_verify.verified_keys(root_dir / ".in-reach")
+    assert [key for key, ok in verified.items() if ok] == [system_verify.INREACH_MAPS_KEY]
+    assert (root_dir / ".in-reach" / "maps").is_dir()
 
 
 def test_verify_dialog_accepts_a_resolved_step_without_asking(qtbot, root_dir: Path) -> None:
