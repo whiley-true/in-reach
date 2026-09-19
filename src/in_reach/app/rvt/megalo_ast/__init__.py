@@ -14,6 +14,7 @@ Typical use::
     for node in walk(script):           # depth-first traversal, e.g. for syntax highlighting
         ...
 """
+from .aliases import RESERVED_NAMES, MegaloAliasError, resolve_aliases
 from .engine import (
     EngineActionStatement, EngineArgument, EngineAst, EngineDoBlock, EngineForEachBlock,
     EngineIfStatement, EngineInlineBlock, EngineOpcode, EngineRawStatement, EngineStatement,
@@ -32,6 +33,7 @@ from .visit import find_at, iter_children, walk
 
 __all__ = [
     "parse", "unparse", "render_expr", "walk", "iter_children", "find_at",
+    "resolve_aliases", "MegaloAliasError", "RESERVED_NAMES",
     "MegaloLexError", "MegaloParseError",
     "Script", "SourceSpan", "Expression", "Statement",
     "IntLiteral", "PercentLiteral", "StringLiteral", "Identifier", "Member", "Index", "Call",

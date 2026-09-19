@@ -119,8 +119,46 @@ Supported:
   plain ``host migration`` and is told apart purely via a separate index field in the engine's own
   entry-points table, not its own enum member -- see ``_EVENT_ENTRY_TYPES``'s own docstring.
 
-Not supported (raises :class:`UnsupportedConstruct`): ``alias``, ``|`` flag-combination, nested calls
-used as a sub-expression of another call/condition, and anything not listed above.
+- ``alias <name> = <value>`` declarations, resolved away entirely before compilation by
+  :func:`~in_reach.app.rvt.megalo_ast.aliases.resolve_aliases` -- this compiler never sees one, only
+  the concrete expression each use site stood for (which must itself be in the supported subset, so
+  aliasing an unsupported expression is still :class:`UnsupportedConstruct`).
+
+- ``a | b | c`` for a flags-typed argument slot (``killer_type_is(guardians | suicide)``,
+  ``place_at_me``'s object flags): each name's own bit is found by the same try-values search plain
+  enums use, and the OR-ed result is verified by decompiling it back (see :meth:`_build_flags_arg`).
+- ``none`` in a flags, string-id or object-timer slot, and ``script_option[N]`` in a generic
+  ``_any_variable`` slot -- both previously only worked by copying an identical example already
+  present in the base variant's script.
+
+- ``script_widget[N]``/``script_traits[N]``/``script_option[N]``/``current_player.script_stat[N]``, and a
+  timer rate written as a percentage. A widget or trait argument holds a *pointer* into the variant's own
+  table (``set_value(mp, N)`` points it), so the entry has to exist -- and neither ``settings/`` nor native
+  ``compile_script()`` can create one -- so :meth:`_Compiler._ensure_table_entries` appends entries up to
+  the index named, the same way the RVT script editor's "add" button would (see :data:`_SCRIPT_TABLES`);
+  ``settings/`` picks them up afterwards (:func:`~in_reach.app.rvt.settings_writer.
+  reconcile_script_tables`). A stat also needs its owner's ``.which``, read off a
+  ``current_player.number[N]`` example (so ``current_player`` only: a team's stat is a different scope
+  with the same format string, and any other owner's ``which`` isn't derivable). A timer rate is an index
+  into a 27-entry table, found by the same try-values search plain enums use (:data:`_ENUM_VALUE_LIMITS`
+  stops it at 27, since the engine reads past the table's end beyond that).
+
+Not supported (raises :class:`UnsupportedConstruct`): ``|`` anywhere but a flags slot, nested calls
+used as a sub-expression of another call/condition, a percentage the engine has no timer-rate slot for
+(``20%``), a table index past the engine's cap (4 widgets/stats, 16 trait sets/options), a stat on any
+owner but ``current_player`` unless the base variant's own script already has an example, and anything
+not listed above.
+
+## Forge labels: creating them
+
+Naming a label (``for each object with label "hill"``) is what *creates* it -- ``settings/`` can't, and
+the binding has no add-label call. Native ``compile_script()`` does it as a side effect, so before
+building anything :meth:`_Compiler.compile` has the native compiler compile a tiny stub naming any
+label the variant lacks (:meth:`_Compiler._vivify_forge_labels`); the labels then persist in the
+variant across this compiler's own ``clear_triggers()``. A label found only mid-compile (a call
+argument, say) raises :class:`MissingForgeLabel`, which restarts the compile once it exists -- each
+restart creates one, capped at the engine's 16. See :mod:`in_reach.app.rvt.compile` for the settings
+side, which has to grow a matching entry.
 
 ## Constructing variable references: clone-and-retarget
 
@@ -145,6 +183,17 @@ typed for an object is a bare ``ObjectVariable`` with no wrapper) -- templates a
 matches what that exact slot expects, not just what the reference conceptually means. If a needed
 template genuinely isn't present anywhere in the variant's own script, that's
 :class:`UnsupportedConstruct`, not a crash.
+
+**A base with no script of its own** (every packaged blank variant) has no examples at all, so
+``compile_script(..., template_pool=...)`` can be handed a callable returning extra variants to
+scan for them -- in practice :func:`in_reach.app.rvt.template_source.build_variants`, a pool this
+repo generates itself (see that module's docstring for why it needs no third-party ``.bin``). It's
+only called on the first lookup the base variant's own script can't answer, at most once per compile,
+and anything the base does have always wins (:func:`_merge_templates`). Measured against every
+built-in, hopper and personal variant on this machine: with each script compiled against its own
+variant *minus its own argument templates*, the pool alone lets 376 of 377 compile in-house (the one
+miss is the condition-count inflation noted in ``tests/app/rvt/test_megalo_compiler_corpus.py``);
+against a blank base 2 of 426 did before it existed.
 
 Retargeting an ``ObjectVariable``/``PlayerVariable``/``TeamVariable`` needs a different field than a
 ``ScalarVariable``/``TimerVariable`` does, and using the wrong one is a genuine, confirmed native
@@ -201,10 +250,11 @@ bug. Neither ``Trigger.entry_type`` nor ``Trigger.block_type`` had a setter in t
 even in the upstream source this was ported from) and ``bind_trigger_as_event()`` explicitly can't
 set 'subroutine' either -- a genuine binding gap, not a workaround-able one, closed by adding
 ``MultiplayerData.mark_trigger_as_subroutine()``/``mark_trigger_block_type()`` to ``bindings.cpp`` and
-rebuilding the bundled ``.pyd`` (see those methods' own docstrings in the native source). ``for each``
-loops always get their own trigger even at the top level (where the native compiler would instead set
-block_type directly on the containing trigger) -- less minimal, but uniformly correct and much
-simpler to implement once.
+rebuilding the bundled ``.pyd`` (see those methods' own docstrings in the native source). A
+``for each`` *inside* a body (an ``if``, a function, an event) gets a trigger of its own, reached by a
+"Run Nested Trigger" call. One at the *top level* doesn't: it becomes a trigger with the loop type set
+directly on it, the way the native compiler builds it, so it costs no call (see :meth:`_Compiler.
+_compile_top_level`).
 
 ## Failure must not leave partial state
 
@@ -328,11 +378,12 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 
-from .megalo_ast import parse
+from .megalo_ast import MegaloAliasError, parse, resolve_aliases
 from .megalo_ast.lexer import MegaloLexError
 from .megalo_ast.nodes import BinaryOp, Identifier, SourceSpan, UnaryOp
 from .megalo_ast.parser import MegaloParseError
 from .megalo_ast.unparse import render_expr
+from .megalo_ast.visit import walk
 
 # Every real (parsed) AST node carries a source span for editor/syntax-highlighting purposes -- this
 # module never reads it back, so a synthetic node this compiler builds itself (see
@@ -350,6 +401,7 @@ _POOL_SIZES: dict[str, dict[str, int]] = {
 }
 _TEAM_CONSTANT_COUNT = 8  # team[0..7] -- Halo Reach's own fixed team count, not a per-scope pool.
 _SCRIPT_OPTION_COUNT = 16  # Megalo::Limits::max_script_options (limits.h) -- script_option[0..15].
+_MAX_FORGE_LABELS = 16  # Megalo::Limits::max_script_labels (limits.h).
 
 # Megalo::Limits::max_conditions/max_actions (limits.h) -- real, hard engine caps on the TOTAL
 # condition/action opcode count across the whole script (every trigger and every inline nested
@@ -456,6 +508,24 @@ _EVENT_ENTRY_TYPES = {
 }
 
 _ENUM_BRUTE_FORCE_LIMIT = 4096
+
+#: A family whose real values stop well short of the generic limit above. ``_timer_rate``'s ``value`` is
+#: an index into a 27-entry table, but its own ``to_string()`` reads one past the end for anything
+#: larger (an upstream off-by-one: it checks ``<= count`` where it means ``<``), so searching past 27
+#: would read unrelated memory and could even "match" by luck.
+_ENUM_VALUE_LIMITS = {"_timer_rate": 27}
+
+#: The script-defined tables a variant carries and a script can refer into, keyed by the name a script
+#: uses for one: ``(count attribute, method that appends one, the engine's cap on entries)``. Neither
+#: ``settings/`` nor native ``compile_script()`` can create an entry (unlike forge labels), so a script
+#: naming ``script_widget[2]`` has to have this compiler make sure entries 0..2 exist -- see
+#: :meth:`_Compiler._ensure_table_entries`.
+_SCRIPT_TABLES = {
+    "script_option": ("scripted_option_count", "add_scripted_option", 16),  # Limits::max_script_options
+    "script_traits": ("scripted_player_trait_count", "add_scripted_player_traits", 16),  # max_script_traits
+    "script_widget": ("scripted_hud_widget_count", "add_scripted_hud_widget", 4),  # max_script_widgets
+    "script_stat": ("scripted_stat_count", "add_scripted_stat", 4),  # max_script_stats
+}
 
 # Confirmed directly (not a general rule -- most functions' call-syntax argument order matches their
 # own metadata `arguments` array order exactly, minus context/out, which is why every other function
@@ -584,6 +654,17 @@ class UnsupportedConstruct(Exception):
     mutated and reload a fresh one before falling back to the native compiler -- see this module's
     own "Failure must not leave partial state" docs.
     """
+
+
+class MissingForgeLabel(UnsupportedConstruct):
+    """A forge label named by string that this variant doesn't have (yet). Its own type, rather than
+    a plain :class:`UnsupportedConstruct`, because :meth:`_Compiler.compile` can recover from it:
+    naming a label in a script *creates* it (see :meth:`_Compiler._vivify_forge_labels`). ``raw`` is
+    the name exactly as written in the source, escapes uninterpreted."""
+
+    def __init__(self, raw: str, name: str) -> None:
+        super().__init__(f"no unique forge label named {name!r} in this variant")
+        self.raw = raw
 
 
 def _decompiled_key(rvt, arg, text: str) -> str:
@@ -754,6 +835,21 @@ def _scan_templates(rvt, variant, mp) -> _Templates:
                 templates.variables.setdefault((typeinfo_name, _decompiled_key(rvt, arg, text)), arg.clone())
                 templates.literal_variables.setdefault((typeinfo_name, text), arg.clone())
     return templates
+
+
+def _merge_templates(into: _Templates, extra: _Templates) -> None:
+    """Adds ``extra``'s templates to ``into``'s, never replacing one ``into`` already has -- so a
+    template found in the variant actually being compiled always wins over one borrowed from
+    somewhere else. Deliberately leaves ``strings`` alone: a reused string has to come from the
+    *target* variant's own table (see :func:`_scan_strings`), never from another variant's."""
+    for key, template in extra.variables.items():
+        into.variables.setdefault(key, template)
+    for key, template in extra.literal_variables.items():
+        into.literal_variables.setdefault(key, template)
+    if into.trigger_ref is None:
+        into.trigger_ref = extra.trigger_ref
+    if into.literal_scalar is None:
+        into.literal_scalar = extra.literal_scalar
 
 
 def _scan_strings(rvt, mp) -> dict[str, object]:
@@ -1019,11 +1115,13 @@ def _find_property_function(rvt, variant, primary_name: str, *, kind: str):
 
 
 class _Compiler:
-    def __init__(self, rvt, variant):
+    def __init__(self, rvt, variant, template_pool=None):
         self._rvt = rvt
         self._variant = variant
         self._mp = variant.multiplayer
         self._templates = _scan_templates(rvt, *self._scan_copy(rvt, variant))
+        self._template_pool = template_pool  # see _load_pool()
+        self._template_variants: tuple = ()
         # Strings are scanned separately, directly off the *target* variant's own table -- see
         # _scan_strings()'s own docstring for why that's both safer and correct in a way scanning
         # them as part of the trigger-walk above (on the throwaway copy) isn't.
@@ -1034,6 +1132,25 @@ class _Compiler:
         self._compare = self._require_condition("Compare")
         self._run_nested_trigger = self._require_action("Run Nested Trigger")
         self._run_inline_nested_trigger = self._require_action("Run Inline Nested Trigger")
+
+    def _load_pool(self) -> bool:
+        """Builds and scans the supplementary template pool (``template_pool``, see
+        :func:`compile_script`) the first time something the variant's own script couldn't supply is
+        needed -- so a project whose base already has every example it needs (any real ``.bin``, in
+        practice) never pays for it. Returns ``True`` only on the call that actually loaded it, i.e.
+        when a lookup that just missed is worth retrying.
+
+        The pool's variants are held on ``self`` for this compiler's whole lifetime, not just the
+        scan: the templates are clones, but nothing here has ever needed to prove that dropping the
+        variant they were scanned from is safe, and the failure mode (see module docstring's "Fixed:
+        an intermittent native crash" section) is a native crash, not an exception."""
+        if self._template_pool is None:
+            return False
+        provider, self._template_pool = self._template_pool, None
+        self._template_variants = tuple(provider())
+        for extra in self._template_variants:
+            _merge_templates(self._templates, _scan_templates(self._rvt, extra, extra.multiplayer))
+        return True
 
     @staticmethod
     def _scan_copy(rvt, variant):
@@ -1102,6 +1219,71 @@ class _Compiler:
             raise UnsupportedConstruct(f"ran out of triggers (engine limit 320): {exc}") from exc
 
     def compile(self, script) -> None:
+        """Compiles ``script`` into the variant, first creating any forge label it names that the
+        variant doesn't have -- see :meth:`_vivify_forge_labels` for why that has to happen here and
+        can't be done lazily where the label is looked up."""
+        self._vivify_forge_labels(self._unresolved_for_each_labels(script))
+        # Every other place a label can be named (a call argument, say) is only discovered mid-compile,
+        # by which point the build is half done -- so it restarts from scratch once the label exists.
+        # Each restart creates one, and there can only ever be _MAX_FORGE_LABELS of them.
+        for _ in range(_MAX_FORGE_LABELS + 1):
+            try:
+                self._compile_once(script)
+                return
+            except MissingForgeLabel as exc:
+                self._vivify_forge_labels([exc.raw])
+        raise UnsupportedConstruct("compiling kept discovering new forge labels")
+
+    def _existing_forge_label_names(self) -> set[str]:
+        english = self._rvt.Language.english
+        return {
+            self._mp.forge_label(i).name.get_content(english)
+            for i in range(self._mp.forge_label_count)
+            if self._mp.forge_label(i).name is not None
+        }
+
+    def _unresolved_for_each_labels(self, script) -> list[str]:
+        """Raw text of every distinct ``for each object with label "..."`` name in ``script`` that the
+        variant has no label for yet, in first-use order."""
+        existing = self._existing_forge_label_names()
+        missing: dict[str, str] = {}
+        for node in walk(script):
+            if node.kind == "for_each" and node.label is not None and node.label.kind == "string":
+                name = _unescape_string_literal(node.label.value)
+                if name not in existing:
+                    missing.setdefault(name, node.label.value)
+        return list(missing.values())
+
+    def _vivify_forge_labels(self, raw_names: list[str]) -> None:
+        """Creates a forge label for each of ``raw_names`` (as written in source) by having the
+        *native* compiler compile a stub that names them -- which is how a label comes into being at
+        all: there's no way to add one directly (the binding has no such call, and ``settings/`` can't
+        either -- label counts are determined by the script), while native ``compile_script()``
+        creates any label a script names that doesn't exist (as a notice, not an error). The labels
+        then persist in the variant across this compiler's own ``clear_triggers()``, since they aren't
+        part of the script's triggers.
+
+        The stub replaces the variant's script, which is harmless: this always runs before this
+        compiler builds anything (it has already scanned its templates -- from a separate copy, see
+        :meth:`_scan_copy` -- and :meth:`_compile_once` clears the triggers again anyway). The string
+        templates are rescanned, though: the stub creates a script string for each label's name, and
+        nothing here has verified that native compilation leaves the table's existing entries
+        untouched, so no pointer into it from before the stub is trusted after."""
+        if not raw_names:
+            return
+        before = self._mp.forge_label_count
+        if before + len(raw_names) > _MAX_FORGE_LABELS:
+            raise UnsupportedConstruct(f"a variant can have at most {_MAX_FORGE_LABELS} forge labels")
+        body = "".join(
+            f'   for each object with label "{raw}" do\n      current_object.delete()\n   end\n' for raw in raw_names
+        )
+        result = self._mp.compile_script("on init: do\n" + body + "end\n")
+        if not result.success or self._mp.forge_label_count != before + len(raw_names):
+            raise UnsupportedConstruct(f"couldn't create forge label(s) {raw_names!r}")
+        self._templates.strings = _scan_strings(self._rvt, self._mp)
+
+    def _compile_once(self, script) -> None:
+        self._functions.clear()  # a restart (see compile()) must not trip the duplicate-function check
         # A compile REPLACES the variant's own script, same as the native compiler's own
         # compile_script() (confirmed in its own compiler.cpp: "triggers.clear(); ... entryPoints =
         # this->results.events;") -- not append onto whatever triggers `variant` happened to already
@@ -1128,12 +1310,8 @@ class _Compiler:
             self._functions[decl.name] = index
 
         event_triggers = [s for s in script.body if s.kind == "on"]
-        top = self._add_trigger()
         other_statements = [s for s in script.body if s.kind not in ("function", "on")]
-        # Both bodies below are a freshly-allocated trigger's *entire* content -- nothing else is
-        # ever appended afterward -- so each is in tail position from the start (see _compile_if's
-        # own docstring).
-        self._compile_statements(other_statements, top, tail=True)
+        self._compile_top_level(other_statements)
 
         for decl in function_decls:
             self._compile_statements(decl.body, self._mp.trigger(self._functions[decl.name]), tail=True)
@@ -1251,15 +1429,24 @@ class _Compiler:
             shown = key.replace("[]", f"[{index}]")
             raise UnsupportedConstruct(f"{shown} is out of range (pool size {pool_size})")
         template = self._templates.variables.get((typeinfo.internal_name, key))
+        if template is None and self._load_pool():
+            template = self._templates.variables.get((typeinfo.internal_name, key))
         if template is None:
-            if key == "INT_LITERAL":
+            if key == "INT_LITERAL" or key in _BARE_CONSTANT_NAMES:
                 # A plain int literal isn't only ever a literal-scope Variable -- some enum-typed
                 # slots (e.g. an object type the decompiler has no friendly name for, confirmed a
-                # real case: "place_at_me(280, ...)") use a bare number directly instead. Let the
-                # caller's own enum-resolution fallback have a try before giving up.
+                # real case: "place_at_me(280, ...)") use a bare number directly instead. Likewise a
+                # bare constant name like ``none`` is also an ordinary enum member in a flags or
+                # string-id slot (``create_object(..., none)``), not necessarily a variable at all.
+                # Let the caller's own enum-resolution fallback have a try before giving up.
                 return None
             if key == "script_option[]" and index is not None:
+                self._ensure_table_entries("script_option", index + 1)
                 built = self._build_script_option_arg(typeinfo, index)
+                if built is not None:
+                    return built
+            if key.endswith(".script_stat[]") and index is not None:
+                built = self._build_script_stat_arg(typeinfo, key, index)
                 if built is not None:
                     return built
             raise UnsupportedConstruct(
@@ -1267,6 +1454,62 @@ class _Compiler:
                 f"{typeinfo.internal_name!r}-typed argument slot to source a template from"
             )
         return template.clone() if index is None else _retarget(self._variant, template, index)
+
+    def _owner_which(self, prefix: str):
+        """The ``.which`` value that selects ``prefix`` (``current_player``, say) as the owner of a
+        per-player variable, read off an example of one -- ``current_player.number[N]`` -- since the
+        engine packs owners into an enum with no derivable formula (see :func:`_retarget`). ``None`` if
+        neither the base variant nor the template pool has such an example."""
+        for name in (_ANY_VARIABLE_TYPEINFO_NAME, "number"):
+            template = self._templates.variables.get((name, f"{prefix}.number[]"))
+            if template is None and self._load_pool():
+                template = self._templates.variables.get((name, f"{prefix}.number[]"))
+            if template is not None:
+                return (template.variable if hasattr(template, "variable") else template).which
+        return None
+
+    def _build_script_stat_arg(self, typeinfo, key: str, index: int):
+        """``current_player.script_stat[N]``: a per-player scripted stat, built directly rather than
+        cloned -- its scope is a fixed one (``"%w.script_stat[%i]"``) that ``set_scope_by_format()`` can
+        select, with the owner's ``which`` copied from a ``current_player.number[N]`` example. Only
+        ``current_player`` is handled: a team's stat is a *different* scope with the same format string
+        (so the lookup can't tell them apart), and any other owner's ``which`` isn't derivable from
+        one example. Those still need an example in the base variant's own script.
+
+        Makes sure stat ``N`` exists (see :meth:`_ensure_table_entries`) and verifies the result by
+        decompiling it back, so a wrong ``which`` yields ``None`` rather than a misdirected stat."""
+        prefix = key[: -len(".script_stat[]")]
+        if prefix != "current_player":
+            return None
+        which = self._owner_which(prefix)
+        if which is None:
+            return None
+        inner_typeinfo = self._number_typeinfo() if typeinfo.internal_name == _ANY_VARIABLE_TYPEINFO_NAME else typeinfo
+        inner = inner_typeinfo.create() if inner_typeinfo is not None else None
+        set_scope = getattr(inner, "set_scope_by_format", None)
+        if set_scope is None:
+            return None
+        self._ensure_table_entries("script_stat", index + 1)
+        try:
+            set_scope("%w.script_stat[%i]", index)
+        except RuntimeError:
+            return None
+        inner.which = which
+        built = inner
+        if typeinfo.internal_name == _ANY_VARIABLE_TYPEINFO_NAME:
+            built = typeinfo.create()
+            built.wrap(inner)
+        try:
+            text = built.decompile(self._variant)
+        except Exception:  # noqa: BLE001
+            return None
+        return built if text == f"{prefix}.script_stat[{index}]" else None
+
+    def _number_typeinfo(self):
+        """The plain ``number`` argument typeinfo, borrowed from a function that takes one --
+        there's no way to name it directly. ``None`` if the engine somehow has no such function."""
+        f = self._require_action("Random Number")
+        return next((a.typeinfo for a in f.arguments if a.typeinfo.internal_name == "number"), None)
 
     def _build_script_option_arg(self, typeinfo, index: int):
         """Directly constructs a ``script_option[index]`` reference for ``typeinfo`` with NO
@@ -1286,11 +1529,27 @@ class _Compiler:
         ``"script_option[%i]"`` directly in this concrete type's own fixed scope list (see that
         binding's own docstring) -- returns ``None`` (not :class:`UnsupportedConstruct`, the
         caller's own generic "no template" message already covers this) for any ``typeinfo`` that
-        either isn't a plain ``Variable`` subtype at all (e.g. ``_any_variable``/``_player_or_group``
-        -- ``.create()`` returns a composite wrapper with no ``set_scope_by_format`` method of its
-        own) or genuinely has no ``script_option[%i]`` scope in its own family (the native call
-        raises for that, converted here into the same "try something else" signal).
+        either isn't a plain ``Variable`` subtype at all (``_player_or_group`` etc. --
+        ``.create()`` returns a composite wrapper with no ``set_scope_by_format`` method of its own)
+        or genuinely has no ``script_option[%i]`` scope in its own family (the native call raises for
+        that, converted here into the same "try something else" signal).
+
+        ``_any_variable`` is the one composite handled anyway: it's just a wrapper around whichever
+        concrete variable it holds (``AnyVariable.wrap()``, the same call
+        :meth:`_ensure_any_variable_wrapper` makes), and a script option is always a number, so the
+        wrapped value is built the plain way from a ``number`` slot's own typeinfo (confirmed
+        directly: the wrapper decompiles as ``script_option[3]``). Without this, every script that
+        reads an option had to borrow an example from the base variant -- 163 of 377 real scripts
+        were blocked on exactly that against a base with no script of its own.
         """
+        if typeinfo.internal_name == _ANY_VARIABLE_TYPEINFO_NAME:
+            number_typeinfo = self._number_typeinfo()
+            inner = self._build_script_option_arg(number_typeinfo, index) if number_typeinfo is not None else None
+            if inner is None:
+                return None
+            wrapper = typeinfo.create()
+            wrapper.wrap(inner)
+            return wrapper
         candidate = typeinfo.create()
         set_scope = getattr(candidate, "set_scope_by_format", None)
         if set_scope is None:
@@ -1319,6 +1578,8 @@ class _Compiler:
         except ValueError:
             return None
         template = self._templates.literal_variables.get((typeinfo.internal_name, text))
+        if template is None and self._load_pool():
+            template = self._templates.literal_variables.get((typeinfo.internal_name, text))
         return template.clone() if template is not None else None
 
     def _build_enum_arg(self, expr, typeinfo):
@@ -1333,7 +1594,15 @@ class _Compiler:
             except Exception:  # noqa: BLE001
                 return None
             return trial if text == str(expr.value) else None
-        if expr.kind != "identifier":
+        if expr.kind == "binary" and expr.op == "|":
+            return self._build_flags_arg(expr, typeinfo)
+        if expr.kind == "index":
+            return self._build_table_index_arg(expr, typeinfo)
+        if expr.kind == "identifier":
+            name = expr.name
+        elif expr.kind == "percent":
+            name = f"{expr.value}%"  # a timer rate: an enum whose members are spelled as percentages
+        else:
             return None
         trial = typeinfo.create()
         if not hasattr(trial, "value"):
@@ -1341,25 +1610,118 @@ class _Compiler:
             # its own dedicated handling (see _build_player_set_arg for the one confirmed real
             # case), not this generic brute-force mechanism.
             return None
-        cache_key = (typeinfo.internal_name, expr.name)
+        k = self._enum_value_of(typeinfo, trial, name)
+        if k is None:
+            return None
+        trial.value = k
+        return trial
+
+    def _build_table_index_arg(self, expr, typeinfo):
+        """``script_widget[N]``/``script_traits[N]``: a reference to entry ``N`` of one of the variant's
+        own settings tables. The argument holds a *pointer* to the entry (``.value`` is read-only;
+        ``set_value(mp, N)`` is what points it), so the entry has to exist -- created here if the
+        variant is short of them, see :meth:`_ensure_table_entries`. Verified by decompiling it back."""
+        table = typeinfo.internal_name
+        if table not in ("script_widget", "script_traits"):
+            return None
+        if expr.target.kind != "identifier" or expr.target.name != table or expr.index.kind != "int":
+            return None
+        index = expr.index.value
+        trial = typeinfo.create()
+        set_value = getattr(trial, "set_value", None)
+        if set_value is None or index < 0:
+            return None
+        self._ensure_table_entries(table, index + 1)
+        set_value(self._mp, index)
+        try:
+            text = trial.decompile(self._variant)
+        except Exception:  # noqa: BLE001
+            return None
+        return trial if text == f"{table}[{index}]" else None
+
+    def _ensure_table_entries(self, table: str, needed: int) -> None:
+        """Makes sure the variant has at least ``needed`` entries in ``table`` (a key of
+        :data:`_SCRIPT_TABLES`), appending default ones as the RVT script editor's own "add" button
+        would. Whatever's created is picked up by ``settings/`` afterwards (see
+        :func:`~in_reach.app.rvt.settings_writer.reconcile_script_tables`)."""
+        count_attr, add_method, cap = _SCRIPT_TABLES[table]
+        if needed > cap:
+            raise UnsupportedConstruct(f"{table}[{needed - 1}] is out of range (a variant can have at most {cap})")
+        while getattr(self._mp, count_attr) < needed:
+            getattr(self._mp, add_method)()
+
+    def _enum_value_of(self, typeinfo, trial, name: str) -> int | None:
+        """The ``.value`` under which ``trial`` (a fresh instance of ``typeinfo``) decompiles as
+        ``name``, found by trying values until one does -- this binding exposes no name -> value
+        table for these families (see the module docstring's "Enum-style constants" section).
+        Cached per ``(family, name)``. ``None`` if no value in range decompiles that way."""
+        cache_key = (typeinfo.internal_name, name)
         cached = self._enum_cache.get(cache_key)
         if cached is not None:
-            trial.value = cached
-            return trial
-        for k in range(_ENUM_BRUTE_FORCE_LIMIT):
+            return cached
+        # -1 first: some string-id families (``_variant_string``) use it for ``none``, while an
+        # unsigned family just rejects it -- a rejection here means "not this one", not "out of range".
+        limit = _ENUM_VALUE_LIMITS.get(typeinfo.internal_name, _ENUM_BRUTE_FORCE_LIMIT)
+        for k in (-1, *range(limit)):
             try:
                 trial.value = k
                 text = trial.decompile(self._variant)
             except Exception:  # noqa: BLE001 -- signals "value out of range for this enum family"
+                if k == -1:
+                    continue
                 # Confirmed a real case: SoundArgument.value's own setter raises TypeError once k
                 # overflows whatever narrower integer width it actually stores (128 for a real
                 # sound argument in RCC Onslaught v13.bin) -- not just .decompile() that can fail
                 # once the brute-force search runs past the family's real value range.
                 break
-            if text == expr.name:
+            if text == name:
                 self._enum_cache[cache_key] = k
-                return trial
+                return k
         return None
+
+    def _build_flags_arg(self, expr, typeinfo):
+        """``a | b | c`` for a flags-typed slot (``killer type``, ``create_object``'s flags): a
+        bitmask in ``.value`` that decompiles as its set bits' names joined with `` | `` in bit order
+        (confirmed directly, e.g. ``guardians | kill`` is 5). Each name's own bit is found by the same
+        try-values search plain enums use, one bit at a time, and the combined result is verified by
+        decompiling it back -- so a slot that isn't really a flags family (where OR-ing values would
+        mean nothing) yields ``None`` rather than a wrong value."""
+        names: list[str] = []
+        node = expr
+        while node.kind == "binary" and node.op == "|":
+            if node.right.kind != "identifier":
+                return None
+            names.append(node.right.name)
+            node = node.left
+        if node.kind != "identifier":
+            return None
+        names.append(node.name)
+        trial = typeinfo.create()
+        if not hasattr(trial, "value"):
+            return None
+        bits = 0
+        for name in names:
+            single = typeinfo.create()
+            bit = next(
+                (1 << b for b in range(32) if self._decompiles_as(single, 1 << b, name)),
+                None,
+            )
+            if bit is None:
+                return None
+            bits |= bit
+        trial.value = bits
+        try:
+            actual = set(trial.decompile(self._variant).split(" | "))
+        except Exception:  # noqa: BLE001
+            return None
+        return trial if actual == set(names) else None
+
+    def _decompiles_as(self, arg, value: int, name: str) -> bool:
+        try:
+            arg.value = value
+            return arg.decompile(self._variant) == name
+        except Exception:  # noqa: BLE001 -- an out-of-range value for this family
+            return False
 
     def _build_forge_label_arg(self, expr, typeinfo):
         # ForgeLabelArgument.value has no setter at all -- confirmed a real binding gap, fixed the
@@ -1400,6 +1762,8 @@ class _Compiler:
                 raise UnsupportedConstruct("'mod_player' needs 2 more call values (a player, then 0 or 1)")
             if exprs[2].kind != "int":
                 raise UnsupportedConstruct("a player-set argument's add_or_remove value must be a plain integer")
+            if self._templates.literal_scalar is None:
+                self._load_pool()
             if self._templates.literal_scalar is None:
                 raise UnsupportedConstruct(
                     "this variant's own script has no existing integer literal to source a "
@@ -1562,8 +1926,12 @@ class _Compiler:
         built = self._build_fireteam_list_arg(expr, typeinfo)
         if built is not None:
             return built
+        try:
+            shown = render_expr(expr)
+        except ValueError:  # an expression shape render_expr has no text form for
+            shown = expr.kind
         raise UnsupportedConstruct(
-            f"no way to build a {typeinfo.internal_name!r} argument from expression kind {expr.kind!r}"
+            f"no way to build a {typeinfo.internal_name!r} argument from expression kind {expr.kind!r} ({shown})"
         )
 
     def _build_fireteam_list_arg(self, expr, typeinfo):
@@ -1617,10 +1985,15 @@ class _Compiler:
         ``base_scope=global``/``base_type=scalar``/``index=N`` decompiles back to the literal ``N``).
         Unlike every other embedded-Variable gap this module works around, ``base_scope``/
         ``base_type`` both have real setters, so this needs no clone-from-a-real-example template at
-        all -- a fresh ``typeinfo.create()`` is enough."""
-        if expr.kind != "int":
-            return None
+        all -- a fresh ``typeinfo.create()`` is enough.
+
+        ``none`` (no timer at all) needs even less: a fresh instance already decompiles as ``none``
+        (confirmed directly, and it has an ``is_none`` flag)."""
         if typeinfo.internal_name != "_object_timer_variable":
+            return None
+        if expr.kind == "identifier" and expr.name == "none":
+            return typeinfo.create()
+        if expr.kind != "int":
             return None
         arg = typeinfo.create()
         arg.base_scope = getattr(self._rvt.VariableScope, "global")
@@ -1629,6 +2002,8 @@ class _Compiler:
         return arg
 
     def _build_trigger_ref(self, child_index: int):
+        if self._templates.trigger_ref is None:
+            self._load_pool()
         if self._templates.trigger_ref is None:
             raise UnsupportedConstruct(
                 "this variant's own script has no existing 'Run Nested Trigger' call to source a "
@@ -2037,14 +2412,18 @@ class _Compiler:
         groups) via :func:`_next_or_group` -- exactly the shape real Megalo's own flat
         conditions model needs (confirmed via :func:`_next_or_group`'s own docstring).
 
-        Standard recursive CNF distribution, generalized to any depth (not just the single level
-        the previous version of this function handled) -- confirmed a real, previously-blocking
-        case found via a full sweep of every real MCC-shipped built-in game/hopper variant: a
-        parenthesized ``or`` nested inside an ``and`` that's itself inside a top-level ``or``
-        (e.g. ``(a or b) and c or d``) used to fall through to :func:`_compile_term`'s own "not
-        supported" case, since the old one-level heuristic only expanded a *conjunct* that was
-        itself a flat OR when that conjunct was reached via the top-level split, never a conjunct
-        reached one level deeper than that.
+        Standard recursive CNF distribution, generalized to any depth.
+
+        A *flat* chain of ``and``/``or`` -- everything real Megalo can write, and everything a
+        decompiled script contains -- never needs any distribution: ``or`` binds tighter than ``and``
+        (see ``megalo_ast/parser.py``'s ``_parse_expr``), so ``a and b or c`` is already ``a and (b or
+        c)``, groups ``{a}`` and ``{b, c}``, one condition per term. Distribution only arises for a
+        *parenthesized* ``and`` inside an ``or`` (``(a and b) or c`` -> ``(a or c) and (b or c)``, which
+        the native compiler can't express at all, so it's an in-house extension) and after a ``not`` is
+        pushed inward. This function used to be applied to the *wrong* tree -- the parser had the two
+        operators' precedence the other way round -- so every flat mixed condition was expanded as if
+        it were parenthesized: one extra condition per mixed ``and``/``or`` and, worse, a different
+        meaning than the source had.
 
         - A leaf (comparison/call, or ``not`` directly wrapping one) is its own single-term clause.
         - ``not`` wrapping a compound (``and``/``or``) expression is pushed inward first via
@@ -2238,7 +2617,9 @@ class _Compiler:
                 if self._mp.forge_label(i).name is not None
                 and self._mp.forge_label(i).name.get_content(self._rvt.Language.english) == label_text
             ]
-            if len(matches) != 1:
+            if not matches:
+                raise MissingForgeLabel(label_expr.value, label_text)
+            if len(matches) > 1:
                 raise UnsupportedConstruct(f"no unique forge label named {label_text!r} in this variant")
             index = matches[0]
         else:
@@ -2249,7 +2630,9 @@ class _Compiler:
             )
         return index
 
-    def _compile_for_each(self, stmt, trigger) -> None:
+    def _for_each_trigger_fields(self, stmt):
+        """``(block_type, forge_label_index)`` -- exactly one of them ``None`` -- that make a trigger loop
+        the way ``stmt`` (a ``for each``) says to, after checking it's a form this compiler supports."""
         if stmt.selector not in _FOR_EACH_BLOCK_TYPES:
             raise UnsupportedConstruct(f"'for each {stmt.selector}' is not supported yet")
         if stmt.label is not None and stmt.selector != "object":
@@ -2258,11 +2641,53 @@ class _Compiler:
             raise UnsupportedConstruct("'randomly' is only supported for 'for each player' yet")
 
         if stmt.label is not None:
-            self._compile_nested_body(stmt.body, trigger, forge_label_index=self._resolve_forge_label_index(stmt.label))
-            return
+            return None, self._resolve_forge_label_index(stmt.label)
         block_type_name = "for_each_player_randomly" if stmt.randomly else f"for_each_{stmt.selector}"
-        block_type = getattr(self._rvt.TriggerBlockType, block_type_name)
-        self._compile_nested_body(stmt.body, trigger, block_type=block_type)
+        return getattr(self._rvt.TriggerBlockType, block_type_name), None
+
+    def _compile_for_each(self, stmt, trigger) -> None:
+        block_type, forge_label_index = self._for_each_trigger_fields(stmt)
+        self._compile_nested_body(stmt.body, trigger, block_type=block_type, forge_label_index=forge_label_index)
+
+    def _compile_top_level(self, statements) -> None:
+        """Compiles a script's top-level statements (everything but ``function`` declarations and ``on``
+        event bindings), each of which is its own always-ticking trigger in real Megalo.
+
+        Plain statements are packed together into one shared trigger (any run of them costs no more than
+        one trigger slot however long it is), but a ``for each`` gets a trigger of its own with the loop
+        set directly on it -- which is what the native compiler does, and needs no wrapper: nothing calls
+        it, and nothing else shares it. Building it as a *nested* body instead (a separate subroutine
+        plus a "Run Nested Trigger" action in the shared trigger) costs one extra action per loop for
+        nothing -- 60 of them in RCC Onslaught v13, whose real script sits at 1013 of the engine's 1024
+        actions, which was enough to push the in-house build over the cap.
+
+        Source order is kept: a plain run, then the loop that ended it in a trigger of its own, then the
+        next run in another, so triggers tick in the order the script wrote them. A script with no
+        top-level statements at all gets no trigger for them (it used to get an empty one).
+        """
+        pending: list = []
+
+        def flush() -> None:
+            if pending:
+                # A freshly-allocated trigger's *entire* content -- nothing else is ever appended
+                # afterward -- so it's in tail position from the start (see _compile_if's own docstring).
+                self._compile_statements(list(pending), self._add_trigger(), tail=True)
+                pending.clear()
+
+        for stmt in statements:
+            if stmt.kind == "for_each":
+                flush()
+                block_type, forge_label_index = self._for_each_trigger_fields(stmt)
+                trigger = self._add_trigger()
+                index = self._mp.trigger_count - 1
+                if forge_label_index is not None:
+                    self._mp.mark_trigger_forge_label(index, forge_label_index)
+                else:
+                    self._mp.mark_trigger_block_type(index, block_type)
+                self._compile_statements(stmt.body, trigger, tail=True)
+            else:
+                pending.append(stmt)
+        flush()
 
     def _compile_nested_body(self, body, trigger, *, block_type=None, forge_label_index=None) -> None:
         """Builds ``body`` and wires it to run from ``trigger`` -- inline (embedded directly in
@@ -2312,15 +2737,23 @@ class _Compiler:
         trigger.add_opcode(call_action)
 
 
-def compile_script(rvt, variant, source: str) -> None:
+def compile_script(rvt, variant, source: str, template_pool=None) -> None:
     """Compiles ``source`` directly into ``variant``'s multiplayer script via native construction
     (no call into ``mp.compile_script()`` at all), or raises :class:`UnsupportedConstruct` for
     anything outside this compiler's supported subset (see module docstring). ``variant`` may be
     partially mutated when this raises -- see module docstring's "Failure must not leave partial
     state".
+
+    ``template_pool``, if given, is a zero-argument callable returning extra variants to source
+    argument templates from (see :mod:`in_reach.app.rvt.template_source`). It's only called if the
+    script needs something ``variant``'s own script can't supply, and anything ``variant`` does
+    supply always wins over the pool.
     """
     try:
-        script = parse(source)
+        script = resolve_aliases(parse(source))
     except (MegaloLexError, MegaloParseError) as exc:
         raise UnsupportedConstruct(f"parse error: {exc}") from exc
-    _Compiler(rvt, variant).compile(script)
+    except MegaloAliasError as exc:
+        # Falls back to the native compiler, whose own error for a bad alias is the authoritative one.
+        raise UnsupportedConstruct(f"alias error: {exc}") from exc
+    _Compiler(rvt, variant, template_pool).compile(script)

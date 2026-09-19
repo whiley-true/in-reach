@@ -37,6 +37,8 @@ get_content() distinction this mirrors.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from .rvt_bridge import get_rvt
 
 
@@ -116,6 +118,67 @@ def apply_description_string(rvt, mp, description_string: str) -> str | None:
     English, matching ReachString.text/TeamData.name's own "convenience accessor" precedent.
     Returns an over-budget-table warning, same convention as apply_strings()."""
     return _apply_string_table(rvt, mp.localized_desc, [{"index": 0, "text": {"english": description_string}}], "metadata.description_string", grow=True)
+
+
+@dataclass
+class StringReconciliation:
+    """What :func:`reconcile_script_strings` did: ``strings`` is the (possibly extended or trimmed)
+    document to apply, ``added``/``removed`` the table indexes that changed."""
+
+    strings: dict
+    added: list[int] = field(default_factory=list)
+    removed: list[int] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed)
+
+
+def _is_untranslated(entry: dict) -> bool:
+    """An entry with nothing in any language that differs from its English text -- what a string the
+    script itself just created looks like, so nothing a user typed would be lost by dropping it.
+    (A forge label's name is copied into every language as-is; a format string's other languages are
+    empty or unset. Neither is a translation.)"""
+    english = entry["text"].get("english")
+    return all(not text or text == english for language, text in entry["text"].items() if language != "english")
+
+
+def reconcile_script_strings(mp, strings: dict) -> StringReconciliation:
+    """Makes ``strings["script_strings"]`` cover exactly the compiled variant's own script-string table.
+
+    Like forge labels (see :func:`~in_reach.app.rvt.settings_writer.reconcile_forge_labels`), the
+    *script* decides which strings exist -- every format string, and every forge label's name, is
+    an entry the compile creates -- while ``settings/strings.json`` only holds what a user has written
+    into them, by index. Without this, any script that adds a string left ``strings.json`` shorter than
+    the build's own snapshot forever, so Apply read "unapplied" no matter how often it was clicked.
+
+    Entries for indexes the compile created are added (with the text it gave them); trailing entries
+    past the end of the table are dropped, but only if untranslated -- one carrying text in another
+    language is the user's own work and is left for :func:`apply_strings` to report, as it always has.
+
+    Args:
+        mp: The just-compiled variant's ``MultiplayerData``.
+        strings: A validated ``strings.json`` document (see :func:`~in_reach.app.rvt.strings_io.load_strings`).
+
+    Returns:
+        A :class:`StringReconciliation`; ``strings`` on it is the input itself if nothing changed.
+    """
+    from .strings_io import _all_languages
+
+    rvt = get_rvt()
+    table = mp.script_strings
+    entries = list(strings["script_strings"])
+    removed: list[int] = []
+    while entries and entries[-1]["index"] >= len(table) and _is_untranslated(entries[-1]):
+        removed.append(entries.pop()["index"])
+    present = {entry["index"] for entry in entries}
+    added = [i for i in range(len(table)) if i not in present]
+    for i in added:
+        entries.append({"index": i, "text": _all_languages(rvt, table[i])})
+    if not (added or removed):
+        return StringReconciliation(strings)
+    entries.sort(key=lambda entry: entry["index"])
+    return StringReconciliation({**strings, "script_strings": entries}, added, removed)
 
 
 def apply_strings(mp, strings: dict) -> list[str]:

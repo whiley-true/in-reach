@@ -811,6 +811,8 @@ class MainWindow(QWidget):
         # Also needs self.status_bar to already exist -- same reasoning as the status label above.
         self.explorer_panel.active_project_changed.connect(self._refresh_vcs_status)
         self._refresh_vcs_status(self.explorer_panel.current_folder)
+        self.explorer_panel.active_project_changed.connect(self._refresh_profile_indicator)
+        self._refresh_profile_indicator(self.explorer_panel.current_folder)
 
         # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- connects to the
         # panel's own re-broadcast signal (MainPanelArea.cursor_info_changed), not one specific
@@ -1160,6 +1162,7 @@ class MainWindow(QWidget):
                     for board in self._kanban_boards()
                 ],
             ),
+            Command(label="Select Build Profile", children=self._build_profile_commands()),
             Command(label="Open Notepad in Editor", action=self.open_notepad_in_editor),
             Command(label="Open Notepad in Window", action=self.open_notepad_in_window),
             Command(
@@ -1978,6 +1981,8 @@ class MainWindow(QWidget):
         self._refresh_apply_enabled(folder)
         if folder is not None:
             self._refresh_vcs_status(folder)
+            # A saved profile file (or the active-profile pointer) can change what the indicator says.
+            self._refresh_profile_indicator(folder)
 
     def _on_notepad_saved(self, path: Path) -> None:
         """The Dashboard Notepad just autosaved ``path`` -- brings any open editor tab for the same
@@ -2670,6 +2675,65 @@ class MainWindow(QWidget):
         _logger.info("viewing compiled output for %s", folder)
         path = write_output_view(folder)
         self.main_panel.active_pane.open_file(path, force_reload=True)
+
+    # -- build profiles (script/env/<name>.env) -----------------------------------------------------
+
+    def _build_profile_commands(self) -> list[Command]:
+        """The "Select Build Profile" palette pick: one entry per ``script/env/*.env`` profile of the
+        active project, the current one marked, plus "No profile" -- empty with no project open or no
+        profiles to choose between. (See :mod:`in_reach.app.script_preprocess`: the active profile's
+        ``${CONSTANTS}`` and ``-- @if`` blocks are applied to the script before it's compiled and before
+        ``Compiled.txt`` is written.)"""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import script_preprocess
+
+        names = script_preprocess.list_profiles(folder)
+        if not names:
+            return []
+        active = script_preprocess.active_profile_name(folder)
+        commands = [
+            Command(label=name, detail="active" if name == active else "", action=lambda n=name: self._set_build_profile(n))
+            for name in names
+        ]
+        commands.append(
+            Command(label="No profile", detail="active" if active not in names else "", action=lambda: self._set_build_profile(None))
+        )
+        return commands
+
+    def _set_build_profile(self, name: str | None) -> None:
+        """Makes ``name`` (or, for ``None``, no profile) the one the active project builds with. A no-op
+        with no project open; a failure to write the choice is logged, not raised."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import script_preprocess
+
+        try:
+            script_preprocess.set_active_profile(folder, name)
+        except (ValueError, OSError):
+            _logger.exception("couldn't set the build profile for %s to %r", folder, name)
+            return
+        _logger.info("build profile for %s set to %s", folder, name or "none")
+        self._refresh_profile_indicator(folder)
+
+    def _refresh_profile_indicator(self, folder: Path | None) -> None:
+        """The status bar's left-edge "Profile: <name>" segment for ``folder``: hidden with no project
+        open or none of ``script/env``'s profiles to choose between, else the active one (or "No
+        profile"). Clicking it opens the same pick as the palette's "Select Build Profile"."""
+        from in_reach.app import script_preprocess
+
+        if folder is None or not script_preprocess.list_profiles(folder):
+            self.status_bar.clear_profile()
+            return
+        self.status_bar.set_profile(script_preprocess.active_profile_name(folder), on_click=self._pick_build_profile)
+
+    def _pick_build_profile(self) -> None:
+        """Opens the "Select Build Profile" quick-pick (the status bar segment's own click)."""
+        commands = self._build_profile_commands()
+        if commands:
+            self.quick_access.open_action_list(commands, "Select Build Profile")
 
     # -- Kanban (PROMPT.md: "the first pass of Kanban functionality") -----------------------------
 

@@ -425,6 +425,7 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Launch RVT",
         "New Kanban Board",
         "Open Kanban Board",
+        "Select Build Profile",
         "Open Notepad in Editor",
         "Open Notepad in Window",
         "Open In-Reach Maps",

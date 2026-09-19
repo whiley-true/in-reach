@@ -17,24 +17,24 @@ dialect (confirmed directly via ``compile_script()``, not present in anything
 
     script      := (declaration | alias_decl | function_decl | statement)*
     declaration := "declare" IDENT "." IDENT "[" INT "]"
-                   ("with" "network" "priority" IDENT)? ("=" or_expr)?
-    alias_decl  := "alias" IDENT "=" or_expr
+                   ("with" "network" "priority" IDENT)? ("=" expr)?
+    alias_decl  := "alias" IDENT "=" expr
     function_decl := "function" IDENT "(" ")" block "end"   -- top level only, never nested
     statement   := for_each | do_block | if_stmt | on_trigger | declaration | alias_decl | simple_stmt
     for_each    := "for" "each" IDENT (("with" "label" label_val) | "randomly")* "do" block "end"
     do_block    := "do" block "end"
-    if_stmt     := "if" or_expr "then" block ("altif" or_expr "then" block)* ("alt" block)? "end"
+    if_stmt     := "if" expr "then" block ("altif" expr "then" block)* ("alt" block)? "end"
     on_trigger  := "on" IDENT+ ":" statement
-    simple_stmt := or_expr (("=" | "+=" | "-=" | "*=" | "/=" | "%=") or_expr)?
+    simple_stmt := expr (("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr)?
     block       := statement*
 
-    or_expr     := and_expr ("or" and_expr)*
-    and_expr    := not_expr ("and" not_expr)*
+    expr        := or_group ("and" or_group)*
+    or_group    := not_expr ("or" not_expr)*
     not_expr    := "not" not_expr | compare_expr
     compare_expr:= flag_expr (("==" | "!=" | "<" | ">" | "<=" | ">=") flag_expr)?
     flag_expr   := postfix ("|" postfix)*
-    postfix     := primary ("." IDENT | "[" or_expr "]" | "(" (or_expr ("," or_expr)*)? ")")*
-    primary     := INT | PERCENT | STRING | IDENT | "(" or_expr ")"
+    postfix     := primary ("." IDENT | "[" expr "]" | "(" (expr ("," expr)*)? ")")*
+    primary     := INT | PERCENT | STRING | IDENT | "(" expr ")"
 """
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ class _Parser:
         value = None
         if self._at_punct("="):
             self._advance()
-            value = self._parse_or_expr()
+            value = self._parse_expr()
             end_tok = self._tokens[self._pos - 1]
         return VariableDeclaration(scope=scope, type=vtype, index=index, priority=priority, value=value, span=_span(start, end_tok))
 
@@ -187,7 +187,7 @@ class _Parser:
         start = self._expect_ident("alias")
         name = self._expect_ident().text
         self._expect_punct("=")
-        value = self._parse_or_expr()
+        value = self._parse_expr()
         return AliasDeclaration(name=name, value=value, span=_span(start, self._tokens[self._pos - 1]))
 
     def _parse_block(self, stop_words: frozenset[str] = frozenset({"end"})) -> list[Statement]:
@@ -235,13 +235,13 @@ class _Parser:
 
     def _parse_if(self) -> IfStatement:
         start = self._expect_ident("if")
-        condition = self._parse_or_expr()
+        condition = self._parse_expr()
         self._expect_ident("then")
         body = self._parse_block(_IF_STOP_WORDS)
         altif_clauses: list[ElseIfClause] = []
         while self._at_ident("altif"):
             altif_start = self._advance()
-            altif_cond = self._parse_or_expr()
+            altif_cond = self._parse_expr()
             self._expect_ident("then")
             altif_body = self._parse_block(_IF_STOP_WORDS)
             altif_clauses.append(ElseIfClause(condition=altif_cond, body=altif_body, span=_span(altif_start, self._tokens[self._pos - 1])))
@@ -265,32 +265,37 @@ class _Parser:
 
     def _parse_simple_statement(self) -> Statement:
         start = self._peek()
-        expr = self._parse_or_expr()
+        expr = self._parse_expr()
         tok = self._peek()
         if tok.kind == "punct" and tok.text in _ASSIGN_OPS:
             op = self._advance().text
-            value = self._parse_or_expr()
+            value = self._parse_expr()
             return Assignment(op=op, target=expr, value=value, span=_span(start, self._tokens[self._pos - 1]))
         return ExprStatement(expr=expr, span=_span(start, self._tokens[self._pos - 1]))
 
     # ---- expressions -------------------------------------------------------------------------
 
-    def _parse_or_expr(self) -> Expression:
+    def _parse_expr(self) -> Expression:
+        # Megalo's lowest-binding operator is `and`, and `or` binds *tighter* -- the opposite of most
+        # languages. Confirmed against the native compiler (which `or_group` each condition lands in):
+        # `a and b or c` is `a and (b or c)` (groups 0, 1, 1), `a or b and c` is `(a or b) and c`
+        # (0, 0, 1). It's simply how the engine stores a condition list: `or` puts a condition in the
+        # previous one's group, `and` starts a new group.
         start = self._peek()
-        left = self._parse_and_expr()
-        while self._at_ident("or"):
-            self._advance()
-            right = self._parse_and_expr()
-            left = BinaryOp(op="or", left=left, right=right, span=_span(start, self._tokens[self._pos - 1]))
-        return left
-
-    def _parse_and_expr(self) -> Expression:
-        start = self._peek()
-        left = self._parse_not_expr()
+        left = self._parse_or_group()
         while self._at_ident("and"):
             self._advance()
-            right = self._parse_not_expr()
+            right = self._parse_or_group()
             left = BinaryOp(op="and", left=left, right=right, span=_span(start, self._tokens[self._pos - 1]))
+        return left
+
+    def _parse_or_group(self) -> Expression:
+        start = self._peek()
+        left = self._parse_not_expr()
+        while self._at_ident("or"):
+            self._advance()
+            right = self._parse_not_expr()
+            left = BinaryOp(op="or", left=left, right=right, span=_span(start, self._tokens[self._pos - 1]))
         return left
 
     def _parse_not_expr(self) -> Expression:
@@ -329,17 +334,17 @@ class _Parser:
                 expr = Member(target=expr, name=name, span=_span(start, self._tokens[self._pos - 1]))
             elif self._at_punct("["):
                 self._advance()
-                idx = self._parse_or_expr()
+                idx = self._parse_expr()
                 self._expect_punct("]")
                 expr = Index(target=expr, index=idx, span=_span(start, self._tokens[self._pos - 1]))
             elif self._at_punct("("):
                 self._advance()
                 args: list[Expression] = []
                 if not self._at_punct(")"):
-                    args.append(self._parse_or_expr())
+                    args.append(self._parse_expr())
                     while self._at_punct(","):
                         self._advance()
-                        args.append(self._parse_or_expr())
+                        args.append(self._parse_expr())
                 self._expect_punct(")")
                 expr = Call(target=expr, args=args, span=_span(start, self._tokens[self._pos - 1]))
             else:
@@ -368,7 +373,7 @@ class _Parser:
             return Identifier(name=tok.text, span=_span(tok, tok))
         if tok.kind == "punct" and tok.text == "(":
             self._advance()
-            expr = self._parse_or_expr()
+            expr = self._parse_expr()
             self._expect_punct(")")
             return expr
         raise MegaloParseError("expected an expression", tok)

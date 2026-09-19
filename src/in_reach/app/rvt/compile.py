@@ -25,6 +25,15 @@ A successful ``save=True`` run writes ``build/dist/<folder-name>.bin`` plus
 write_build_snapshot`, re-extracted from the just-compiled ``variant`` (not a copy of
 ``settings/``'s own input), so it reflects exactly what the compiler actually produced.
 
+It also writes back into ``settings/script_settings.json`` and ``settings/strings.json``, but only
+when the script created something they didn't list yet (or stopped needing something untouched they
+did): the script decides how many forge labels and script strings a variant has -- naming a label
+creates it, and ``settings/`` can't -- so :func:`~in_reach.app.rvt.settings_writer.
+reconcile_forge_labels` and :func:`~in_reach.app.rvt.strings_writer.reconcile_script_strings` make the
+two files follow the compiled variant before they're applied. Without the write-back the files would
+list fewer entries than the snapshot above, and Apply would read "unapplied" forever. Nothing is
+written for a dry run (``save=False``) or a failed compile.
+
 The real work (:func:`_run_compile_in_process`, everything from :func:`~in_reach.app.rvt.
 rvt_bridge.get_rvt` onward) runs in an isolated child process, spawned by the public
 :func:`run_compile` -- never directly in whatever process called it. The bundled native
@@ -51,10 +60,10 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from in_reach.app import logging_setup, new_project
+from in_reach.app import logging_setup, new_project, script_preprocess
 from in_reach.app.blank_variant import resolve_blank_variant
 
-from . import decompile, megalo_compiler, settings_io, settings_writer, strings_io, strings_writer
+from . import decompile, megalo_compiler, settings_io, settings_writer, strings_io, strings_writer, template_source
 from .decompile import write_build_snapshot
 from .rvt_bridge import get_rvt
 from .settings_io import load_game_settings
@@ -63,6 +72,9 @@ _logger = logging_setup.get_logger(__name__)
 
 
 class BuildMessage(BaseModel):
+    """One compiler/preprocessor message. ``line`` and ``col`` are both **1-based**, matching the
+    editor's own Ln/Col; ``0``/``0`` means "no position" (a message about the build as a whole)."""
+
     line: int
     col: int
     text: str
@@ -85,7 +97,10 @@ class BuildResult(BaseModel):
 
 
 def _messages(items) -> list[BuildMessage]:
-    return [BuildMessage(line=m.line, col=m.col, text=m.text) for m in items]
+    """Native ``CompileMessage``s as :class:`BuildMessage`s. The native compiler numbers lines from
+    **0** (a mistake on the first line reports line 0) but columns from 1, so its lines are shifted up
+    by one here -- left as they were, every error pointed one line above the one that was wrong."""
+    return [BuildMessage(line=m.line + 1, col=m.col, text=m.text) for m in items]
 
 
 def format_build_result(result: BuildResult) -> str:
@@ -198,6 +213,19 @@ def _run_compile_isolated(project_dir: Path, folder: Path, *, save: bool) -> Bui
         result_path.unlink(missing_ok=True)
 
 
+def _preprocess_failure(exc: script_preprocess.PreprocessError) -> BuildResult:
+    """A :class:`BuildResult` for a script or profile the preprocessor rejected. A problem in the script
+    is reported like any compiler error (with its line and column, which preprocessing never shifts); one
+    in an env file names that file, since its line numbers mean nothing to the script's editor."""
+    if exc.path is None:
+        return BuildResult(
+            success=False,
+            errors=[BuildMessage(line=exc.line, col=exc.col + 1, text=exc.message)],  # col: 0- -> 1-based
+            failure="The script couldn't be preprocessed -- see the errors.",
+        )
+    return BuildResult(success=False, failure=f"{exc.path.name}, line {exc.line}: {exc.message}")
+
+
 def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
     """The real compile work -- only ever called from :mod:`in_reach.app.rvt.compile_subprocess`,
     inside the isolated child process :func:`_run_compile_isolated` spawns. Never call this
@@ -227,7 +255,14 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
 
     if mp is not None:
         script_path = script_dir / decompile.SCRIPT_FILENAME
-        source = script_path.read_text(encoding="utf-8") if script_path.is_file() else ""
+        raw_source = script_path.read_text(encoding="utf-8") if script_path.is_file() else ""
+        # Apply the active environment profile (its ${CONSTANTS} and -- @if blocks) *first*: everything
+        # below -- the unchanged-since-decompile check, the in-house compiler, the native fallback -- must
+        # see the text that's actually being built, not the source with its directives still in.
+        try:
+            source = script_preprocess.preprocess_project(folder, raw_source)
+        except script_preprocess.PreprocessError as exc:
+            return _preprocess_failure(exc)
         # PROMPT.md: "we want to make sure when we compile or decompile a script it processes the
         # code correctly ... i want a working compiler/decompiler we can rely on" -- confirmed by
         # direct testing that mp.compile_script() is not a stable fixed point over its own
@@ -250,7 +285,11 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         else:
             fallback_reason = None
             try:
-                megalo_compiler.compile_script(rvt, variant, source)
+                # The synthetic template pool is only built if the script needs something this base
+                # variant's own script can't supply -- see megalo_compiler.compile_script().
+                megalo_compiler.compile_script(
+                    rvt, variant, source, template_pool=lambda: template_source.build_variants(rvt)
+                )
                 # A successful compile_script() call isn't, on its own, proof that `variant` is
                 # actually a valid, reloadable game variant -- confirmed real, if rare, cases: a
                 # script that exceeds Megalo::Limits::max_actions/max_conditions used to save()
@@ -322,23 +361,58 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         # settings.json's single-language description_string (see settings_writer/strings_writer
         # docstrings for both).
         try:
+            # The script decides how many forge labels exist (naming one creates it), so settings/
+            # has to follow the compiled variant, not the other way round -- see
+            # settings_writer.reconcile_forge_labels()'s docstring.
+            reconciled = settings_writer.reconcile_forge_labels(
+                rvt, mp, settings.multiplayer.script_settings, settings.multiplayer.game_settings.team_settings.teams
+            )
+            # The four other script-defined tables (options, traits, stats, widgets) can be created
+            # from either side, so this grows the variant to match settings as well as the reverse.
+            # It has to come *before* anything from settings/ is applied: creating an option resets
+            # that option's own "disabled"/"hidden" visibility bits, so growing the variant after
+            # apply_multiplayer_settings() had set them silently undid what settings.json said.
+            tables = settings_writer.reconcile_script_tables(rvt, mp, reconciled.script_settings)
             settings_writer.apply_multiplayer_settings(mp, content_header, settings.multiplayer.game_settings)
             settings_writer.apply_meta_header(mp, content_header, settings.meta.title, settings.meta.description)
-            settings_writer.apply_script_settings(mp, settings.multiplayer.script_settings)
+            settings_writer.apply_script_settings(mp, tables.script_settings)
         except ValueError as exc:
             return BuildResult(success=False, failure=f"Failed to apply settings: {exc}")
+        if reconciled.added:
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Added forge label(s) to script_settings.json: {', '.join(reconciled.added)}")
+            )
+        if reconciled.removed:
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Removed unused forge label(s) from script_settings.json: {', '.join(reconciled.removed)}")
+            )
+        for table_field, how_many in tables.added.items():
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Added {how_many} {table_field} entr{'y' if how_many == 1 else 'ies'} to script_settings.json")
+            )
 
         strings_path = settings_dir / "strings.json"
         try:
             strings_data = strings_io.load_strings(strings_path)
         except (OSError, ValueError) as exc:
             return BuildResult(success=False, failure=f"Failed to read {strings_path}: {exc}")
+        # Same idea as the forge labels above: the script decides which strings exist.
+        reconciled_strings = strings_writer.reconcile_script_strings(mp, strings_data)
         try:
-            string_warnings = strings_writer.apply_strings(mp, strings_data)
+            string_warnings = strings_writer.apply_strings(mp, reconciled_strings.strings)
         except ValueError as exc:
             return BuildResult(success=False, failure=f"Failed to apply strings: {exc}")
         result.notices = result.notices + [BuildMessage(line=0, col=0, text=w) for w in string_warnings]
+        if reconciled_strings.added:
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Added {len(reconciled_strings.added)} script string(s) to strings.json")
+            )
+        if reconciled_strings.removed:
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Removed {len(reconciled_strings.removed)} unused script string(s) from strings.json")
+            )
     else:
+        reconciled = tables = reconciled_strings = None
         settings_writer.apply_meta_header(None, content_header, settings.meta.title, settings.meta.description)
         ff = variant.firefight
         if ff is not None and settings.firefight is not None:
@@ -357,6 +431,28 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             result.failure = f"Compiled successfully but failed to save: {exc}"
             return result
         result.output_path = out_path
+
+        # Only now -- the build succeeded and saved -- is it safe to change a file the user owns.
+        # (Without this write the Apply button would read "unapplied" forever: settings/ would list
+        # fewer labels than the build snapshot re-extracted just below.)
+        schema_dir = folder / new_project.SCHEMA_DIRNAME
+        script_settings_path = settings_dir / decompile.SCRIPT_SETTINGS_FILENAME
+        strings_path = settings_dir / decompile.STRINGS_FILENAME
+        try:
+            if reconciled is not None and (reconciled.changed or tables.changed):
+                schema = schema_dir / decompile.SCRIPT_SETTINGS_SCHEMA_FILENAME
+                settings_io.dump_script_settings(
+                    tables.script_settings, script_settings_path, schema if schema.is_file() else None
+                )
+            if reconciled_strings is not None and reconciled_strings.changed:
+                schema = schema_dir / decompile.STRINGS_SCHEMA_FILENAME
+                strings_io.write_strings_json(
+                    reconciled_strings.strings, strings_path, schema if schema.is_file() else None
+                )
+        except OSError as exc:
+            result.success = False
+            result.failure = f"Compiled successfully but failed to update settings/: {exc}"
+            return result
 
         category, category_icon = settings_io.load_meta_category(settings_path)
         title, description = settings_io.load_meta_title_description(settings_path)

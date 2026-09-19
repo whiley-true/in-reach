@@ -145,7 +145,8 @@ class AliasDeclaration(ASTNode):
     decompiles back as whatever it was aliased to, not the alias name itself). Uses of the alias
     elsewhere in the source parse as an ordinary ``Identifier`` with that name -- this grammar
     doesn't resolve aliases (same "no semantic analysis, just structure" scope as everything else
-    here)."""
+    here); :func:`~in_reach.app.rvt.megalo_ast.aliases.resolve_aliases` is the separate pass that
+    does."""
 
     kind: Literal["alias"] = "alias"
     name: str

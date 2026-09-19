@@ -360,10 +360,15 @@ part of the dialect `compile_script()` already accepts):
 - `declare <scope>.<type>[<index>] [with network priority <priority>] [= <value>]`.
 - `for each <selector> [with label <label-val>] [randomly] do <body> end` — `label`/`randomly` may
   appear in either source order; canonicalize on emit (label first), as assumed below.
-- Expression grammar, confirmed operator precedence (lowest to highest):
-  `or` < `and` < `not` < compare (`==`,`!=`,`<`,`>`,`<=`,`>=`, **non-chaining** — `a < b < c` is not a
+- Expression grammar, operator precedence (lowest to highest):
+  `and` < `or` < `not` < compare (`==`,`!=`,`<`,`>`,`<=`,`>=`, **non-chaining** — `a < b < c` is not a
   thing, only one comparison per expression) < `|` (bitwise/flag OR, left-associative) < postfix
-  (`.`, `[]`, `()`).
+  (`.`, `[]`, `()`). **`or` binds *tighter* than `and`** -- the reverse of most languages, and the
+  reverse of what an earlier version of this document said: `a and b or c` is `a and (b or c)`. That's
+  how the engine stores a condition list (each condition has an `or_group`; `or` joins the previous
+  condition's group, `and` starts a new one), confirmed by compiling mixed expressions natively and
+  reading the groups back (`a and b or c` -> 0,1,1; `a or b and c` -> 0,0,1). The native compiler also
+  rejects parentheses in a condition outright, so a condition is always `or_group ("and" or_group)*`.
 - Compound assignment operators: **exactly** `=`, `+=`, `-=`, `*=`, `/=`, `%=`. **No `|=`, no `&=`, no
   plain binary `+`/`-`/`*`/`/` expression operators at all** — arithmetic only ever happens as a
   compound assignment statement, never inline in an expression.

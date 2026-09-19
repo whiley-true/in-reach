@@ -24,12 +24,14 @@ binding gap, not a choice made here).
 
 Every list field applied here (team entries, loadout palette entries, forge labels, scripted
 options/traits/stats/HUD widgets) is matched positionally against the already-loaded variant's own
-list and must be the exact same length -- these lists are either fixed-size engine arrays (8
-teams, 6 palettes x 5 loadouts each) or determined by the compiled Megalo script (forge label/
-scripted-option/etc. counts), never resized from settings alone, so a length mismatch means the
-settings.json being applied is stale relative to the just-compiled script -- raises ValueError
-rather than silently truncating/padding. :mod:`in_reach.app.rvt.compile` wraps every apply_*() call
-from this module (and strings_writer's) so this never escapes as an unhandled crash.
+list and must be the exact same length, or apply_*() raises ValueError rather than silently
+truncating/padding. Some of those lists are fixed-size engine arrays (8 teams, 6 palettes x 5
+loadouts each); the rest are decided by the compiled script, or by settings/ itself, and are made to
+agree *before* this module applies anything -- :func:`reconcile_forge_labels` (only a script can
+create a label) and :func:`reconcile_script_tables` (options/traits/stats/widgets can be created from
+either side) -- so a mismatch that reaches apply_*() means an entry a user edited would otherwise
+have been discarded. :mod:`in_reach.app.rvt.compile` wraps every apply_*() call from this module (and
+strings_writer's) so this never escapes as an unhandled crash.
 
 Text fields (ForgeLabel.name, ScriptedOption[Value].name/desc, ScriptedStat.name,
 ScriptedPlayerTraits.name/desc) are deliberately NOT applied by this module at all, script_settings
@@ -58,6 +60,8 @@ classification, added after this module's v2 ancestor was written) -- unrelated 
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from . import strings_writer
 from .extraction import (
     FIREFIGHT_SCENARIO_FLAGS,
@@ -71,6 +75,11 @@ from .extraction import (
     SOCIAL_FLAGS,
     TEAM_DATA_FLAGS,
     TU1_FLAGS,
+    extract_forge_label,
+    extract_scripted_hud_widget,
+    extract_scripted_option,
+    extract_scripted_player_trait,
+    extract_scripted_stat,
 )
 from .models.game_settings import (
     Firefight,
@@ -520,6 +529,148 @@ def _apply_scripted_stat(rvt, s_obj, stat: ScriptedStat) -> None:
 
 def _apply_scripted_hud_widget(w_obj, widget: ScriptedHUDWidget) -> None:
     w_obj.position = widget.position
+
+
+@dataclass
+class LabelReconciliation:
+    """What :func:`reconcile_forge_labels` did: ``script_settings`` is the (possibly extended or
+    trimmed) copy to apply, ``added``/``removed`` the label names that changed."""
+
+    script_settings: ScriptSettings
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed)
+
+
+def _is_pristine_forge_label(label: ForgeLabel) -> bool:
+    """A label with no requirements set -- i.e. nothing a user would lose by dropping it. Its name is
+    ignored: that's a display copy of what the script itself named the label, not something edited."""
+    return label.model_copy(update={"name": ""}) == ForgeLabel()
+
+
+def reconcile_forge_labels(rvt, mp, script_settings: ScriptSettings, teams: list[Team]) -> LabelReconciliation:
+    """Makes ``script_settings.forge_labels`` the same length as ``mp``'s own label list, which is the
+    one thing :func:`apply_script_settings` insists on.
+
+    The *script* defines how many labels a variant has (naming one in ``for each object with label
+    "hill"`` creates it -- nothing in ``settings/`` can, and the native binding has no add-label call),
+    while ``settings/script_settings.json`` only holds each label's editable properties, matched by
+    position. So when the script has produced labels the settings don't list yet, this fills them in
+    from the compiled variant (their real defaults, name included) instead of failing the whole Apply
+    -- which is exactly what a project started from a blank variant hit the first time its script
+    named a label.
+
+    Going the other way, trailing entries the script no longer needs are dropped, but only if they're
+    still untouched defaults: an entry with any requirement set is the user's own work, so it's left
+    alone and :func:`apply_script_settings` reports the mismatch as it always has, rather than this
+    silently discarding it.
+
+    Args:
+        rvt: The native extension module.
+        mp: The just-compiled variant's ``MultiplayerData``.
+        script_settings: The project's current ``settings/script_settings.json`` contents.
+        teams: The project's team settings, for resolving a label's required-team name.
+
+    Returns:
+        A :class:`LabelReconciliation`; ``script_settings`` on it is the input itself if nothing
+        needed changing. The caller decides whether to write it back to ``settings/``.
+    """
+    entries = list(script_settings.forge_labels)
+    count = mp.forge_label_count
+    added: list[str] = []
+    removed: list[str] = []
+    while len(entries) > count and _is_pristine_forge_label(entries[-1]):
+        removed.append(entries.pop().name)
+    for i in range(len(entries), count):
+        label = extract_forge_label(rvt, mp.forge_label(i), teams)
+        entries.append(label)
+        added.append(label.name)
+    if not (added or removed):
+        return LabelReconciliation(script_settings)
+    return LabelReconciliation(script_settings.model_copy(update={"forge_labels": entries}), added, removed)
+
+
+#: The four script-defined tables besides forge labels, as ``(ScriptSettings field, count attribute on
+#: the variant, method that appends one, accessor, extractor of one entry's settings)``.
+_SCRIPT_TABLES = (
+    ("scripted_options", "scripted_option_count", "add_scripted_option", "scripted_option",
+     lambda rvt, entry: extract_scripted_option(entry)),
+    ("scripted_player_traits", "scripted_player_trait_count", "add_scripted_player_traits", "scripted_player_trait",
+     lambda rvt, entry: extract_scripted_player_trait(rvt, entry)),
+    ("scripted_stats", "scripted_stat_count", "add_scripted_stat", "scripted_stat",
+     lambda rvt, entry: extract_scripted_stat(entry)),
+    ("scripted_hud_widgets", "scripted_hud_widget_count", "add_scripted_hud_widget", "scripted_hud_widget",
+     lambda rvt, entry: extract_scripted_hud_widget(entry)),
+)
+
+
+@dataclass
+class TableReconciliation:
+    """What :func:`reconcile_script_tables` did. ``script_settings`` is the copy to apply (and, if
+    ``changed``, to write back); ``added`` maps each table's settings field to how many entries the
+    *script* created that settings now lists; ``created`` maps it to how many entries *settings*
+    defined that the variant didn't have yet."""
+
+    script_settings: ScriptSettings
+    added: dict[str, int] = field(default_factory=dict)
+    created: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def changed(self) -> bool:
+        """Whether ``settings/`` needs rewriting. (``created`` only changes the variant.)"""
+        return bool(self.added)
+
+
+def reconcile_script_tables(rvt, mp, script_settings: ScriptSettings) -> TableReconciliation:
+    """Makes each of the variant's scripted options, player-trait sets, stats and HUD widgets and its
+    ``script_settings`` list agree, from whichever side has more.
+
+    Unlike forge labels (which only a script can create -- see :func:`reconcile_forge_labels`), these
+    can be created either way: the script by referring to ``script_widget[2]`` (the compiler makes sure
+    entries 0-2 exist), or ``settings/script_settings.json`` by listing an entry, exactly as adding one
+    in RVT's script editor does. So the settings list sets a *minimum* -- the variant is grown to match
+    it -- and anything the script created beyond that is appended to it with its real defaults.
+
+    Nothing is ever dropped. An entry is either one the user listed or one a script still refers to, so
+    unlike a label there's no "no longer needed, and untouched" case to guard against losing work.
+
+    Args:
+        rvt: The native extension module.
+        mp: The just-compiled variant's ``MultiplayerData``. Grown in place where settings lists more.
+        script_settings: The project's current ``settings/script_settings.json`` contents.
+
+    Returns:
+        A :class:`TableReconciliation`; its ``script_settings`` is the input itself if nothing needed
+        appending.
+
+    Raises:
+        ValueError: A settings list is longer than the engine allows for that table.
+    """
+    updates: dict[str, list] = {}
+    added: dict[str, int] = {}
+    created: dict[str, int] = {}
+    for settings_field, count_attr, add_method, accessor, extract in _SCRIPT_TABLES:
+        entries = list(getattr(script_settings, settings_field))
+        made = 0
+        while getattr(mp, count_attr) < len(entries):
+            try:
+                getattr(mp, add_method)()
+            except RuntimeError as exc:
+                raise ValueError(f"script_settings.{settings_field} lists {len(entries)} entries, but {exc}") from exc
+            made += 1
+        if made:
+            created[settings_field] = made
+        count = getattr(mp, count_attr)
+        appended = [extract(rvt, getattr(mp, accessor)(i)) for i in range(len(entries), count)]
+        if appended:
+            updates[settings_field] = entries + appended
+            added[settings_field] = len(appended)
+    if not updates:
+        return TableReconciliation(script_settings, {}, created)
+    return TableReconciliation(script_settings.model_copy(update=updates), added, created)
 
 
 def apply_script_settings(mp, script_settings: ScriptSettings) -> None:
