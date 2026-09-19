@@ -158,16 +158,29 @@ _ICON_SOURCES = {
         '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
     ),
     "map": (  # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)"
-        # -- a classic folded paper map (a zigzag-edged strip with two fold creases) plus a small
-        # location dot, same "deliberately simple, not traced from any icon set" reasoning as
-        # "compass"/"git" above. Went through a globe, then a folded-map-plus-pin, then a redraw off
-        # a user-supplied reference (map_sample.png) after this -- brought back on request ("please
-        # try the first map svg you had at the start").
+        # -- a classic folded paper map (a zigzag-edged strip with two fold creases), same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"git" above.
+        # Went through a globe, then a folded-map-plus-pin, then a redraw off a user-supplied
+        # reference (map_sample.png) after this -- brought back on request ("please try the first
+        # map svg you had at the start"). A later pass ("please remove the dot in the circle of the
+        # map") dropped the small location-dot marker this used to have in its center -- just the
+        # folded paper itself now.
         "0 0 16 16",
         '<path d="M1 3L5 1L11 3L15 1V13L11 15L5 13L1 15Z" fill="none" stroke="{color}"'
         ' stroke-width="1.2" stroke-linejoin="round"/>'
-        '<path d="M5 1V13M11 3V15" fill="none" stroke="{color}" stroke-width="1.2"/>'
-        '<circle cx="8" cy="8" r="1.1" fill="{color}"/>',
+        '<path d="M5 1V13M11 3V15" fill="none" stroke="{color}" stroke-width="1.2"/>',
+    ),
+    "kanban": (  # PROMPT.md: "under documentation please add an icon for Kanban, this should be
+        # stubbed for now" -- three simple columns (a board outline plus two divider lines) each
+        # holding a card or two, same "deliberately simple, not traced from any icon set" reasoning
+        # as "compass"/"map" above.
+        "0 0 16 16",
+        '<rect x="1.5" y="2" width="13" height="12" rx="1" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<path d="M6 2V14M10.5 2V14" stroke="{color}" stroke-width="1"/>'
+        '<rect x="2.6" y="3.4" width="2.3" height="2.6" fill="{color}"/>'
+        '<rect x="2.6" y="7" width="2.3" height="1.6" fill="{color}"/>'
+        '<rect x="7.1" y="3.4" width="2.3" height="1.6" fill="{color}"/>'
+        '<rect x="11.6" y="3.4" width="2.3" height="4" fill="{color}"/>',
     ),
     "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
         # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"

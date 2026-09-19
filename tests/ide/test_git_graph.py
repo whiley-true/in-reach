@@ -1,5 +1,5 @@
 from in_reach.app.vcs import Snapshot
-from in_reach.ide.git_graph import compute_lanes
+from in_reach.ide.git_graph import GitGraphWidget, compute_lanes
 
 
 def _snap(sha: str, *, parents: list[str] = (), branches: list[str] = (), stamp: str | None = None) -> Snapshot:
@@ -114,3 +114,54 @@ def test_active_lane_count_reflects_lanes_still_in_play() -> None:
 
     # Both f1's and a3's own lanes are simultaneously active at this point in the walk.
     assert rows[1].active_lane_count == 2
+
+
+def test_a_very_long_label_is_elided_to_fit_before_the_sha_column(qtbot) -> None:
+    # PROMPT.md: "sometimes the text overlaps on one row" -- an overlong commit message used to be
+    # drawn at its own full width regardless of how much room was actually left before the
+    # right-aligned sha text on that same row.
+    from PyQt6.QtGui import QFont, QFontMetrics
+
+    from in_reach.ide.git_graph import elide_row_text
+
+    metrics = QFontMetrics(QFont())
+    long_message = "a very long commit message " * 10
+    text_x = 50
+    sha_x = 300  # not much room between text_x and here at this font size
+
+    label, branch_text = elide_row_text(
+        long_message, [], metrics=metrics, text_x=text_x, sha_x=sha_x
+    )
+
+    assert label != long_message  # actually elided, not left at full width
+    assert text_x + metrics.horizontalAdvance(label) < sha_x
+    assert branch_text == ""
+
+
+def test_short_label_and_branches_are_not_elided_when_they_fit(qtbot) -> None:
+    from PyQt6.QtGui import QFont, QFontMetrics
+
+    from in_reach.ide.git_graph import elide_row_text
+
+    metrics = QFontMetrics(QFont())
+    label, branch_text = elide_row_text(
+        "short message", ["main"], metrics=metrics, text_x=50, sha_x=900
+    )
+
+    assert label == "short message"
+    assert branch_text == "[main]"
+
+
+def test_branches_are_dropped_when_the_label_alone_already_fills_the_row(qtbot) -> None:
+    from PyQt6.QtGui import QFont, QFontMetrics
+
+    from in_reach.ide.git_graph import elide_row_text
+
+    metrics = QFontMetrics(QFont())
+    long_message = "a very long commit message " * 10
+    label, branch_text = elide_row_text(
+        long_message, ["main"], metrics=metrics, text_x=50, sha_x=300
+    )
+
+    assert label != long_message
+    assert branch_text == ""

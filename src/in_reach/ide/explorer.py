@@ -163,6 +163,12 @@ _FLAT_PROGRESS_BAR_STYLE = (
     "QProgressBar::chunk { background-color: palette(highlight); }"
 )
 
+#: PROMPT.md: "please in the dashboard make the progress bars a little smaller (they're a bit
+#: imposing at the moment)" -- Fusion's own default QProgressBar height (~23px) reads as oversized
+#: next to the Dashboard's other, plain-text rows; applied to both :attr:`ExplorerPanel.
+#: stats_progress` and every :class:`_StatBox`'s own bar.
+_PROGRESS_BAR_HEIGHT = 16
+
 #: PROMPT.md: "please remove the bubble connecting the project dashboard buttons so they do not
 #: appear connected, and give them a background colour to make it clear they are buttons" -- the
 #: Export RVT File/View Output.txt row (see ExplorerPanel.__init__). Each button gets its own
@@ -236,6 +242,7 @@ class _StatBox(QFrame):
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(True)
         self.progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
+        self.progress.setFixedHeight(_PROGRESS_BAR_HEIGHT)
         layout.addWidget(self.progress)
 
     def set_value(self, label: str, count: int, maximum: int) -> None:
@@ -342,6 +349,7 @@ class ExplorerPanel(QWidget):
         # pill sitting directly above those two lines; flattening it to a plain rectangle removes
         # the one bordered/"bubble" element left in the Stats box.
         self.stats_progress.setStyleSheet(_FLAT_PROGRESS_BAR_STYLE)
+        self.stats_progress.setFixedHeight(_PROGRESS_BAR_HEIGHT)
         # PROMPT.md: "please make each the 'sub' stats have a percentage bar and a border, aligning
         # the 5 totals across two columns" -- each of Triggers/Conditions/Actions/Forge Labels/
         # Strings gets its own bordered _StatBox (a percentage bar whose own text carries the

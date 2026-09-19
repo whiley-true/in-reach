@@ -17,6 +17,14 @@ number (blank for an alignment filler row, which isn't a real line on that side 
 syntax highlighting matching the app's live theme when the file being diffed is one (``"text
 colouring of the theme"`` -- the same :class:`~in_reach.ide.json_highlighter.JsonSyntaxHighlighter`
 an ordinary editor tab uses, not just plain monochrome text).
+
+PROMPT.md (a further pass): "in changes we also want to see the text preview on the right hand side
+of the editors - with highlighted lines at changes" -- each side also gets its own
+:class:`_DiffMinimap`, the same shrunk-text, scrolls-with-the-view preview
+:class:`~in_reach.ide.editor._Minimap` already gives an ordinary editor tab, just recolored: instead
+of highlighting live schema-error lines, it highlights added/removed lines using this module's own
+:data:`_LINE_KIND_COLOR`, so a change is spottable in the preview at a glance even several pages
+away from the current scroll position.
 """
 
 from __future__ import annotations
@@ -24,8 +32,18 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from PyQt6.QtCore import QRect, QSize, Qt
-from PyQt6.QtGui import QColor, QFontDatabase, QPainter, QPaintEvent, QPalette, QResizeEvent, QTextCharFormat, QTextCursor
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt
+from PyQt6.QtGui import (
+    QColor,
+    QFontDatabase,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPalette,
+    QResizeEvent,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QTextEdit, QVBoxLayout, QWidget
 
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
@@ -39,6 +57,127 @@ _BLANK_COLOR = QColor(128, 128, 128, 25)
 _LINE_KIND_COLOR = {"removed": _REMOVED_COLOR, "added": _ADDED_COLOR, "blank": _BLANK_COLOR}
 
 _GUTTER_PADDING = 6
+
+#: Same values as editor.py's own _Minimap -- a shrunk-text preview reads the same everywhere in
+#: the app, whether it's next to a plain editor or next to a diff pane.
+_MINIMAP_WIDTH = 72
+_MINI_LINE_HEIGHT = 3.0
+#: Full-strength here (unlike _LINE_KIND_COLOR's own translucent overlay tints) -- a change band in
+#: the minimap is only ever a few pixels tall, so a translucent fill over the minimap's own
+#: already-dim shrunk text would read as barely-there; a solid bar is what actually stays visible at
+#: a glance from several pages away, the whole point of this preview.
+_MINIMAP_LINE_KIND_COLOR = {
+    "removed": QColor(244, 63, 94, 130),
+    "added": QColor(34, 197, 94, 130),
+}
+
+
+class _DiffMinimap(QWidget):
+    """A shrunk, scrolling text preview pinned along a :class:`_DiffPane`'s own right edge -- see
+    this module's own docstring. Deliberately not a subclass of editor.py's own
+    :class:`~in_reach.ide.editor._Minimap` (a diff pane is a plain ``QPlainTextEdit``, not a
+    :class:`~in_reach.ide.editor._PlainTextEditor`, and has no schema-error/fold-marker/"go to line"
+    concerns of its own to mirror) -- the same shape, applied to what a diff pane actually has:
+    per-line change ``kind``\\ s instead of live error lines.
+    """
+
+    def __init__(self, pane: "_DiffPane") -> None:
+        super().__init__(pane)
+        self._pane = pane
+        self._drag_anchor: tuple[float, int] | None = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self) -> QSize:
+        return QSize(_MINIMAP_WIDTH, 0)
+
+    def _visible_block_count(self) -> int:
+        pane = self._pane
+        viewport_height = pane.viewport().height()
+        block = pane.firstVisibleBlock()
+        top = round(pane.blockBoundingGeometry(block).translated(pane.contentOffset()).top())
+        count = 0
+        while block.isValid() and top < viewport_height:
+            top += round(pane.blockBoundingRect(block).height())
+            count += 1
+            block = block.next()
+        return count
+
+    def _line_offset(self, y: float) -> int:
+        return round(y / _MINI_LINE_HEIGHT)
+
+    def _first_line(self) -> int:
+        return self._pane.firstVisibleBlock().blockNumber()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        scrollbar = self._pane.verticalScrollBar()
+        scrollbar.setValue(scrollbar.value() + self._line_offset(event.position().y()))
+        self._drag_anchor = (event.position().y(), scrollbar.value())
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_anchor is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        start_y, start_value = self._drag_anchor
+        delta = self._line_offset(event.position().y() - start_y)
+        self._pane.verticalScrollBar().setValue(start_value + delta)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_anchor = None
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        pane = self._pane
+        palette = pane.palette()
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
+
+        max_lines = int(self.height() / _MINI_LINE_HEIGHT) + 1
+        first_line = self._first_line()
+        kinds = pane.line_kinds()
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        for offset in range(max_lines):
+            line = first_line + offset
+            if line >= len(kinds):
+                break
+            color = _MINIMAP_LINE_KIND_COLOR.get(kinds[line])
+            if color is not None:
+                painter.setBrush(color)
+                painter.drawRect(QRectF(0, offset * _MINI_LINE_HEIGHT, self.width(), _MINI_LINE_HEIGHT))
+
+        self._paint_lines(painter, max_lines, first_line)
+
+        visible = self._visible_block_count()
+        band_color = palette.color(QPalette.ColorRole.Highlight)
+        band_color.setAlpha(70)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(band_color)
+        painter.drawRect(QRectF(0, 0, self.width(), visible * _MINI_LINE_HEIGHT))
+        painter.end()
+
+    def _paint_lines(self, painter: QPainter, max_lines: int, first_line: int) -> None:
+        pane = self._pane
+        real_line_height = pane.fontMetrics().height()
+        if real_line_height <= 0:
+            return
+        scale = _MINI_LINE_HEIGHT / real_line_height
+        ascent = pane.fontMetrics().ascent()
+
+        painter.setFont(pane.font())
+        painter.setPen(pane.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText))
+
+        block = pane.firstVisibleBlock()
+        index = 0
+        while block.isValid() and index < max_lines:
+            text = block.text()
+            if text.strip():
+                painter.save()
+                painter.translate(2.0, index * _MINI_LINE_HEIGHT)
+                painter.scale(scale, scale)
+                painter.drawText(QPointF(0, ascent), text)
+                painter.restore()
+            block = block.next()
+            index += 1
 
 
 def _align(
@@ -125,11 +264,24 @@ class _DiffPane(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self._linenos: list[int | None] = []
+        self._kinds: list[str] = []
         self._highlighter: JsonSyntaxHighlighter | None = None
         self._gutter = _DiffGutter(self)
+        #: PROMPT.md: "in changes we also want to see the text preview on the right hand side of
+        #: the editors - with highlighted lines at changes" -- see :class:`_DiffMinimap`'s own
+        #: docstring.
+        self._minimap = _DiffMinimap(self)
         self.blockCountChanged.connect(self._update_gutter_width)
+        self.blockCountChanged.connect(self._minimap.update)
         self.updateRequest.connect(self._update_gutter)
+        self.verticalScrollBar().valueChanged.connect(self._minimap.update)
         self._update_gutter_width()
+
+    def line_kinds(self) -> list[str]:
+        """This pane's own per-line ``"equal"``/``"removed"``/``"added"``/``"blank"`` kinds (see
+        :func:`_align`), 0-indexed to match a block's own ``blockNumber()`` -- what
+        :class:`_DiffMinimap` reads to decide which shrunk lines to highlight."""
+        return self._kinds
 
     def set_json_highlighting(self, enabled: bool) -> None:
         if enabled and self._highlighter is None:
@@ -141,6 +293,7 @@ class _DiffPane(QPlainTextEdit):
 
     def set_lines(self, lines: list[str], kinds: list[str], linenos: list[int | None]) -> None:
         self._linenos = linenos
+        self._kinds = kinds
         self.setPlainText("\n".join(lines))
         selections = []
         block = self.document().firstBlock()
@@ -160,6 +313,7 @@ class _DiffPane(QPlainTextEdit):
         self.setExtraSelections(selections)
         self._update_gutter_width()
         self._gutter.update()
+        self._minimap.update()
 
     # -- line-number gutter (same layout math as editor.py's own _PlainTextEditor) ----------------
 
@@ -168,13 +322,14 @@ class _DiffPane(QPlainTextEdit):
         return _GUTTER_PADDING * 2 + self.fontMetrics().horizontalAdvance("9") * digits
 
     def _update_gutter_width(self) -> None:
-        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+        self.setViewportMargins(self.gutter_width(), 0, _MINIMAP_WIDTH, 0)
 
     def _update_gutter(self, rect, dy: int) -> None:  # noqa: ANN001 -- QRect
         if dy:
             self._gutter.scroll(0, dy)
         else:
             self._gutter.update(0, rect.y(), self._gutter.width(), rect.height())
+        self._minimap.update()
         if rect.contains(self.viewport().rect()):
             self._update_gutter_width()
 
@@ -182,10 +337,14 @@ class _DiffPane(QPlainTextEdit):
         super().resizeEvent(event)
         rect = self.contentsRect()
         self._gutter.setGeometry(QRect(rect.left(), rect.top(), self.gutter_width(), rect.height()))
+        self._minimap.setGeometry(QRect(rect.right() - _MINIMAP_WIDTH, rect.top(), _MINIMAP_WIDTH, rect.height()))
 
     def paint_gutter(self, event: QPaintEvent) -> None:
         painter = QPainter(self._gutter)
         painter.fillRect(event.rect(), self.palette().color(QPalette.ColorRole.Window))
+        # Explicit, not relied-upon inheritance -- keeps the gutter's line numbers provably the
+        # same size as this pane's own text, same reasoning as editor.py's own paint_line_numbers().
+        painter.setFont(self.font())
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())

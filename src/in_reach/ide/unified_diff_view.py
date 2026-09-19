@@ -154,6 +154,9 @@ class _UnifiedDiffPane(QPlainTextEdit):
     def paint_gutter(self, event: QPaintEvent) -> None:
         painter = QPainter(self._gutter)
         painter.fillRect(event.rect(), self.palette().color(QPalette.ColorRole.Window))
+        # Explicit, not relied-upon inheritance -- keeps the gutter's line numbers provably the
+        # same size as this pane's own text, same reasoning as editor.py's own paint_line_numbers().
+        painter.setFont(self.font())
         digit_width = self._digit_width()
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()

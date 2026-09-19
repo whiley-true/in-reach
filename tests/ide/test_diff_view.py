@@ -206,3 +206,64 @@ def test_gutter_width_grows_with_more_lines(qtbot) -> None:
     widget.set_diff("a\n" * 500, "a\n" * 500)
 
     assert widget.old_pane.gutter_width() > small_width
+
+
+# -- text-preview minimap (PROMPT.md: "in changes we also want to see the text preview on the
+# right hand side of the editors - with highlighted lines at changes") ---------------------------
+
+
+def test_each_pane_has_its_own_minimap(qtbot) -> None:
+    widget = DiffViewWidget(rel_path="Notes.txt", old_text="a\nb\n", new_text="a\nCHANGED\n")
+    qtbot.addWidget(widget)
+
+    assert widget.old_pane._minimap is not widget.new_pane._minimap
+    assert widget.old_pane._minimap.parent() is widget.old_pane
+    assert widget.new_pane._minimap.parent() is widget.new_pane
+
+
+def test_minimap_sits_along_the_panes_own_right_edge(qtbot) -> None:
+    widget = DiffViewWidget(rel_path="Notes.txt", old_text="a\nb\n", new_text="a\nCHANGED\n")
+    qtbot.addWidget(widget)
+    widget.resize(600, 300)
+    widget.show()
+
+    geometry = widget.old_pane._minimap.geometry()
+    assert geometry.right() <= widget.old_pane.contentsRect().right()
+    assert geometry.right() >= widget.old_pane.contentsRect().right() - 2  # flush with the edge
+
+
+def test_minimap_reads_the_panes_own_line_kinds(qtbot) -> None:
+    widget = DiffViewWidget(rel_path="Notes.txt", old_text="a\nb\nc\n", new_text="a\nCHANGED\nc\n")
+    qtbot.addWidget(widget)
+
+    assert widget.old_pane.line_kinds() == ["equal", "removed", "equal"]
+    assert widget.new_pane.line_kinds() == ["equal", "added", "equal"]
+
+
+def test_minimap_line_kinds_update_when_the_diff_is_refreshed(qtbot) -> None:
+    widget = DiffViewWidget(rel_path="Notes.txt", old_text="a\n", new_text="a\n")
+    qtbot.addWidget(widget)
+    assert widget.old_pane.line_kinds() == ["equal"]
+
+    widget.set_diff("a\n", "a\nb\n")
+
+    assert widget.old_pane.line_kinds() == ["equal", "blank"]
+    assert widget.new_pane.line_kinds() == ["equal", "added"]
+
+
+def test_minimap_paints_without_raising_on_a_real_diff(qtbot) -> None:
+    # Regression guard, same "grab a real pixmap" seam other paintEvent-heavy widgets in this repo
+    # use -- catches a straightforward crash (e.g. an index error reading line_kinds() past the end)
+    # that a pure-data test of _align()/line_kinds() alone wouldn't.
+    widget = DiffViewWidget(
+        rel_path="settings/settings.json",
+        old_text="\n".join(f'"field_{i}": true,' for i in range(60)),
+        new_text="\n".join(f'"field_{i}": false,' for i in range(60)),
+    )
+    qtbot.addWidget(widget)
+    widget.resize(900, 400)
+    widget.show()
+
+    pixmap = widget.old_pane._minimap.grab()
+
+    assert not pixmap.isNull()

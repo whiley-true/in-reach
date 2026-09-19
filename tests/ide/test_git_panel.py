@@ -83,19 +83,19 @@ def test_refresh_lists_every_branch_and_marks_stamps_in_the_graph(panel: GitPane
     assert stamp_messages == ["v1"]
 
 
-def test_stamp_button_emits_stamp_requested_with_the_typed_message(
+def test_stamp_button_emits_stamp_requested_with_the_typed_message_and_version(
     panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = _project(tmp_path)
-    vcs.init(folder)
+    vcs.init(folder)  # stamped "gametype init" at v0.0.0
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_text", lambda title, label: "First release")
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("First release", "1.2.3"))
     emitted = []
-    panel.stamp_requested.connect(emitted.append)
+    panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
 
     panel.stamp_button.click()
 
-    assert emitted == ["First release"]
+    assert emitted == [("First release", "1.2.3")]
 
 
 def test_stamp_button_does_not_emit_when_the_dialog_is_cancelled(
@@ -104,16 +104,119 @@ def test_stamp_button_does_not_emit_when_the_dialog_is_cancelled(
     folder = _project(tmp_path)
     vcs.init(folder)
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_text", lambda title, label: "")
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: None)
     emitted = []
-    panel.stamp_requested.connect(emitted.append)
+    panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
 
     panel.stamp_button.click()
 
     assert emitted == []
 
 
-def test_new_branch_button_emits_new_branch_requested_with_the_typed_name(
+def test_stamp_button_seeds_the_dialog_from_the_last_stamped_version(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder, stamp_message="gametype init")  # v0.0.0
+    vcs.stamp(folder, "release one", version="1.2.3")
+    panel.set_project(folder)
+    seeded = []
+    monkeypatch.setattr(
+        panel,
+        "_ask_stamp_release",
+        lambda major, minor, patch: seeded.append((major, minor, patch)) or None,
+    )
+
+    panel.stamp_button.click()
+
+    assert seeded == [(1, 2, 3)]
+
+
+def test_stamp_button_seeds_0_0_0_with_no_prior_stamp(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)  # plain "Initial commit" -- no stamp, no version
+    panel.set_project(folder)
+    seeded = []
+    monkeypatch.setattr(
+        panel,
+        "_ask_stamp_release",
+        lambda major, minor, patch: seeded.append((major, minor, patch)) or None,
+    )
+
+    panel.stamp_button.click()
+
+    assert seeded == [(0, 0, 0)]
+
+
+def test_stamp_button_warns_before_reusing_an_already_stamped_version(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.stamp(folder, "release one", version="1.0.0")
+    panel.set_project(folder)
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("release two", "1.0.0"))
+    confirmed = []
+    monkeypatch.setattr(panel, "_confirm_duplicate_version", lambda version: confirmed.append(version) or False)
+    emitted = []
+    panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
+
+    panel.stamp_button.click()
+
+    assert confirmed == ["1.0.0"]
+    assert emitted == []  # declined the overwrite warning -- no stamp requested
+
+
+def test_stamp_button_stamps_anyway_when_the_duplicate_version_warning_is_accepted(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.stamp(folder, "release one", version="1.0.0")
+    panel.set_project(folder)
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("release two", "1.0.0"))
+    monkeypatch.setattr(panel, "_confirm_duplicate_version", lambda version: True)
+    emitted = []
+    panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
+
+    panel.stamp_button.click()
+
+    assert emitted == [("release two", "1.0.0")]
+
+
+def test_stamp_button_is_disabled_when_the_gametype_is_not_compiled(panel: GitPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "it also should not be possible to stamp a non compiled gametype".
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    assert panel.stamp_button.isEnabled() is True
+
+    panel.set_stamp_enabled(False)
+
+    assert panel.stamp_button.isEnabled() is False
+
+    panel.set_stamp_enabled(True)
+
+    assert panel.stamp_button.isEnabled() is True
+
+
+def test_new_branch_button_offers_a_new_branch_and_new_branch_from_dropdown(
+    panel: GitPanel, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please make new branch trigger a drop down also providing a New Branch from
+    # option (if not use present)".
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+
+    menu = panel.new_branch_button.menu()
+
+    assert [a.text() for a in menu.actions()] == ["New Branch", "New Branch From..."]
+
+
+def test_new_branch_menu_action_emits_new_branch_requested_with_the_typed_name(
     panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = _project(tmp_path)
@@ -123,9 +226,67 @@ def test_new_branch_button_emits_new_branch_requested_with_the_typed_name(
     emitted = []
     panel.new_branch_requested.connect(emitted.append)
 
-    panel.new_branch_button.click()
+    _trigger_action(panel.new_branch_button.menu(), "New Branch")
 
     assert emitted == ["feature"]
+
+
+def test_new_branch_from_picking_a_different_source_emits_new_branch_from_requested(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    panel.set_project(folder)
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QInputDialog.getItem", lambda *a, **k: ("feature", True)
+    )
+    monkeypatch.setattr(panel, "_ask_text", lambda title, label: "from-feature")
+    emitted = []
+    panel.new_branch_from_requested.connect(lambda name, source: emitted.append((name, source)))
+
+    _trigger_action(panel.new_branch_button.menu(), "New Branch From...")
+
+    assert emitted == [("from-feature", "feature")]
+
+
+def test_new_branch_from_picking_the_current_branch_emits_plain_new_branch_requested(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Picking whatever's already checked out as the "source" is just the plain "New Branch"
+    # behavior -- no need to route it through the source-aware signal.
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QInputDialog.getItem", lambda *a, **k: (vcs.DEFAULT_BRANCH, True)
+    )
+    monkeypatch.setattr(panel, "_ask_text", lambda title, label: "feature")
+    plain_emitted = []
+    from_emitted = []
+    panel.new_branch_requested.connect(plain_emitted.append)
+    panel.new_branch_from_requested.connect(lambda name, source: from_emitted.append((name, source)))
+
+    _trigger_action(panel.new_branch_button.menu(), "New Branch From...")
+
+    assert plain_emitted == ["feature"]
+    assert from_emitted == []
+
+
+def test_new_branch_from_cancelled_source_picker_emits_nothing(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    monkeypatch.setattr("PyQt6.QtWidgets.QInputDialog.getItem", lambda *a, **k: ("", False))
+    emitted = []
+    panel.new_branch_from_requested.connect(lambda name, source: emitted.append((name, source)))
+
+    _trigger_action(panel.new_branch_button.menu(), "New Branch From...")
+
+    assert emitted == []
 
 
 def test_switching_the_branch_combo_emits_switch_branch_requested(panel: GitPanel, tmp_path: Path) -> None:
@@ -747,3 +908,21 @@ def test_commit_file_context_menu_open_file_emits_commit_open_file_requested(
     _trigger_action(menu, "Open File")
 
     assert emitted == [(sha, "Notes.txt")]
+
+
+def test_history_graph_widens_to_fill_a_wider_sidebar(panel: GitPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "history text is not always expanding with side panel" -- the graph used to stay
+    # pinned at its own fixed sizeHint() width regardless of how wide the sidebar actually was.
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    from PyQt6.QtWidgets import QApplication
+
+    assert panel._graph_scroll.widgetResizable() is True
+    narrow_width = panel.graph.width()
+
+    panel.resize(900, panel.height())
+    QApplication.processEvents()
+
+    assert panel.graph.width() > narrow_width
+    assert panel.graph.width() >= panel._graph_scroll.viewport().width()

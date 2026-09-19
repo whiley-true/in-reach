@@ -48,6 +48,84 @@ def test_init_with_a_stamp_message_stamps_the_first_snapshot(tmp_path: Path) -> 
     assert snapshot.stamp_message == "gametype init"
 
 
+def test_init_with_a_stamp_message_defaults_to_version_0_0_0(tmp_path: Path) -> None:
+    # PROMPT.md: "the init gametype should be get a version number of 0.0.0".
+    folder = _project(tmp_path)
+
+    vcs.init(folder, stamp_message="gametype init")
+
+    (snapshot,) = vcs.history(folder)
+    assert snapshot.version == "0.0.0"
+    assert snapshot.version == vcs.INITIAL_VERSION
+
+
+def test_init_with_a_stamp_message_and_explicit_none_version_has_no_version(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+
+    vcs.init(folder, stamp_message="gametype init", version=None)
+
+    (snapshot,) = vcs.history(folder)
+    assert snapshot.is_stamp is True
+    assert snapshot.version is None
+
+
+def test_stamp_with_a_version_records_it_on_the_snapshot(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    vcs.stamp(folder, "First release", version="1.2.3")
+
+    snapshot = vcs.history(folder)[0]
+    assert snapshot.version == "1.2.3"
+    assert snapshot.stamp_message == "First release"
+
+
+def test_stamp_without_a_version_leaves_it_none(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    vcs.stamp(folder, "First release")
+
+    snapshot = vcs.history(folder)[0]
+    assert snapshot.version is None
+    assert snapshot.stamp_message == "First release"
+
+
+def test_last_stamp_version_returns_the_most_recent_versioned_stamp(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder, stamp_message="gametype init")  # v0.0.0
+    vcs.stamp(folder, "second", version="0.1.0")
+    vcs.stamp(folder, "third", version="1.0.0")
+
+    assert vcs.last_stamp_version(folder) == "1.0.0"
+
+
+def test_last_stamp_version_is_none_with_no_versioned_stamp(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)  # plain "Initial commit" -- no stamp at all
+
+    assert vcs.last_stamp_version(folder) is None
+
+
+def test_version_already_stamped_true_for_a_used_version(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.stamp(folder, "First release", version="1.0.0")
+
+    assert vcs.version_already_stamped(folder, "1.0.0") is True
+    assert vcs.version_already_stamped(folder, "2.0.0") is False
+
+
+def test_version_already_stamped_checks_every_branch(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.stamp(folder, "feature release", version="1.0.0")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    assert vcs.version_already_stamped(folder, "1.0.0") is True
+
+
 def test_commit_raises_when_nothing_changed(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
@@ -658,6 +736,54 @@ def test_create_branch_rejects_an_empty_name(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         vcs.create_branch(folder, "  ")
+
+
+def test_create_branch_sanitizes_the_name(tmp_path: Path) -> None:
+    # PROMPT.md: "please make sure branches are saved non-capitalised and with only - or _ and no
+    # spaces or special chars".
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    created = vcs.create_branch(folder, "Fix Bug #42!")
+
+    assert created == "fix-bug-42"
+    assert vcs.current_branch(folder) == "fix-bug-42"
+
+
+def test_create_branch_rejects_a_name_that_sanitizes_to_empty(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    with pytest.raises(ValueError):
+        vcs.create_branch(folder, "!!!")
+
+
+def test_sanitize_branch_name_lowercases_collapses_whitespace_and_drops_special_chars() -> None:
+    assert vcs.sanitize_branch_name("  Fix Bug   #42! ") == "fix-bug-42"
+    assert vcs.sanitize_branch_name("already-ok_123") == "already-ok_123"
+
+
+def test_create_branch_with_a_source_branches_off_that_ref_instead_of_head(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    vcs.create_branch(folder, "from-feature", source="feature")
+
+    assert vcs.current_branch(folder) == "from-feature"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "feature content\n"
+
+
+def test_create_branch_with_an_unknown_source_raises(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    with pytest.raises(ValueError):
+        vcs.create_branch(folder, "feature", source="no-such-branch")
 
 
 def test_switch_branch_restores_files_from_that_branchs_last_snapshot(tmp_path: Path) -> None:

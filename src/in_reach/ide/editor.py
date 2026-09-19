@@ -498,6 +498,14 @@ class _PlainTextEditor(QPlainTextEdit):
             self.setFont(font)
         else:
             self.setFont(base_font)
+        # The gutter column's own width is a cached sizeHint(), only ever recomputed when
+        # _on_text_changed() (block count) fires -- a font-only change (the +10% enlarged-filename
+        # bump above, or a live zoom change re-applying it to an already-loaded tab) never touches
+        # the block count, so without this the gutter would keep painting the *new* (differently
+        # sized) font's digits inside the *old* font's column width, clipping them.
+        if self._line_number_area is not None:
+            self._line_number_area.updateGeometry()
+            self._line_number_area.update()
 
     def refresh_project_title(self) -> None:
         """Re-reads this tab's own ancestor project's title (see :func:`_find_project_title`) and
@@ -839,6 +847,12 @@ class _PlainTextEditor(QPlainTextEdit):
         needing to duplicate ``QPlainTextEdit``'s own line-wrapping/folding layout logic."""
         painter = QPainter(self._line_number_area)
         painter.fillRect(event.rect(), self.palette().color(QPalette.ColorRole.Base))
+        # _line_number_area is a QGridLayout-managed *sibling* of this editor, not a child of it
+        # (see this module's own docstring), so it never reliably inherits this editor's own font
+        # (e.g. the +10% ENLARGED_FILENAMES bump above) purely through Qt's normal parent-child
+        # font cascade -- painting explicitly with this editor's *own* current font is what keeps
+        # the gutter's line numbers the same size as the text they're numbering, always.
+        painter.setFont(self.font())
 
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()

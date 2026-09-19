@@ -1,6 +1,6 @@
-"""The far-left activity bar: nine reorderable icons at the top -- a compile/"Apply" action and
-eight sidebar-view toggles (Dashboard, Git, Scripts, Map Files, Documentation, Testing, LLM,
-Search), exactly one of whose views is ever active, switching the primary sidebar's content,
+"""The far-left activity bar: ten reorderable icons at the top -- a compile/"Apply" action and
+nine sidebar-view toggles (Dashboard, Search, Git, Scripts, Map Files, Documentation, Kanban,
+Testing, LLM), exactly one of whose views is ever active, switching the primary sidebar's content,
 VSCode-style: clicking the already-active one collapses the sidebar instead of switching -- then,
 pinned at the bottom: a flame status indicator (see :meth:`ActivityBar.set_halo_status`), a help
 icon (still a no-op), and a settings cog, which opens the Settings popout (see
@@ -21,7 +21,10 @@ pass (PROMPT.md: "we are removing locations, and rvt ... please add a button in 
 and View Compiled ... for Launch RVT") retired the RVT launcher icon here (see
 :mod:`in_reach.ide.explorer`'s own "Launch RVT" dashboard button instead) and the Locations toggle
 entirely, and reordered the remaining icons to compile, dashboard, git, scripts, maps, documentation,
-testing, llm, search -- see :data:`_DEFAULT_ORDER`.
+testing, llm, search. A later pass (PROMPT.md: "please move search magnifying glass to come under
+dashboard ... under documentation please add an icon for Kanban ... please move tests to come
+before llm") moved Search up under Dashboard, added a stubbed Kanban toggle right after
+Documentation, and moved Testing to sit directly ahead of LLM -- see :data:`_DEFAULT_ORDER`.
 """
 
 from __future__ import annotations
@@ -84,17 +87,21 @@ _STATUS_TOOLTIPS = {
 #: established internal name, see :data:`DEFAULT_VIEW`; "docs"/"ai" in that PROMPT.md quote are the
 #: existing "documentation"/"llm" keys, not a rename -- see this module's own docstring). A later
 #: PROMPT.md pass moved "documentation" below "testing": "move documention to come below testing in
-#: default order and in the top bar view".
+#: default order and in the top bar view". A further pass moved search up ("please move search
+#: magnifying glass to come under dashboard"), added a Kanban stub right after Documentation
+#: ("under documentation please add an icon for Kanban"), and moved Testing to sit directly ahead of
+#: LLM ("please move tests to come before llm").
 _DEFAULT_ORDER = (
     "compile",
     "explorer",
+    "search",
     "git",
     "scripts",
     "maps",
-    "testing",
     "documentation",
+    "kanban",
+    "testing",
     "llm",
-    "search",
 )
 ORDER_ENV_KEY = "ACTIVITY_BAR_ORDER"
 
@@ -580,6 +587,14 @@ class ActivityBar(QWidget):
         )
         self.documentation_button.clicked.connect(lambda: self._handle_click("documentation"))
 
+        # PROMPT.md: "under documentation please add an icon for Kanban, this should be stubbed
+        # for now" -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder
+        # view behind it (see MainWindow's own KanbanPanel wiring), same treatment as Git/Scripts.
+        self.kanban_button = _bar_button(
+            "kanban", "Kanban (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.kanban_button.clicked.connect(lambda: self._handle_click("kanban"))
+
         # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using a testube)"
         # -- a real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind
         # it (see MainWindow's own TestingPanel wiring), same treatment as Git/Scripts above.
@@ -612,6 +627,7 @@ class ActivityBar(QWidget):
             "git": self.git_button,
             "scripts": self.scripts_button,
             "documentation": self.documentation_button,
+            "kanban": self.kanban_button,
             "testing": self.testing_button,
             "maps": self.maps_button,
             "llm": self.llm_button,
@@ -628,6 +644,7 @@ class ActivityBar(QWidget):
                     "git": self.git_button,
                     "scripts": self.scripts_button,
                     "documentation": self.documentation_button,
+                    "kanban": self.kanban_button,
                     "testing": self.testing_button,
                     "maps": self.maps_button,
                     "llm": self.llm_button,

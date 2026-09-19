@@ -1077,6 +1077,35 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(qtbot, tmp_path) -> N
         app.setFont(original)
 
 
+def test_refresh_font_scale_regrows_the_gutter_column_for_the_new_font(qtbot, tmp_path) -> None:
+    # A font-only change (a live zoom change re-applying refresh_font_scale() to an already-loaded
+    # tab -- see MainWindow._adjust_zoom(), which calls this directly, with no set_path()/text
+    # change in between) never touches the block count, so line_number_area_width()'s own cached
+    # sizeHint() would otherwise go stale -- painting the *new* (bigger) font's digits inside the
+    # *old* font's (narrower) gutter column, clipping them. See editor.py's own refresh_font_scale().
+    from PyQt6.QtGui import QFont
+
+    editor = TextEditorWidget(path=tmp_path / "settings.json")  # already +10% enlarged
+    qtbot.addWidget(editor)
+    editor.setPlainText("\n".join(f"line {i}" for i in range(30)))
+    editor.show()
+    QApplication.processEvents()
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 3)
+        app.setFont(bigger)
+
+        editor.refresh_font_scale()  # exactly what MainWindow._adjust_zoom() calls
+        QApplication.processEvents()
+
+        assert editor._line_number_area.width() == editor.line_number_area_width()
+    finally:
+        app.setFont(original)
+
+
 # -- Tab key indentation (PROMPT.md: Quick Access Bar work -- "Indent using spaces") -------------
 
 

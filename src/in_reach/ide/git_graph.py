@@ -49,6 +49,36 @@ def _lane_color(lane: int) -> QColor:
     return QColor(_LANE_COLORS[lane % len(_LANE_COLORS)])
 
 
+def elide_row_text(
+    label: str, branches: list[str], *, metrics: QFontMetrics, text_x: int, sha_x: int
+) -> tuple[str, str]:
+    """``(label, branch_text)`` -- ``label`` elided (with a trailing "...") to fit the gap between
+    ``text_x`` and ``sha_x`` if it wouldn't otherwise, and ``branch_text`` (every entry of
+    ``branches``, formatted the same ``"[name]  [name]  ..."`` way :meth:`GitGraphWidget.paintEvent`
+    always has) similarly elided against whatever room is left *after* the label -- or dropped to
+    ``""`` outright if the label alone already used up the row.
+
+    PROMPT.md: "sometimes the text overlaps on one row" -- pulled out of ``paintEvent`` as a plain,
+    framework-free function (same "cheaply unit-testable without a live Qt event loop" reasoning
+    this module's own docstring already gives for :func:`compute_lanes`) so a long commit message
+    (or a pile of branch tags) can never run into the right-aligned sha text drawn at ``sha_x``,
+    however narrow the row's own available width actually is.
+    """
+    text_end_x = max(text_x, sha_x - _TEXT_GAP)
+    available = max(0, text_end_x - text_x)
+    elided_label = metrics.elidedText(label, Qt.TextElideMode.ElideRight, available)
+
+    if not branches or elided_label != label:
+        # Either there are no branch tags to show at all, or the label itself already had to be
+        # elided -- no room left in this row for anything more.
+        return elided_label, ""
+
+    branch_text = "  ".join(f"[{name}]" for name in sorted(branches))
+    branch_x = text_x + metrics.horizontalAdvance(label) + _TEXT_GAP
+    elided_branch_text = metrics.elidedText(branch_text, Qt.TextElideMode.ElideRight, max(0, text_end_x - branch_x))
+    return elided_label, elided_branch_text
+
+
 @dataclass
 class LaneRow:
     """One :class:`~in_reach.app.vcs.Snapshot`, positioned into the graph -- everything
@@ -230,18 +260,30 @@ class GitGraphWidget(QWidget):
 
             text_x = _LEFT_MARGIN + (max((r.active_lane_count for r in self._rows), default=1)) * _LANE_WIDTH + _TEXT_GAP
             label = row.snapshot.stamp_message if row.snapshot.is_stamp else row.snapshot.message
-            painter.setPen(text_color)
-            painter.drawText(text_x, center_y + metrics.ascent() // 2 - 1, label)
 
-            if row.snapshot.branches:
-                branch_text = "  ".join(f"[{name}]" for name in sorted(row.snapshot.branches))
-                branch_width = metrics.horizontalAdvance(label) + _TEXT_GAP
-                painter.setPen(QColor("#569CD6"))
-                painter.drawText(text_x + branch_width, center_y + metrics.ascent() // 2 - 1, branch_text)
-
+            # PROMPT.md: "sometimes the text overlaps on one row" -- the label/branch text used to
+            # be drawn at its own full natural width regardless of how much room was actually left
+            # before the right-aligned sha column, so a long commit message (or several branch tags
+            # on one commit) could run straight into it. elide_row_text() (see its own docstring)
+            # keeps every row's text inside its own lane, however narrow the panel gets -- computed
+            # from this row's *actual* self.width(), which now really does track the sidebar's own
+            # width (see the QScrollArea comment in git_panel.py).
             sha_text = row.snapshot.sha[:8]
+            sha_x = self.width() - metrics.horizontalAdvance(sha_text) - _LEFT_MARGIN
+            elided_label, elided_branch_text = elide_row_text(
+                label, row.snapshot.branches, metrics=metrics, text_x=text_x, sha_x=sha_x
+            )
+
+            painter.setPen(text_color)
+            painter.drawText(text_x, center_y + metrics.ascent() // 2 - 1, elided_label)
+
+            if elided_branch_text:
+                branch_x = text_x + metrics.horizontalAdvance(label) + _TEXT_GAP
+                painter.setPen(QColor("#569CD6"))
+                painter.drawText(branch_x, center_y + metrics.ascent() // 2 - 1, elided_branch_text)
+
             painter.setPen(muted_color)
-            painter.drawText(self.width() - metrics.horizontalAdvance(sha_text) - _LEFT_MARGIN, center_y + metrics.ascent() // 2 - 1, sha_text)
+            painter.drawText(sha_x, center_y + metrics.ascent() // 2 - 1, sha_text)
         painter.end()
 
     def _selection_color(self) -> QColor:

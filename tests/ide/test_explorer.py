@@ -31,6 +31,16 @@ def test_stats_progress_bar_has_no_border(panel: ExplorerPanel) -> None:
     assert "border: none" in panel.stats_progress.styleSheet()
 
 
+def test_progress_bars_are_smaller_than_fusions_own_default_height(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please in the dashboard make the progress bars a little smaller (they're a bit
+    # imposing at the moment)".
+    from in_reach.ide.explorer import _PROGRESS_BAR_HEIGHT
+
+    assert panel.stats_progress.height() == _PROGRESS_BAR_HEIGHT
+    assert panel.trigger_stat.progress.height() == _PROGRESS_BAR_HEIGHT
+    assert _PROGRESS_BAR_HEIGHT < 20  # meaningfully smaller than Fusion's own ~23px default
+
+
 def test_starts_with_no_project_placeholder_shown_and_boxes_hidden(panel: ExplorerPanel) -> None:
     assert panel._no_project_label.isVisible() is True
     assert panel.settings_section.isVisible() is False

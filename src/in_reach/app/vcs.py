@@ -44,6 +44,7 @@ share one history rather than two parallel mechanisms, both now requiring a real
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +62,17 @@ DEFAULT_BRANCH = "main"
 
 _AUTHOR = b"in-reach <in-reach@local>"
 _STAMP_PREFIX = "stamp: "
+#: PROMPT.md: "we also want to add the functionality for version numbers using major, minor, patch
+#: with stamped releases" -- a stamp's own version, when it has one, rides in the commit message
+#: itself (same "the commit log is already the one source of truth" reasoning this module's own
+#: docstring already gives for telling a stamp apart from a plain commit), as a
+#: ``"v{major}.{minor}.{patch} "`` prefix right after :data:`_STAMP_PREFIX`, ahead of the user's own
+#: message. Optional -- a stamp made before version tracking existed (or, today, one :func:`stamp`
+#: was called without a ``version``) simply has no version at all, see :attr:`Snapshot.version`.
+_VERSION_PREFIX_RE = re.compile(r"^v(\d+\.\d+\.\d+) (.*)$", re.DOTALL)
+
+#: PROMPT.md: "the init gametype should be get a version number of 0.0.0".
+INITIAL_VERSION = "0.0.0"
 
 
 @dataclass
@@ -70,9 +82,15 @@ class Snapshot:
     sha: str
     message: str
     at: float
-    #: The user's own message, with the ``"stamp: "`` prefix stripped -- ``None`` for a plain
-    #: commit.
+    #: The user's own message, with the ``"stamp: "`` prefix (and, if present, its own
+    #: ``"v{version}} "`` prefix -- see :attr:`version`) stripped -- ``None`` for a plain commit.
     stamp_message: str | None
+    #: This stamp's own ``"{major}.{minor}.{patch}"`` version number, if it was given one when
+    #: stamped (see :func:`stamp`'s own ``version`` argument) -- ``None`` for a plain commit, or a
+    #: stamp made without a version at all (every stamp made through the Git panel's own "Stamp
+    #: Release" dialog always has one; this stays optional so an older, pre-version-tracking stamp
+    #: still parses as a valid stamp rather than crashing on the missing prefix).
+    version: str | None = None
     #: Every parent commit's own sha (empty for the very first commit on a branch, more than one
     #: entry only for a merge -- this shadow VCS never actually merges branches today, but the field
     #: stays a list rather than ``str | None`` so :func:`graph_history`'s own topology data doesn't
@@ -111,7 +129,7 @@ def _branch_ref(name: str) -> bytes:
     return f"refs/heads/{name}".encode()
 
 
-def init(folder: Path, *, stamp_message: str | None = None) -> None:
+def init(folder: Path, *, stamp_message: str | None = None, version: str | None = INITIAL_VERSION) -> None:
     """Creates ``folder``'s shadow history repo and takes its first snapshot.
 
     PROMPT.md: "vcs should be started when a new blank project (either blank or from template)" --
@@ -126,6 +144,10 @@ def init(folder: Path, *, stamp_message: str | None = None) -> None:
             gametype is innited it should be stamped with commit 'gametype init'" --
             :func:`~in_reach.app.new_project.create_gametype_project` passes ``"gametype init"``
             here, the only real caller -- every other caller gets a plain ``"Initial commit"``.
+        version: The initial stamp's own version -- ignored unless ``stamp_message`` is also given.
+            Defaults to :data:`INITIAL_VERSION` (PROMPT.md: "the init gametype should be get a
+            version number of 0.0.0"), so every real caller gets one for free; pass ``None`` to
+            stamp without one (only ever done by tests exercising the pre-version-tracking shape).
 
     A no-op if ``folder`` already has a history repo (never re-initializes over one), or if there's
     nothing to snapshot yet (an empty ``folder``) -- same "no empty commits" rule as :func:`commit`.
@@ -142,7 +164,11 @@ def init(folder: Path, *, stamp_message: str | None = None) -> None:
     tree_sha = _build_tree(repo, _walk_files(folder))
     if tree_sha is None:
         return
-    message = f"{_STAMP_PREFIX}{stamp_message}" if stamp_message else "Initial commit"
+    if stamp_message:
+        version_prefix = f"v{version} " if version else ""
+        message = f"{_STAMP_PREFIX}{version_prefix}{stamp_message}"
+    else:
+        message = "Initial commit"
     sha = _commit(repo, tree_sha, message)
     _logger.info("initialized shadow VCS history for %s (%s, %r)", folder, sha, message)
 
@@ -286,23 +312,63 @@ def list_branches(folder: Path) -> list[str]:
     )
 
 
-def create_branch(folder: Path, name: str) -> None:
-    """Creates a new branch named ``name`` off the current one and switches to it (PROMPT.md:
-    "also ability to create a new branch") -- matching plain git's own ``checkout -b`` behavior
-    rather than leaving the user on their prior branch having to switch a second time.
+_BRANCH_NAME_DISALLOWED = re.compile(r"[^a-z0-9_-]+")
+
+
+def sanitize_branch_name(name: str) -> str:
+    """Normalizes a user-typed branch name to this shadow VCS's own naming rule (PROMPT.md: "please
+    make sure branches are saved non-capitalised and with only - or _ and no spaces or special
+    chars") -- lower-cased, with every run of whitespace collapsed to a single ``-`` and every
+    remaining character outside ``[a-z0-9_-]`` simply dropped (not replaced -- a name like
+    ``"Fix Bug #42!"`` becomes ``"fix-bug-42"``, not ``"fix-bug-42-"``). Applied by
+    :func:`create_branch` to every name it's given, so a branch can never be saved any other way,
+    regardless of which caller (typed by hand, or a future scripted one) asked for it.
+    """
+    lowered = name.strip().lower()
+    collapsed_whitespace = re.sub(r"\s+", "-", lowered)
+    return _BRANCH_NAME_DISALLOWED.sub("", collapsed_whitespace)
+
+
+def create_branch(folder: Path, name: str, *, source: str | None = None) -> str:
+    """Creates a new branch named ``name`` and switches to it (PROMPT.md: "also ability to create a
+    new branch") -- matching plain git's own ``checkout -b`` behavior rather than leaving the user
+    on their prior branch having to switch a second time. ``name`` is first run through
+    :func:`sanitize_branch_name`; the *sanitized* name is what's actually created (and returned).
+
+    Args:
+        source: A branch name or a :class:`Snapshot.sha` to branch off of instead of whatever's
+            currently checked out (PROMPT.md: "make new branch trigger a drop down also providing a
+            New Branch from option") -- ``None`` (the default) keeps the original "off the current
+            one" behavior.
+
+    Returns:
+        The sanitized branch name actually created.
 
     Raises:
-        ValueError: ``name`` is empty, or a branch by that name already exists.
+        ValueError: ``name`` sanitizes to empty, a branch by that (sanitized) name already exists,
+            or ``source`` is given but doesn't name a known branch or snapshot.
     """
-    if not name.strip():
+    sanitized = sanitize_branch_name(name)
+    if not sanitized:
         raise ValueError("Branch name cannot be empty.")
     repo = _open(folder)
-    ref = _branch_ref(name)
+    ref = _branch_ref(sanitized)
     if ref in repo.refs:
-        raise ValueError(f'A branch named "{name}" already exists.')
-    repo.refs[ref] = repo.refs[b"HEAD"]
+        raise ValueError(f'A branch named "{sanitized}" already exists.')
+    if source is None:
+        start_sha = repo.refs[b"HEAD"]
+    else:
+        start_sha = _resolve_ref(repo, source)
+        if start_sha is None:
+            raise ValueError(f'Unknown branch or snapshot: "{source}".')
+    repo.refs[ref] = start_sha
     repo.refs.set_symbolic_ref(b"HEAD", ref)
-    _logger.info("created and switched to branch %r in %s", name, folder)
+    if source is not None:
+        commit = repo.object_store[start_sha]
+        _checkout_tree(repo, commit.tree, folder)
+        _write_staged_paths(folder, set())
+    _logger.info("created and switched to branch %r (from %r) in %s", sanitized, source, folder)
+    return sanitized
 
 
 def switch_branch(folder: Path, name: str) -> None:
@@ -697,12 +763,18 @@ def commit(folder: Path, message: str) -> str:
     return sha
 
 
-def stamp(folder: Path, message: str) -> str:
+def stamp(folder: Path, message: str, *, version: str | None = None) -> str:
     """Snapshots ``folder``'s current on-disk state as a user-labelled release (PROMPT.md:
     "ability for a user to stamp a release (which takes a 'commit message')") -- always creates a
     commit, even if nothing changed since the last one, so a stamp always has its own addressable
     point in history to switch back to later regardless of whether anything was actually edited
     since (see :func:`commit`'s own docstring for the everyday, change-required counterpart).
+
+    Args:
+        version: This stamp's own ``"{major}.{minor}.{patch}"`` version number (PROMPT.md: "we also
+            want to add the functionality for version numbers using major, minor, patch with
+            stamped releases") -- ``None`` (the default) stamps without one, same as before version
+            tracking existed; the Git panel's own "Stamp Release" dialog always supplies one.
 
     Raises:
         ValueError: ``message`` is empty, or ``folder`` has no history yet.
@@ -718,22 +790,52 @@ def stamp(folder: Path, message: str) -> str:
         tree_sha = parent.tree if parent is not None else None
     if tree_sha is None:
         raise ValueError("Nothing to stamp -- this project has no trackable files yet.")
-    sha = _commit(repo, tree_sha, f"{_STAMP_PREFIX}{message}")
-    _logger.info("stamped %s in %s (%r)", sha, folder, message)
+    version_prefix = f"v{version} " if version else ""
+    sha = _commit(repo, tree_sha, f"{_STAMP_PREFIX}{version_prefix}{message}")
+    _logger.info("stamped %s in %s (v%s, %r)", sha, folder, version, message)
     return sha
 
 
 def _to_snapshot(commit_obj: Commit, *, parents: list[str] = (), branches: list[str] = ()) -> Snapshot:
     text = commit_obj.message.decode("utf-8")
-    stamp_message = text[len(_STAMP_PREFIX):] if text.startswith(_STAMP_PREFIX) else None
+    stamp_message: str | None = None
+    version: str | None = None
+    if text.startswith(_STAMP_PREFIX):
+        rest = text[len(_STAMP_PREFIX):]
+        version_match = _VERSION_PREFIX_RE.match(rest)
+        if version_match:
+            version, stamp_message = version_match.group(1), version_match.group(2)
+        else:
+            stamp_message = rest
     return Snapshot(
         sha=commit_obj.id.decode("ascii"),
         message=text,
         at=commit_obj.commit_time,
         stamp_message=stamp_message,
+        version=version,
         parents=list(parents),
         branches=list(branches),
     )
+
+
+def last_stamp_version(folder: Path) -> str | None:
+    """The most recent stamped release's own version number on the current branch (PROMPT.md:
+    "stamping a version should reveal spin buttons centered at the present number"), or ``None`` if
+    no stamp on this branch has one yet (no stamps at all, or every stamp so far predates version
+    tracking) -- callers wanting a sensible default to seed the version-bump UI with should fall
+    back to :data:`INITIAL_VERSION` themselves when this returns ``None``."""
+    for snapshot in history(folder):
+        if snapshot.is_stamp and snapshot.version:
+            return snapshot.version
+    return None
+
+
+def version_already_stamped(folder: Path, version: str) -> bool:
+    """Whether a stamped release with exactly this version already exists *anywhere* in history
+    (every branch, not just the current one -- a version number is meant to be unique across the
+    whole project, not per-branch) -- PROMPT.md: "if a user tries to submit the same version they
+    should receive a warning (asking if they want to overwrite)"."""
+    return any(s.is_stamp and s.version == version for s in graph_history(folder))
 
 
 def history(folder: Path) -> list[Snapshot]:

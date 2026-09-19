@@ -898,13 +898,14 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
     assert bar._icon_strip.order == [
         "compile",
         "explorer",
+        "search",
         "git",
         "scripts",
         "maps",
-        "testing",
         "documentation",
+        "kanban",
+        "testing",
         "llm",
-        "search",
     ]
 
 
@@ -918,10 +919,10 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts/testing/documentation/llm aren't named in the saved order at all -- appended
-    # after it, in their existing (default) relative order, same as any other icon added after a
-    # user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should be
-    # stuck to the top") -- it sorts to the front regardless of where the saved order put it.
+    # git/scripts/documentation/kanban/testing/llm aren't named in the saved order at all --
+    # appended after it, in their existing (default) relative order, same as any other icon added
+    # after a user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should
+    # be stuck to the top") -- it sorts to the front regardless of where the saved order put it.
     assert bar._icon_strip.order == [
         "compile",
         "search",
@@ -929,8 +930,9 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
         "maps",
         "git",
         "scripts",
-        "testing",
         "documentation",
+        "kanban",
+        "testing",
         "llm",
     ]
 
@@ -958,6 +960,7 @@ def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path
         "git",
         "scripts",
         "documentation",
+        "kanban",
         "testing",
         "maps",
         "llm",
@@ -1497,6 +1500,51 @@ def test_opening_a_different_project_terminates_the_previous_ones_rvt_process(
     assert folder_a not in project_window._rvt_processes
 
 
+def test_closing_the_window_terminates_its_own_running_rvt_process(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "also when closing a window with an open rvt, any rvt windows should be closed".
+    from in_reach.app import rvt_launcher
+
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    process = _FakeRvtProcess()
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
+    project_window.launch_rvt()
+    assert project_window._rvt_processes[folder] is process
+
+    project_window.close()
+
+    assert process.terminated is True
+    assert project_window._rvt_processes == {}
+
+
+def test_closing_the_window_terminates_every_tracked_rvt_process(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # More than one project's own RVT process can still be tracked at once (see
+    # test_opening_a_different_project_terminates_the_previous_ones_rvt_process's own docstring for
+    # why that's rare in practice -- this is a belt-and-suspenders check that closeEvent() sweeps
+    # the whole dict, not just whatever the *active* project happens to be).
+    folder_a = tmp_path / "project-a"
+    folder_b = tmp_path / "project-b"
+    process_a = _FakeRvtProcess()
+    process_b = _FakeRvtProcess()
+    project_window._rvt_processes[folder_a] = process_a
+    project_window._rvt_processes[folder_b] = process_b
+
+    project_window.close()
+
+    assert process_a.terminated is True
+    assert process_b.terminated is True
+    assert project_window._rvt_processes == {}
+
+
+def test_closing_the_window_with_no_rvt_launched_is_a_no_op(window: MainWindow) -> None:
+    window.close()  # should not raise
+
+
 # -- Apply --------------------------------------------------------------------------------------
 
 
@@ -1807,14 +1855,41 @@ def test_vcs_stamp_creates_a_labelled_snapshot_and_refreshes_the_ui(
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
 
-    project_window.vcs_stamp("First release")
+    project_window.vcs_stamp("First release", "1.2.3")
 
     assert vcs.last_stamp(folder).stamp_message == "First release"
+    assert vcs.last_stamp(folder).version == "1.2.3"
     assert "First release" in project_window.status_bar.vcs_label.text()
 
 
 def test_vcs_stamp_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
-    window.vcs_stamp("First release")  # should not raise
+    window.vcs_stamp("First release", "1.0.0")  # should not raise
+
+
+def test_git_panels_stamp_button_tracks_the_apply_buttons_enabled_state(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "it also should not be possible to stamp a non compiled gametype" -- "compiled"
+    # means the same "settings/ has nothing left for Apply to pick up" state the Apply button's own
+    # enabled-ness already tracks.
+    from in_reach.app import vcs
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 1}', encoding="utf-8")
+    vcs.init(folder)
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+    assert project_window.git_panel.stamp_button.isEnabled() is True
+
+    settings_path = folder / "settings" / "settings.json"
+    settings_path.write_text('{"a": 2}', encoding="utf-8")
+    project_window._on_file_saved(settings_path)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is True
+    assert project_window.git_panel.stamp_button.isEnabled() is False
 
 
 def test_vcs_new_branch_switches_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
@@ -1841,6 +1916,30 @@ def test_vcs_new_branch_reports_a_duplicate_name_rather_than_crashing(
     project_window.vcs_new_branch("feature")
 
     assert len(errors) == 1
+
+
+def test_vcs_new_branch_from_branches_off_the_given_source_not_head(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please make new branch trigger a drop down also providing a New Branch from
+    # option".
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    project_window.vcs_new_branch_from("from-feature", "feature")
+
+    assert vcs.current_branch(folder) == "from-feature"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "feature content\n"
+    assert project_window.git_panel.branch_combo.currentText() == "from-feature"
+
+
+def test_vcs_new_branch_from_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_new_branch_from("feature", "main")  # should not raise
 
 
 def test_vcs_switch_branch_reloads_a_clean_open_tab_from_disk(project_window: MainWindow, tmp_path: Path) -> None:
@@ -2016,26 +2115,25 @@ def test_commit_command_does_nothing_when_cancelled(
 def test_stamp_release_command_prompts_and_stamps(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from PyQt6.QtWidgets import QInputDialog
-
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("v1.0", True)))
+    monkeypatch.setattr(
+        project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch: ("v1.0", "1.0.0")
+    )
 
     commands = project_window.build_command_palette_commands()
     next(c for c in commands if c.label == "Stamp Release").action()
 
     assert vcs.last_stamp(folder).stamp_message == "v1.0"
+    assert vcs.last_stamp(folder).version == "1.0.0"
 
 
 def test_stamp_release_command_does_nothing_when_cancelled(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from PyQt6.QtWidgets import QInputDialog
-
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch: None)
 
     commands = project_window.build_command_palette_commands()
     next(c for c in commands if c.label == "Stamp Release").action()
@@ -4555,6 +4653,21 @@ def test_documentation_button_switches_the_sidebar_to_its_own_panel(
     assert project_window.activity_bar.documentation_button.isChecked() is True
 
 
+def test_kanban_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "under documentation please add an icon for Kanban, this should be stubbed for
+    # now (please add entry into view)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.kanban_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.kanban_panel
+    assert project_window.activity_bar.kanban_button.isChecked() is True
+
+
 def test_maps_button_switches_the_sidebar_to_its_own_panel(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
@@ -4808,7 +4921,11 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
     # logs" -- "compile"/"rvt" aren't real sidebar views (Apply is a plain action, and RVT moved to
     # the Dashboard's own button row, see explorer.py), so they're not menu entries here. A later
     # PROMPT.md pass moved "Documentation" below "Testing" ("move documention to come below testing
-    # in default order and in the top bar view").
+    # in default order and in the top bar view"). A further pass ("please move search magnifying
+    # glass to come under dashboard ... and move in view topbar tap"; "under documentation please
+    # add an icon for Kanban ... please move tests to come before llm (and re-arrange order in
+    # view)") moved Search up under Dashboard, added Kanban right after Documentation, and moved
+    # Testing to sit directly ahead of LLM.
     menu = project_window.top_bar.view_menu_button.menu()
     top_level = [action.text() for action in menu.actions() if not action.isSeparator()]
 
@@ -4816,13 +4933,14 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
         "Command Palette",
         "Appearance",
         "Dashboard",
+        "Search",
         "Git",
         "Scripts",
         "Map Files",
-        "Testing",
         "Documentation",
+        "Kanban",
+        "Testing",
         "LLM",
-        "Search",
         "View Logs",
     ]
     command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")

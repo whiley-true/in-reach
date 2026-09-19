@@ -13,7 +13,15 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer, QUrl
-from PyQt6.QtGui import QDesktopServices, QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
+from PyQt6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QKeySequence,
+    QMouseEvent,
+    QPalette,
+    QShortcut,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -49,6 +57,7 @@ from in_reach.ide.documentation_panel import DocumentationPanel
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
+from in_reach.ide.kanban_panel import KanbanPanel
 from in_reach.ide.llm_panel import LlmPanel
 from in_reach.ide.maps_panel import MapsPanel
 from in_reach.ide.quick_access import Command, QuickAccessBar
@@ -156,6 +165,7 @@ _VIEW_DISPLAY_NAMES = {
     "git": "Git",
     "scripts": "Scripts",
     "documentation": "Documentation",
+    "kanban": "Kanban",
     "testing": "Testing",
     "maps": "Map Files",
     "llm": "LLM",
@@ -314,16 +324,22 @@ class _ViewMenuButton(QToolButton):
 
         # PROMPT.md's own re-ordering, keyed to activity_bar.py's own button attributes -- "docs"/
         # "ai" there are the existing Documentation/LLM entries, not a rename (see activity_bar.py's
-        # own module docstring).
+        # own module docstring). A later pass ("please move search magnifying glass to come under
+        # dashboard ... and move in view topbar tap"; "under documentation please add an icon for
+        # Kanban ... and finally please move tests to come before llm (and re-arrange order in
+        # view)") moved Search up under Dashboard, added Kanban right after Documentation, and
+        # moved Testing to sit directly ahead of LLM -- kept in sync with activity_bar.py's own
+        # _DEFAULT_ORDER.
         panel_buttons = (
             ("Dashboard", "explorer_button"),
+            ("Search", "search_button"),
             ("Git", "git_button"),
             ("Scripts", "scripts_button"),
             ("Map Files", "maps_button"),
-            ("Testing", "testing_button"),
             ("Documentation", "documentation_button"),
+            ("Kanban", "kanban_button"),
+            ("Testing", "testing_button"),
             ("LLM", "llm_button"),
-            ("Search", "search_button"),
         )
         for label, attr in panel_buttons:
             menu.addAction(label, lambda _checked=False, a=attr: getattr(window.activity_bar, a).click())
@@ -679,6 +695,7 @@ class MainWindow(QWidget):
         self.git_panel.commit_requested.connect(self.vcs_commit)
         self.git_panel.stamp_requested.connect(self.vcs_stamp)
         self.git_panel.new_branch_requested.connect(self.vcs_new_branch)
+        self.git_panel.new_branch_from_requested.connect(self.vcs_new_branch_from)
         self.git_panel.switch_branch_requested.connect(self.vcs_switch_branch)
         self.git_panel.delete_branch_requested.connect(self.vcs_delete_branch)
         self.git_panel.merge_branch_requested.connect(self.vcs_merge_branch)
@@ -838,6 +855,7 @@ class MainWindow(QWidget):
         self.git_panel = GitPanel()
         self.scripts_panel = ScriptsPanel()
         self.documentation_panel = DocumentationPanel()
+        self.kanban_panel = KanbanPanel()
         self.testing_panel = TestingPanel()
         self.maps_panel = MapsPanel()
         self.llm_panel = LlmPanel()
@@ -846,6 +864,7 @@ class MainWindow(QWidget):
             "git": self.git_panel,
             "scripts": self.scripts_panel,
             "documentation": self.documentation_panel,
+            "kanban": self.kanban_panel,
             "testing": self.testing_panel,
             "maps": self.maps_panel,
             "llm": self.llm_panel,
@@ -1124,11 +1143,13 @@ class MainWindow(QWidget):
             self.vcs_commit(message.strip())
 
     def _vcs_stamp_via_dialog(self) -> None:
-        from PyQt6.QtWidgets import QInputDialog
-
-        message, ok = QInputDialog.getText(self, "Stamp Release", "Commit message:")
-        if ok and message.strip():
-            self.vcs_stamp(message.strip())
+        """"Stamp Release" (the command palette's own entry) -- reuses the Git panel's own
+        "Stamp Release" button wholesale (its click handler owns the version-bump dialog, the
+        duplicate-version warning, and -- being a real ``QPushButton.click()`` -- naturally becomes
+        a no-op if the button is currently disabled, i.e. the active gametype isn't compiled yet;
+        PROMPT.md: "it also should not be possible to stamp a non compiled gametype") rather than
+        re-implementing any of that here."""
+        self.git_panel.stamp_button.click()
 
     def _vcs_new_branch_via_dialog(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -1686,6 +1707,18 @@ class MainWindow(QWidget):
         if process is not None and process.poll() is None:
             process.terminate()
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """PROMPT.md: "also when closing a window with an open rvt, any rvt windows should be
+        closed" -- extends :meth:`_close_rvt_for_project`'s own "closing a project closes its own
+        RVT" rule to the whole window: closing this window (File > Close Window, the OS close
+        button, or quitting the app) terminates *every* RVT process it ever launched (one per
+        project folder it had open, see :attr:`_rvt_processes`), not just the currently active
+        project's own. ``list(...)`` -- :meth:`_close_rvt_for_project` mutates
+        :attr:`_rvt_processes` as it goes, which would otherwise raise iterating the dict live."""
+        for folder in list(self._rvt_processes):
+            self._close_rvt_for_project(folder)
+        super().closeEvent(event)
+
     def _current_project_bin(self) -> Path | None:
         folder = self.explorer_panel.current_folder
         if folder is None:
@@ -1752,6 +1785,11 @@ class MainWindow(QWidget):
 
         enabled = folder is not None and apply_settings.settings_have_unapplied_changes(folder)
         self.activity_bar.set_apply_enabled(enabled)
+        # PROMPT.md: "it also should not be possible to stamp a non compiled gametype" -- "compiled"
+        # here means the same "settings/ has nothing Apply would still need to pick up" state the
+        # Apply button's own enabled-ness already tracks, just inverted (Apply is enabled exactly
+        # when there's still something *to* apply).
+        self.git_panel.set_stamp_enabled(not enabled)
 
     def _on_file_saved(self, path: Path) -> None:
         """Re-checks the Apply button's enabled state whenever a file is saved -- PROMPT.md: Apply
@@ -1890,20 +1928,22 @@ class MainWindow(QWidget):
             return "commit"
         return "cancel"
 
-    def vcs_stamp(self, message: str) -> None:
+    def vcs_stamp(self, message: str, version: str) -> None:
         """"Stamp Release" (the Git panel's own button) -- PROMPT.md: "ability for a user to stamp
-        a release (which takes a 'commit message')". A no-op with no project open."""
+        a release (which takes a 'commit message')"; a later pass added the ``version`` argument
+        ("we also want to add the functionality for version numbers using major, minor, patch with
+        stamped releases"). A no-op with no project open."""
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
         from in_reach.app import vcs
 
         try:
-            vcs.stamp(folder, message)
+            vcs.stamp(folder, message, version=version)
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
-        _logger.info("stamped release %r for %s", message, folder)
+        _logger.info("stamped release %r (v%s) for %s", message, version, folder)
         self._refresh_vcs_status(folder)
 
     def vcs_new_branch(self, name: str) -> None:
@@ -1915,11 +1955,53 @@ class MainWindow(QWidget):
         from in_reach.app import vcs
 
         try:
-            vcs.create_branch(folder, name)
+            created = vcs.create_branch(folder, name)
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
-        _logger.info("created branch %r for %s", name, folder)
+        _logger.info("created branch %r for %s", created, folder)
+        self._refresh_vcs_status(folder)
+
+    def vcs_new_branch_from(self, name: str, source: str) -> None:
+        """"New Branch From..." (the Git panel's own New Branch dropdown, PROMPT.md: "please make
+        new branch trigger a drop down also providing a New Branch from option") -- branches off
+        ``source`` (a branch name or a stamp's own sha) instead of whatever's currently checked out.
+        Unlike the plain "New Branch" above, this checks out ``source``'s own tree, so it carries
+        the same overwrite risk as :meth:`vcs_switch_branch` -- same dirty-tab/uncommitted-changes
+        confirmation flow, reused wholesale rather than duplicated. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_switch_branch_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return
+                try:
+                    vcs.stage_all(folder)
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to create_branch() below, which checks out
+            # `source`'s own tree -- that overwrite *is* the discard.
+
+        try:
+            created = vcs.create_branch(folder, name, source=source)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("created branch %r from %r for %s", created, source, folder)
+        self.main_panel.reload_open_tabs_under(folder)
         self._refresh_vcs_status(folder)
 
     def vcs_switch_branch(self, name: str) -> None:

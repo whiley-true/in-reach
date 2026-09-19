@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -61,10 +62,17 @@ class GitPanel(QWidget):
     #: changes should require a commit message") -- the everyday checkpoint action, distinct from
     #: :attr:`stamp_requested` below.
     commit_requested = pyqtSignal(str)
-    #: Emitted with the user's typed message when "Stamp Release" is confirmed.
-    stamp_requested = pyqtSignal(str)
+    #: Emitted with ``(message, version)`` when "Stamp Release" is confirmed -- ``version`` is
+    #: always a ``"{major}.{minor}.{patch}"`` string (PROMPT.md: "we also want to add the
+    #: functionality for version numbers using major, minor, patch with stamped releases").
+    stamp_requested = pyqtSignal(str, str)
     #: Emitted with the user's typed name when "New Branch" is confirmed.
     new_branch_requested = pyqtSignal(str)
+    #: Emitted with ``(name, source)`` when "New Branch From..." is confirmed -- ``source`` is
+    #: either a branch name or a stamp's own sha, same convention as :attr:`compare_requested`
+    #: (PROMPT.md: "please make new branch trigger a drop down also providing a New Branch from
+    #: option").
+    new_branch_from_requested = pyqtSignal(str, str)
     #: Emitted with the newly picked branch name when the branch combo's selection changes to a
     #: branch other than the currently checked-out one.
     switch_branch_requested = pyqtSignal(str)
@@ -133,6 +141,17 @@ class GitPanel(QWidget):
         #: cross-checks a fetch against (see its own docstring) and the "Files Changed" list's own
         #: click/context-menu handlers act on.
         self._selected_commit_sha: str | None = None
+        #: Whether the active project's ``settings/`` has already been compiled with no changes
+        #: since (PROMPT.md: "it also should not be possible to stamp a non compiled gametype") --
+        #: set by :meth:`set_stamp_enabled` (MainWindow calls it alongside the activity bar's own
+        #: Apply-enabled state, see ``MainWindow._refresh_apply_enabled``), and combined with
+        #: ``has_history`` inside :meth:`refresh` to decide whether :attr:`stamp_button` is
+        #: actually clickable. Defaults to ``True`` so a panel nobody's ever called this on (most
+        #: tests) doesn't spuriously disable stamping.
+        self._compiled = True
+        #: Mirrors :meth:`refresh`'s own ``has_history`` -- cached so :meth:`set_stamp_enabled` can
+        #: recombine it with a fresh ``_compiled`` value without needing a full :meth:`refresh`.
+        self._has_history = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -155,9 +174,18 @@ class GitPanel(QWidget):
         self._suppress_branch_signal = False
         self.branch_combo.currentTextChanged.connect(self._on_branch_combo_changed)
         branch_row.addWidget(self.branch_combo, 1)
-        self.new_branch_button = QPushButton("New Branch")
+        # PROMPT.md: "please make new branch trigger a drop down also providing a New Branch from
+        # option (if not use present)" -- a dropdown (not a plain click) offering the original
+        # "branch off whatever's currently checked out" behavior alongside a new "New Branch
+        # From..." option that lets the user pick a specific source branch or stamp instead.
+        self.new_branch_button = QToolButton()
+        self.new_branch_button.setText("New Branch")
         self.new_branch_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.new_branch_button.clicked.connect(self._on_new_branch_clicked)
+        self.new_branch_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        new_branch_menu = QMenu(self.new_branch_button)
+        new_branch_menu.addAction("New Branch", self._on_new_branch_clicked)
+        new_branch_menu.addAction("New Branch From...", self._on_new_branch_from_clicked)
+        self.new_branch_button.setMenu(new_branch_menu)
         branch_row.addWidget(self.new_branch_button)
         self.delete_branch_button = QPushButton("Delete Branch")
         self.delete_branch_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -292,7 +320,14 @@ class GitPanel(QWidget):
         self.graph.snapshot_selected.connect(self._on_graph_selection_changed)
         self._graph_scroll = QScrollArea()
         self._graph_scroll.setWidget(self.graph)
-        self._graph_scroll.setWidgetResizable(False)
+        # PROMPT.md: "history text is not always expanding with side panel" -- False here used to
+        # pin the graph at its own fixed sizeHint() width forever, so widening the sidebar just left
+        # blank space instead of giving the text column more room (see GitGraphWidget's own
+        # paintEvent, which sizes/elides its text against self.width() -- whatever width the widget
+        # actually ends up with). True lets a QScrollArea stretch its child up to fill a wider
+        # viewport (never below the graph's own setMinimumWidth() -- see _update_geometry -- so a
+        # graph with many lanes/long text still scrolls horizontally exactly as before).
+        self._graph_scroll.setWidgetResizable(True)
         self._graph_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         history_layout.addWidget(self._graph_scroll, 1)
         self.restore_button = QPushButton("Restore Selected")
@@ -340,6 +375,23 @@ class GitPanel(QWidget):
         self.current_folder = folder
         self.refresh()
 
+    def set_stamp_enabled(self, compiled: bool) -> None:
+        """Whether the active project is currently compiled (PROMPT.md: "it also should not be
+        possible to stamp a non compiled gametype") -- called by MainWindow alongside the activity
+        bar's own Apply-enabled state (see ``MainWindow._refresh_apply_enabled``), so this can never
+        disagree with what the Apply button itself is showing. Combined with whether the project has
+        history at all to decide :attr:`stamp_button`'s real enabled state."""
+        self._compiled = compiled
+        self._update_stamp_enabled(self._has_history)
+
+    def _update_stamp_enabled(self, has_history: bool) -> None:
+        self._has_history = has_history
+        enabled = has_history and self._compiled
+        self.stamp_button.setEnabled(enabled)
+        self.stamp_button.setToolTip(
+            "" if self._compiled else "Compile (Apply) this gametype before stamping a release."
+        )
+
     def refresh(self) -> None:
         """Re-reads :attr:`current_folder`'s own branch list/current branch/uncommitted changes/
         graph from :mod:`in_reach.app.vcs` -- called on activation, and again by MainWindow after
@@ -356,7 +408,7 @@ class GitPanel(QWidget):
         self.changes_list.setVisible(has_history)
         self.commit_message_edit.setEnabled(has_history)
         self.release_section.setVisible(has_history)
-        self.stamp_button.setEnabled(has_history)
+        self._update_stamp_enabled(has_history)
         self.compare_section.setVisible(has_history)
         self.compare_a_type_combo.setEnabled(has_history)
         self.compare_b_type_combo.setEnabled(has_history)
@@ -503,14 +555,90 @@ class GitPanel(QWidget):
         self.commit_message_edit.clear()
 
     def _on_stamp_clicked(self) -> None:
-        message = self._ask_text("Stamp Release", "Commit message:")
-        if message:
-            self.stamp_requested.emit(message)
+        if self.current_folder is None:
+            return
+        current_version = vcs.last_stamp_version(self.current_folder) or vcs.INITIAL_VERSION
+        major, minor, patch = (int(part) for part in current_version.split("."))
+        result = self._ask_stamp_release(major, minor, patch)
+        if result is None:
+            return
+        message, version = result
+        if vcs.version_already_stamped(self.current_folder, version) and not self._confirm_duplicate_version(
+            version
+        ):
+            return
+        self.stamp_requested.emit(message, version)
+
+    def _ask_stamp_release(self, major: int, minor: int, patch: int) -> tuple[str, str] | None:
+        """Shows the "Stamp Release" dialog (message + major/minor/patch spin boxes seeded from the
+        project's current version) and returns ``(message, version)`` if confirmed with a non-empty
+        message, ``None`` otherwise -- kept as its own method purely as a test seam, same reasoning
+        as :meth:`_ask_text`."""
+        from in_reach.ide.stamp_release_dialog import StampReleaseDialog
+
+        dialog = StampReleaseDialog(major, minor, patch, self)
+        if dialog.exec() != StampReleaseDialog.DialogCode.Accepted:
+            return None
+        message = dialog.message()
+        if not message:
+            return None
+        return message, dialog.version()
+
+    def _confirm_duplicate_version(self, version: str) -> bool:
+        """Asks whether to stamp anyway when ``version`` has already been used by a past stamp
+        (PROMPT.md: "if a user tries to submit the same version they should receive a warning
+        (asking if they want to overwrite)") -- kept as its own method purely as a test seam, same
+        reasoning as :meth:`_ask_text`.
+
+        Returns:
+            ``True`` for "Stamp Anyway", ``False`` for "Cancel".
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        choice = QMessageBox.warning(
+            self,
+            "in-reach",
+            f'Version "{version}" has already been stamped. Stamp anyway?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return choice == QMessageBox.StandardButton.Yes
 
     def _on_new_branch_clicked(self) -> None:
         name = self._ask_text("New Branch", "Branch name:")
         if name:
             self.new_branch_requested.emit(name)
+
+    def _source_ref_choices(self) -> dict[str, str]:
+        """Every branch/stamp :meth:`_on_new_branch_from_clicked` can offer as a source, keyed by
+        its own display text (a plain branch name, or ``"Stamp: <message>"``, same convention as
+        :meth:`_populate_compare_combo`) to its real ref value (a branch name or a stamp's sha)."""
+        choices: dict[str, str] = {branch: branch for branch in self._branches}
+        for snapshot in self._snapshots:
+            if snapshot.is_stamp:
+                choices[f"{_STAMP_LABEL_PREFIX}{snapshot.stamp_message}"] = snapshot.sha
+        return choices
+
+    def _on_new_branch_from_clicked(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        choices = self._source_ref_choices()
+        if not choices:
+            return
+        current = vcs.current_branch(self.current_folder) if self.current_folder is not None else None
+        display, ok = QInputDialog.getItem(
+            self, "New Branch From", "Source branch or stamp:", list(choices), 0, False
+        )
+        if not ok or not display:
+            return
+        name = self._ask_text("New Branch From", "Branch name:")
+        if not name:
+            return
+        source = choices[display]
+        if source == current:
+            self.new_branch_requested.emit(name)  # plain "from current" -- no need for the source
+        else:
+            self.new_branch_from_requested.emit(name, source)
 
     def _on_delete_branch_clicked(self) -> None:
         name = self.branch_combo.currentText()
