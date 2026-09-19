@@ -11,15 +11,19 @@ snapshot always reflects exactly what a user would see in the Explorer right now
 separately-tracked copy of file *content* the way a real git index/working-tree checkout is.
 
 There *is* a real staging area now (PROMPT.md, a later VSCode-style pass: "please then make it so
-that changes should be staged, and then committed") -- just not git's own on-disk index format: a
-plain JSON list of staged paths (see :func:`staged_paths`/:func:`stage`/:func:`unstage`, persisted
-as ``stage.json`` next to this shadow repo itself) that :func:`commit` cross-references against
-:func:`uncommitted_changes` at commit time. A staged path's *content* is never separately captured
-the way git's own index captures a blob at ``add`` time -- :func:`commit` always reads whatever's on
-disk for a staged path at commit time, so staging a file and then editing it again before committing
-just commits the latest edit, same as ``git add`` followed by another edit before ``git commit``
-would need a second ``git add`` to pick up (this shadow VCS has no notion of "add" being a snapshot
-of content at that moment, only "this path is included in the next commit").
+that changes should be staged, and then committed") -- and, unlike this module's own original design,
+it now matches git's own index semantics exactly (PROMPT.md, a further pass: "when a change is
+staged is essentially snapshotted"): :func:`stage` writes each staged path's *current* on-disk
+content into this shadow repo's own object store as a real blob right then, and records that blob's
+sha (not the path alone) in ``stage.json`` (see :func:`_read_staged_snapshot`/
+:func:`_write_staged_snapshot`, persisted next to this shadow repo itself). :func:`commit` builds its
+tree from that recorded snapshot, never by re-reading disk -- editing a staged file again afterward
+never silently changes what's about to be committed; the edit just becomes a new, separate
+uncommitted change on top of the snapshot, so the same path can appear in :func:`uncommitted_changes`
+*twice* at once (a staged entry, frozen at the snapshot, and an unstaged entry for the further edit),
+same as VSCode's own split "Staged Changes"/"Changes" lists. Staging an already-staged path again
+simply overwrites its recorded snapshot with the current on-disk content, same as a second
+``git add`` would.
 
 PROMPT.md (a later pass): "we also want our vcs functionality to better match vscode
 functionality[;] so we want to add committed changes and uncommitted changes ... committing changes
@@ -366,7 +370,7 @@ def create_branch(folder: Path, name: str, *, source: str | None = None) -> str:
     if source is not None:
         commit = repo.object_store[start_sha]
         _checkout_tree(repo, commit.tree, folder)
-        _write_staged_paths(folder, set())
+        _write_staged_snapshot(folder, {})
     _logger.info("created and switched to branch %r (from %r) in %s", sanitized, source, folder)
     return sanitized
 
@@ -392,7 +396,7 @@ def switch_branch(folder: Path, name: str) -> None:
     commit = repo.object_store[repo.refs[ref]]
     _checkout_tree(repo, commit.tree, folder)
     repo.refs.set_symbolic_ref(b"HEAD", ref)
-    _write_staged_paths(folder, set())
+    _write_staged_snapshot(folder, {})
     _logger.info("switched branch to %r in %s", name, folder)
 
 
@@ -481,7 +485,7 @@ def merge_branch(folder: Path, source: str) -> str:
         commit_obj = repo.object_store[theirs_sha]
         _checkout_tree(repo, commit_obj.tree, folder)
         repo.refs[_current_branch_ref(repo)] = theirs_sha
-        _write_staged_paths(folder, set())
+        _write_staged_snapshot(folder, {})
         _logger.info("fast-forwarded %r to %r in %s", current, source, folder)
         return theirs_sha.decode("ascii")
 
@@ -499,7 +503,7 @@ def merge_branch(folder: Path, source: str) -> str:
     repo.object_store.add_object(merged_tree)
     sha = _commit(repo, merged_tree.id, f"Merge branch '{source}' into {current}", extra_parents=[theirs_sha])
     _checkout_tree(repo, merged_tree.id, folder)
-    _write_staged_paths(folder, set())
+    _write_staged_snapshot(folder, {})
     _logger.info("merged %r into %r in %s (%s)", source, current, folder, sha)
     return sha
 
@@ -548,44 +552,72 @@ def _stage_file(folder: Path) -> Path:
     return history_dir(folder) / _STAGE_FILENAME
 
 
-def staged_paths(folder: Path) -> set[str]:
-    """The raw, persisted staging list -- every path :func:`stage` has ever added and
-    :func:`unstage`/:func:`commit` hasn't since removed. Not pruned against what's *actually*
-    still uncommitted (a path staged and then hand-reverted back to match ``HEAD`` stays listed
-    here until something explicitly unstages it) -- callers that care whether a staged path is
-    still real should cross-reference :func:`uncommitted_changes` instead, which already does that
-    (see its own ``staged`` field)."""
+def _read_staged_snapshot(folder: Path) -> dict[str, str | None]:
+    """The raw, persisted staging area -- every staged path's own snapshot, keyed by path, each
+    value either a blob's own hex sha (the path's content *at the moment it was staged*) or ``None``
+    for a staged deletion. Not pruned against what's *actually* still uncommitted (a path staged and
+    then hand-reverted back to match ``HEAD`` stays listed here until something explicitly unstages
+    it) -- callers that care whether a staged path is still real should cross-reference
+    :func:`uncommitted_changes` instead, which already does that (see its own ``staged`` field)."""
     try:
-        return set(json.loads(_stage_file(folder).read_text(encoding="utf-8")))
+        raw = json.loads(_stage_file(folder).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return set()
+        return {}
+    return dict(raw)
 
 
-def _write_staged_paths(folder: Path, paths: set[str]) -> None:
-    _stage_file(folder).write_text(json.dumps(sorted(paths)), encoding="utf-8")
+def _write_staged_snapshot(folder: Path, snapshot: dict[str, str | None]) -> None:
+    _stage_file(folder).write_text(json.dumps(snapshot, sort_keys=True), encoding="utf-8")
+
+
+def staged_paths(folder: Path) -> set[str]:
+    """Every path currently staged, regardless of its own snapshot content -- a plain convenience
+    view over :func:`_read_staged_snapshot` for callers that only care *which* paths are staged, not
+    what they're staged at."""
+    return set(_read_staged_snapshot(folder))
 
 
 def stage(folder: Path, paths: list[str]) -> None:
-    """Adds ``paths`` to the staging area -- PROMPT.md: "in the changes it should be possible to
-    right click the file and then see: ... stage changes (or unstage changes)". A no-op for a path
-    already staged; never validates ``paths`` are actually uncommitted (staging a path that isn't
-    is harmless -- :func:`commit` only ever acts on the intersection of staged and truly-uncommitted
-    paths, see its own docstring)."""
-    current = staged_paths(folder)
-    current.update(paths)
-    _write_staged_paths(folder, current)
+    """Stages ``paths`` -- PROMPT.md: "in the changes it should be possible to right click the file
+    and then see: ... stage changes (or unstage changes)". Snapshots each path's *current* on-disk
+    content into this shadow repo's own object store right now (PROMPT.md, a later pass: "when a
+    change is staged is essentially snapshotted") -- a further on-disk edit after staging never
+    silently updates what's about to be committed; it simply becomes a new, separate uncommitted
+    change on top of the snapshot (see :func:`uncommitted_changes`'s own docstring). Staging an
+    already-staged path again *replaces* its snapshot with the current on-disk content, same as a
+    second ``git add`` would (PROMPT.md: "the new staged changes should overwrite as with normal
+    git"). Never validates ``paths`` are actually uncommitted -- staging a path that isn't is
+    harmless, it just won't show up as a staged change (see :func:`uncommitted_changes`)."""
+    if not paths:
+        return
+    repo = _open(folder)
+    snapshot = _read_staged_snapshot(folder)
+    for rel_path in paths:
+        real_path = folder / rel_path
+        if real_path.is_file():
+            blob = Blob.from_string(real_path.read_bytes())
+            repo.object_store.add_object(blob)
+            snapshot[rel_path] = blob.id.decode("ascii")
+        else:
+            snapshot[rel_path] = None  # staged as a deletion
+    _write_staged_snapshot(folder, snapshot)
 
 
 def unstage(folder: Path, paths: list[str]) -> None:
-    """Removes ``paths`` from the staging area. A no-op for a path that was never staged."""
-    current = staged_paths(folder)
-    current.difference_update(paths)
-    _write_staged_paths(folder, current)
+    """Removes ``paths`` from the staging area, discarding their own recorded snapshot -- the
+    on-disk content itself is untouched, so an unstaged path simply reappears as a plain (unstaged)
+    uncommitted change if it still differs from ``HEAD``. A no-op for a path that was never staged."""
+    snapshot = _read_staged_snapshot(folder)
+    for rel_path in paths:
+        snapshot.pop(rel_path, None)
+    _write_staged_snapshot(folder, snapshot)
 
 
 def stage_all(folder: Path) -> None:
-    """Stages every currently uncommitted path -- "Stage All"."""
-    stage(folder, [c.path for c in uncommitted_changes(folder)])
+    """Stages every currently uncommitted path (staged or not) at its own current on-disk content --
+    "Stage All". Re-snapshots an already-staged-but-further-edited path too, same as ``git add -A``
+    would, not just the ones not yet staged at all."""
+    stage(folder, sorted({c.path for c in uncommitted_changes(folder)}))
 
 
 def discard_uncommitted_change(folder: Path, rel_path: str) -> None:
@@ -612,13 +644,37 @@ def discard_uncommitted_change(folder: Path, rel_path: str) -> None:
     unstage(folder, [rel_path])
 
 
-def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
-    """Every file that differs between ``folder``'s current on-disk state and its last commit
-    (``HEAD``), sorted by path -- what the Git panel's own uncommitted-changes badge counts, and
-    what :func:`stage`/:func:`commit` act on. Empty if ``folder`` has no history yet, or if the
-    working tree exactly matches ``HEAD`` (nothing uncommitted).
+def _staged_effective_tree(
+    repo: Repo, parent_tree: bytes | None, snapshot: dict[str, str | None]
+) -> bytes | None:
+    """``parent_tree`` (``HEAD``'s own tree) with every staged path's own snapshot overlaid --
+    git's "index" tree, equivalent: a staged deletion (snapshot value ``None``) removes that path,
+    a staged blob sha replaces it, and every other path is carried over from ``HEAD`` untouched.
+    What :func:`uncommitted_changes` diffs ``HEAD`` against for the "Staged Changes" half, and what
+    :func:`commit` actually commits."""
+    merged: dict[str, bytes] = dict(_flat_tree_blobs(repo, parent_tree))
+    for rel_path, sha_hex in snapshot.items():
+        if sha_hex is None:
+            merged.pop(rel_path, None)
+        else:
+            merged[rel_path] = sha_hex.encode("ascii")
+    return _build_tree(repo, merged)
 
-    Building the comparison tree has the same side effect :func:`commit`/:func:`stamp` already have
+
+def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
+    """Every file that differs from its own last commit (``HEAD``) -- either because it's staged
+    (frozen at whatever content it had when :func:`stage` snapshotted it) or because the current
+    on-disk content itself differs from that staged snapshot (or from ``HEAD``, for a path never
+    staged at all) -- sorted by path. What the Git panel's own uncommitted-changes badge counts, and
+    what :func:`stage`/:func:`commit` act on. Empty if ``folder`` has no history yet, or if neither
+    the staging area nor the working tree differs from ``HEAD`` at all.
+
+    A path staged and then edited again on disk appears *twice*: one ``staged=True`` entry (the
+    snapshot, unaffected by the later edit) and one ``staged=False`` entry (the edit itself, diffed
+    against the snapshot rather than ``HEAD`` -- see this module's own docstring on "when a change is
+    staged is essentially snapshotted"), same as VSCode's own split "Staged Changes"/"Changes" lists.
+
+    Building the comparison trees has the same side effect :func:`commit`/:func:`stamp` already have
     (writing loose blob/tree objects into the shadow repo's own object store even when nothing ends
     up committed) -- acceptable here for the same reason it already was there: "what would a commit
     look like right now" can only ever be answered by actually building that tree.
@@ -629,19 +685,30 @@ def uncommitted_changes(folder: Path) -> list[UncommittedFile]:
 
     repo = _open(folder)
     parent = _head_commit(repo)
-    tree_sha = _build_tree(repo, _walk_files(folder))
-    if tree_sha == (parent.tree if parent is not None else None):
-        return []
-    staged = staged_paths(folder)
-    changes = tree_changes(repo.object_store, parent.tree if parent is not None else None, tree_sha)
-    results = [
-        UncommittedFile(
-            path=(path := (change.new or change.old).path.decode("utf-8")),
-            change_type={"add": "added", "delete": "removed"}.get(change.type, "modified"),
-            staged=path in staged,
+    parent_tree = parent.tree if parent is not None else None
+    snapshot = _read_staged_snapshot(folder)
+    staged_tree = _staged_effective_tree(repo, parent_tree, snapshot) if snapshot else parent_tree
+    working_tree = _build_tree(repo, _walk_files(folder))
+
+    results: list[UncommittedFile] = []
+    if staged_tree != parent_tree:
+        results.extend(
+            UncommittedFile(
+                path=(change.new or change.old).path.decode("utf-8"),
+                change_type={"add": "added", "delete": "removed"}.get(change.type, "modified"),
+                staged=True,
+            )
+            for change in tree_changes(repo.object_store, parent_tree, staged_tree)
         )
-        for change in changes
-    ]
+    if working_tree != staged_tree:
+        results.extend(
+            UncommittedFile(
+                path=(change.new or change.old).path.decode("utf-8"),
+                change_type={"add": "added", "delete": "removed"}.get(change.type, "modified"),
+                staged=False,
+            )
+            for change in tree_changes(repo.object_store, staged_tree, working_tree)
+        )
     return sorted(results, key=lambda f: f.path)
 
 
@@ -730,13 +797,15 @@ def commit(folder: Path, message: str) -> str:
     staged, and then committed") as a plain, user-authored checkpoint -- the everyday counterpart to
     :func:`stamp`; see this module's own docstring for what tells the two apart. An unstaged
     uncommitted change is left exactly as it was: still uncommitted, untouched on disk, simply not
-    part of this commit -- the resulting tree is ``HEAD``'s own tree with only the staged paths'
-    current on-disk content overlaid (a staged path missing from disk is a staged deletion).
+    part of this commit. Commits exactly each staged path's own *snapshotted* content (from the
+    moment it was staged, see :func:`stage`'s own docstring) -- never whatever's on disk right now,
+    so an edit made after staging is never accidentally swept into this commit; it stays a separate
+    uncommitted change afterward.
 
     Raises:
         ValueError: ``message`` is empty, ``folder`` has no history yet, or nothing is staged (or
-            every staged path turned out to already match ``HEAD``, e.g. staged and then
-            hand-reverted -- same "no empty commits" rule :func:`uncommitted_changes` itself uses).
+            every staged path's own snapshot turned out to already match ``HEAD`` -- same "no empty
+            commits" rule :func:`uncommitted_changes` itself uses).
     """
     if not message.strip():
         raise ValueError("A commit needs a commit message.")
@@ -744,22 +813,16 @@ def commit(folder: Path, message: str) -> str:
         raise ValueError("This project has no history yet.")
     repo = _open(folder)
     parent = _head_commit(repo)
-    staged = staged_paths(folder) & {c.path for c in uncommitted_changes(folder)}
-    if not staged:
+    parent_tree = parent.tree if parent is not None else None
+    snapshot = _read_staged_snapshot(folder)
+    if not snapshot:
         raise ValueError("Nothing staged to commit -- stage changes first.")
-    merged: dict[str, Path | bytes] = dict(_flat_tree_blobs(repo, parent.tree if parent is not None else None))
-    for rel_path in staged:
-        real_path = folder / rel_path
-        if real_path.is_file():
-            merged[rel_path] = real_path
-        else:
-            merged.pop(rel_path, None)
-    tree_sha = _build_tree(repo, merged)
-    if tree_sha is None or tree_sha == (parent.tree if parent is not None else None):
+    tree_sha = _staged_effective_tree(repo, parent_tree, snapshot)
+    if tree_sha is None or tree_sha == parent_tree:
         raise ValueError("Nothing to commit -- the working tree matches the last commit.")
     sha = _commit(repo, tree_sha, message)
-    unstage(folder, list(staged))
-    _logger.info("committed %s in %s (%r, %d staged file(s))", sha, folder, message, len(staged))
+    unstage(folder, list(snapshot))
+    _logger.info("committed %s in %s (%r, %d staged file(s))", sha, folder, message, len(snapshot))
     return sha
 
 
@@ -1083,7 +1146,7 @@ def restore_snapshot(folder: Path, sha: str) -> None:
     except KeyError as exc:
         raise ValueError(f'Unknown snapshot: "{sha}".') from exc
     _checkout_tree(repo, commit_obj.tree, folder)
-    _write_staged_paths(folder, set())
+    _write_staged_snapshot(folder, {})
     tree_sha = _build_tree(repo, _walk_files(folder))
     parent = _head_commit(repo)
     if tree_sha is not None and tree_sha != (parent.tree if parent is not None else None):

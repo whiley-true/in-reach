@@ -792,8 +792,13 @@ class MainWindow(QWidget):
         # Quick Access Bar (PROMPT.md): Ctrl+P search, Ctrl+Shift+P command palette.
         self._quick_open_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
         self._quick_open_shortcut.activated.connect(self.quick_access.open_search)
-        self._command_palette_shortcut = QShortcut(QKeySequence(_SHORTCUT_COMMAND_PALETTE), self)
-        self._command_palette_shortcut.activated.connect(self.quick_access.open_command_palette)
+        # No separate QShortcut for Ctrl+Shift+P -- the View menu's own "Command Palette" QAction
+        # (see _ViewMenuButton, built into self.top_bar just above) already carries that exact same
+        # key sequence via _add_action()'s own setShortcut() call. A QAction's shortcut and a plain
+        # QShortcut both default to Qt.ShortcutContext.WindowShortcut, so a second QShortcut here
+        # bound to the identical sequence made Qt treat every Ctrl+Shift+P press as *ambiguous*
+        # between the two (activatedAmbiguously, not activated) -- neither ever fired. Same root
+        # cause the Ctrl+- comment above already documents for a different pair of shortcuts.
 
         self.refresh_icon_colors()
         # The activity bar's own buttons are fixed pixel sizes, not derived from app.font() the
@@ -1048,6 +1053,13 @@ class MainWindow(QWidget):
             Command(label="Stamp Release", action=self._vcs_stamp_via_dialog),
             Command(label="New Branch", action=self._vcs_new_branch_via_dialog),
             Command(
+                label="New Branch From",
+                children=[
+                    Command(label=label, action=lambda ref=ref: self._vcs_new_branch_from_via_dialog(ref))
+                    for ref, label in self._vcs_compare_refs()
+                ],
+            ),
+            Command(
                 label="Switch Branch",
                 children=[
                     Command(label=name, action=lambda n=name: self.vcs_switch_branch(n))
@@ -1157,6 +1169,18 @@ class MainWindow(QWidget):
         name, ok = QInputDialog.getText(self, "New Branch", "Branch name:")
         if ok and name.strip():
             self.vcs_new_branch(name.strip())
+
+    def _vcs_new_branch_from_via_dialog(self, source: str) -> None:
+        """"New Branch From" (the command palette's own entry, PROMPT.md: "also there is no command
+        palette entry for make new branch from") -- ``source`` is already picked (one of this
+        command's own children, built from :meth:`_vcs_compare_refs`, same branch-or-stamp ref set
+        the Git panel's own "New Branch From..." dropdown offers), so this only still needs to ask
+        for the new branch's own name."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "New Branch From", "Branch name:")
+        if ok and name.strip():
+            self.vcs_new_branch_from(name.strip(), source)
 
     def _set_theme(self, name: str) -> None:
         app = QApplication.instance()

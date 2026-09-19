@@ -36,7 +36,7 @@ class StampReleaseDialog(QDialog):
     project's current version."""
 
     def __init__(
-        self, major: int, minor: int, patch: int, parent: QWidget | None = None
+        self, major: int, minor: int, patch: int, parent: QWidget | None = None, *, message: str = ""
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Stamp Release")
@@ -47,6 +47,12 @@ class StampReleaseDialog(QDialog):
         form = QFormLayout()
         self.message_edit = QLineEdit()
         self.message_edit.setPlaceholderText("Release message")
+        # PROMPT.md: "if a user aborts the stamp due to not re-stamping the same version, the
+        # warning should close and they should be back at their release dialog/window" -- re-opening
+        # this dialog after declining that warning (see GitPanel._on_stamp_clicked's own loop) seeds
+        # it with whatever the user had already typed, rather than a blank field, so they don't have
+        # to retype the message just to bump the version and try again.
+        self.message_edit.setText(message)
         form.addRow("Release Message:", self.message_edit)
         layout.addLayout(form)
 

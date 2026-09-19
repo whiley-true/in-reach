@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from PyQt6.QtWidgets import QApplication
 
 from in_reach.app import vcs
 from in_reach.ide.git_panel import GitPanel
@@ -89,7 +90,7 @@ def test_stamp_button_emits_stamp_requested_with_the_typed_message_and_version(
     folder = _project(tmp_path)
     vcs.init(folder)  # stamped "gametype init" at v0.0.0
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("First release", "1.2.3"))
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch, message="": ("First release", "1.2.3"))
     emitted = []
     panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
 
@@ -104,7 +105,7 @@ def test_stamp_button_does_not_emit_when_the_dialog_is_cancelled(
     folder = _project(tmp_path)
     vcs.init(folder)
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: None)
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch, message="": None)
     emitted = []
     panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
 
@@ -124,7 +125,7 @@ def test_stamp_button_seeds_the_dialog_from_the_last_stamped_version(
     monkeypatch.setattr(
         panel,
         "_ask_stamp_release",
-        lambda major, minor, patch: seeded.append((major, minor, patch)) or None,
+        lambda major, minor, patch, message="": seeded.append((major, minor, patch)) or None,
     )
 
     panel.stamp_button.click()
@@ -142,7 +143,7 @@ def test_stamp_button_seeds_0_0_0_with_no_prior_stamp(
     monkeypatch.setattr(
         panel,
         "_ask_stamp_release",
-        lambda major, minor, patch: seeded.append((major, minor, patch)) or None,
+        lambda major, minor, patch, message="": seeded.append((major, minor, patch)) or None,
     )
 
     panel.stamp_button.click()
@@ -157,7 +158,16 @@ def test_stamp_button_warns_before_reusing_an_already_stamped_version(
     vcs.init(folder)
     vcs.stamp(folder, "release one", version="1.0.0")
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("release two", "1.0.0"))
+    calls = []
+
+    def fake_ask(major, minor, patch, message=""):
+        calls.append((major, minor, patch, message))
+        # First attempt reuses the already-stamped version and gets declined; second call is the
+        # dialog reopening (see the "back at the release dialog" test below) -- the user cancels
+        # out of it here, ending the whole stamp attempt.
+        return ("release two", "1.0.0") if len(calls) == 1 else None
+
+    monkeypatch.setattr(panel, "_ask_stamp_release", fake_ask)
     confirmed = []
     monkeypatch.setattr(panel, "_confirm_duplicate_version", lambda version: confirmed.append(version) or False)
     emitted = []
@@ -167,6 +177,40 @@ def test_stamp_button_warns_before_reusing_an_already_stamped_version(
 
     assert confirmed == ["1.0.0"]
     assert emitted == []  # declined the overwrite warning -- no stamp requested
+    assert len(calls) == 2  # declining reopened the dialog once more, per PROMPT.md below
+
+
+def test_declining_the_duplicate_version_warning_reopens_the_dialog_seeded_with_what_they_typed(
+    panel: GitPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "also when stamping a release if a user aborts the stamp due to not re-stamping
+    # the same version, the warning should close and they should be back at their release
+    # dialog/window" -- not just kicked out of the whole stamp attempt, and not back at a *blank*
+    # dialog either.
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    vcs.stamp(folder, "release one", version="1.0.0")
+    panel.set_project(folder)
+    calls = []
+
+    def fake_ask(major, minor, patch, message=""):
+        calls.append((major, minor, patch, message))
+        # First attempt collides; the user (seeing the reopened dialog still has their message)
+        # just bumps the patch number and resubmits.
+        return ("release two", "1.0.0") if len(calls) == 1 else ("release two", "1.0.1")
+
+    monkeypatch.setattr(panel, "_ask_stamp_release", fake_ask)
+    monkeypatch.setattr(panel, "_confirm_duplicate_version", lambda version: False)
+    emitted = []
+    panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
+
+    panel.stamp_button.click()
+
+    assert len(calls) == 2
+    assert calls[0] == (1, 0, 0, "")  # seeded from the project's own last stamped version
+    # Reopened seeded with the version just tried (not reset) and the message already typed.
+    assert calls[1] == (1, 0, 0, "release two")
+    assert emitted == [("release two", "1.0.1")]
 
 
 def test_stamp_button_stamps_anyway_when_the_duplicate_version_warning_is_accepted(
@@ -176,7 +220,7 @@ def test_stamp_button_stamps_anyway_when_the_duplicate_version_warning_is_accept
     vcs.init(folder)
     vcs.stamp(folder, "release one", version="1.0.0")
     panel.set_project(folder)
-    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch: ("release two", "1.0.0"))
+    monkeypatch.setattr(panel, "_ask_stamp_release", lambda major, minor, patch, message="": ("release two", "1.0.0"))
     monkeypatch.setattr(panel, "_confirm_duplicate_version", lambda version: True)
     emitted = []
     panel.stamp_requested.connect(lambda message, version: emitted.append((message, version)))
@@ -641,6 +685,26 @@ def test_a_staged_change_shows_up_in_the_staged_list_only(panel: GitPanel, tmp_p
     assert panel.changes_label.text() == "Changes (0)"
 
 
+def test_a_file_edited_again_after_staging_appears_in_both_lists(panel: GitPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "if there are further changes to a file with[which was] staged those changes -
+    # that file should still appear in changes and staged changes should not update. when a change
+    # is staged is essentially snapshotted".
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("staged content\n", encoding="utf-8")
+    vcs.stage(folder, ["Notes.txt"])
+    (folder / "Notes.txt").write_text("further edit\n", encoding="utf-8")
+
+    panel.set_project(folder)
+
+    assert panel.staged_list.count() == 1
+    assert panel.staged_list.item(0).text() == "M  Notes.txt"
+    assert panel.changes_list.count() == 1
+    assert panel.changes_list.item(0).text() == "M  Notes.txt"
+    assert panel.staged_label.text() == "Staged Changes (1)"
+    assert panel.changes_label.text() == "Changes (1)"
+
+
 def test_stage_all_button_emits_stage_requested_with_every_unstaged_path(panel: GitPanel, tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
@@ -837,6 +901,56 @@ def test_set_commit_files_populates_the_list(panel: GitPanel, tmp_path: Path) ->
     assert panel.commit_files_list.count() == 1
     assert panel.commit_files_list.item(0).text() == "+  Notes.txt"
     assert panel.commit_files_label.text() == "Files Changed (1)"
+
+
+def test_history_splitter_is_hidden_with_no_commit_selected(panel: GitPanel, tmp_path: Path) -> None:
+    # PROMPT.md: "please also add a menu line divider under the restore button in vcs allowing the
+    # menu to be dragged vertically up to reveal more of the files changed" -- no divider to drag,
+    # and no space wasted on an empty pane, before any commit is selected.
+    folder = _project(tmp_path)
+    vcs.init(folder)
+
+    panel.set_project(folder)
+
+    assert panel._files_pane.isVisible() is False
+
+
+def test_history_splitter_shows_the_files_pane_once_a_commit_is_selected(
+    panel: GitPanel, tmp_path: Path
+) -> None:
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    panel.show()
+
+    panel.graph.select_row(0)
+
+    assert panel._files_pane.isVisible() is True
+    assert panel._history_splitter.count() == 2
+
+
+def test_dragging_the_history_splitter_up_grows_the_files_changed_list(
+    panel: GitPanel, tmp_path: Path
+) -> None:
+    from in_reach.app.vcs import FileDiff
+
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    panel.set_project(folder)
+    panel.resize(400, 500)
+    panel.show()
+    panel.graph.select_row(0)
+    sha = panel.graph.selected_sha()
+    panel.set_commit_files(sha, [FileDiff(path="Notes.txt", change_type="added", diff_text="")])
+    QApplication.processEvents()
+    before = panel.commit_files_list.height()
+    graph_size, files_size = panel._history_splitter.sizes()
+
+    # Drag the handle up -- shrink the graph pane, grow the files pane.
+    panel._history_splitter.moveSplitter(max(graph_size - 100, 0), 1)
+    QApplication.processEvents()
+
+    assert panel.commit_files_list.height() > before
 
 
 def test_set_commit_files_ignores_a_stale_fetch_for_a_no_longer_selected_commit(

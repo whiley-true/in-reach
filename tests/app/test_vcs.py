@@ -332,17 +332,63 @@ def test_commit_of_a_staged_deletion_removes_the_file_from_the_commit(tmp_path: 
     assert vcs.uncommitted_changes(folder) == []
 
 
-def test_commit_ignores_a_stale_staged_path_that_no_longer_differs_from_head(tmp_path: Path) -> None:
+def test_commit_uses_the_snapshot_taken_at_stage_time_not_current_disk_content(tmp_path: Path) -> None:
+    # PROMPT.md: "when a change is staged is essentially snapshotted" -- staging a file and then
+    # hand-editing it again (even back to matching HEAD) never changes what actually gets committed;
+    # commit() always uses the content stage() captured, same as real git's own index.
     folder = _project(tmp_path)
     vcs.init(folder)
     (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
     vcs.stage(folder, ["Notes.txt"])
     (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")  # hand-reverted back to HEAD's own content
-    (folder / "settings" / "settings.json").write_text('{"a": 2}', encoding="utf-8")
-    vcs.stage(folder, ["settings/settings.json"])
 
-    vcs.commit(folder, "commit settings only")
+    vcs.commit(folder, "commit the snapshot")
 
+    # The commit carries the *snapshot* ("edited"), not disk's current ("hi") -- so disk now reads
+    # as uncommitted (differs from the new HEAD, which has "edited").
+    changes = vcs.uncommitted_changes(folder)
+    assert len(changes) == 1
+    assert changes[0].path == "Notes.txt"
+    assert changes[0].staged is False
+    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    assert old == "edited\n"  # HEAD now has the committed snapshot
+    assert new == "hi\n"  # disk still has the hand-reverted content
+
+
+def test_further_edits_after_staging_show_up_in_changes_without_touching_the_staged_entry(
+    tmp_path: Path,
+) -> None:
+    # PROMPT.md: "if there are further changes to a file with[which was] staged those changes -
+    # that file should still appear in changes and staged changes should not update."
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("staged content\n", encoding="utf-8")
+    vcs.stage(folder, ["Notes.txt"])
+
+    (folder / "Notes.txt").write_text("further edit\n", encoding="utf-8")
+
+    changes = {(c.path, c.staged) for c in vcs.uncommitted_changes(folder)}
+    assert changes == {("Notes.txt", True), ("Notes.txt", False)}
+
+
+def test_restaging_an_already_staged_path_overwrites_its_snapshot(tmp_path: Path) -> None:
+    # PROMPT.md: "if a file has staged changes, then gets new staged changes, the new staged
+    # changes should overwrite as with normal git."
+    folder = _project(tmp_path)
+    vcs.init(folder)
+    (folder / "Notes.txt").write_text("first staged content\n", encoding="utf-8")
+    vcs.stage(folder, ["Notes.txt"])
+    (folder / "Notes.txt").write_text("second staged content\n", encoding="utf-8")
+
+    vcs.stage(folder, ["Notes.txt"])  # re-stage -- overwrites the first snapshot
+
+    changes = vcs.uncommitted_changes(folder)
+    assert len(changes) == 1
+    assert changes[0].staged is True
+
+    vcs.commit(folder, "commit the re-staged content")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "second staged content\n"
     assert vcs.uncommitted_changes(folder) == []
 
 

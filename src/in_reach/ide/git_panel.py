@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -329,12 +330,10 @@ class GitPanel(QWidget):
         # graph with many lanes/long text still scrolls horizontally exactly as before).
         self._graph_scroll.setWidgetResizable(True)
         self._graph_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        history_layout.addWidget(self._graph_scroll, 1)
         self.restore_button = QPushButton("Restore Selected")
         self.restore_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.restore_button.setEnabled(False)
         self.restore_button.clicked.connect(self._on_restore_clicked)
-        history_layout.addWidget(self.restore_button)
 
         # PROMPT.md, a later pass: "please make it so that when clicking in history on commits - it
         # extends to show a list of files changed (which can then be clicked on to view (please
@@ -344,16 +343,42 @@ class GitPanel(QWidget):
         # in_reach.app.vcs directly, see this module's own docstring).
         self.commit_files_label = QLabel("Files Changed")
         self.commit_files_label.hide()
-        history_layout.addWidget(self.commit_files_label)
         self.commit_files_list = QListWidget()
         self.commit_files_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.commit_files_list.setMaximumHeight(120)
         self.commit_files_list.setCursor(Qt.CursorShape.PointingHandCursor)
         self.commit_files_list.itemClicked.connect(self._on_commit_file_clicked)
         self.commit_files_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.commit_files_list.customContextMenuRequested.connect(self._show_commit_file_context_menu)
         self.commit_files_list.hide()
-        history_layout.addWidget(self.commit_files_list)
+
+        # PROMPT.md: "please also add a menu line divider under the restore button in vcs allowing
+        # the menu to be dragged vertically up to reveal more of the files changed" -- the graph
+        # (plus Restore Selected) sits above a draggable splitter handle from the Files Changed list
+        # below it, in place of the fixed setMaximumHeight(120) the list used to be capped at, so
+        # dragging that handle up hands the list more room instead of it just being clipped.
+        graph_pane = QWidget()
+        graph_pane_layout = QVBoxLayout(graph_pane)
+        graph_pane_layout.setContentsMargins(0, 0, 0, 0)
+        graph_pane_layout.addWidget(self._graph_scroll, 1)
+        graph_pane_layout.addWidget(self.restore_button)
+
+        self._files_pane = QWidget()
+        files_pane_layout = QVBoxLayout(self._files_pane)
+        files_pane_layout.setContentsMargins(0, 0, 0, 0)
+        files_pane_layout.addWidget(self.commit_files_label)
+        files_pane_layout.addWidget(self.commit_files_list, 1)
+        self._files_pane.hide()  # no commit selected yet -- see refresh()/_on_graph_selection_changed
+
+        self._history_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._history_splitter.addWidget(graph_pane)
+        self._history_splitter.addWidget(self._files_pane)
+        self._history_splitter.setStretchFactor(0, 1)
+        self._history_splitter.setStretchFactor(1, 0)
+        # A sensible initial split (mostly graph, a real but modest slice for Files Changed) for
+        # whenever the files pane first becomes visible -- QSplitter has no notion of an initial
+        # ratio for a still-hidden widget otherwise, and would default to splitting evenly instead.
+        self._history_splitter.setSizes([300, 120])
+        history_layout.addWidget(self._history_splitter, 1)
 
         self.history_section = CollapsibleSection("History", history_body, collapsed=False)
         layout.addWidget(self.history_section, 1)
@@ -450,6 +475,7 @@ class GitPanel(QWidget):
         self.commit_files_label.hide()
         self.commit_files_list.hide()
         self.commit_files_list.clear()
+        self._files_pane.hide()  # collapses the splitter back to just the graph pane
 
         # Reset both sides back to "Branch" on every refresh -- setCurrentIndex() only actually
         # fires currentTextChanged (and so _populate_compare_combo(), via the constructor's own
@@ -559,30 +585,43 @@ class GitPanel(QWidget):
             return
         current_version = vcs.last_stamp_version(self.current_folder) or vcs.INITIAL_VERSION
         major, minor, patch = (int(part) for part in current_version.split("."))
-        result = self._ask_stamp_release(major, minor, patch)
-        if result is None:
+        message = ""
+        # PROMPT.md: "if a user aborts the stamp due to not re-stamping the same version, the
+        # warning should close and they should be back at their release dialog/window" -- declining
+        # "Stamp Anyway" no longer cancels the whole action outright; it loops back to the dialog
+        # instead, reseeded with whatever version the user just tried (so they can see what they
+        # picked) and the message they already typed (see StampReleaseDialog's own ``message``
+        # argument), rather than losing their input and having to start over.
+        while True:
+            result = self._ask_stamp_release(major, minor, patch, message)
+            if result is None:
+                return
+            message, version = result
+            if vcs.version_already_stamped(self.current_folder, version) and not self._confirm_duplicate_version(
+                version
+            ):
+                major, minor, patch = (int(part) for part in version.split("."))
+                continue
+            self.stamp_requested.emit(message, version)
             return
-        message, version = result
-        if vcs.version_already_stamped(self.current_folder, version) and not self._confirm_duplicate_version(
-            version
-        ):
-            return
-        self.stamp_requested.emit(message, version)
 
-    def _ask_stamp_release(self, major: int, minor: int, patch: int) -> tuple[str, str] | None:
+    def _ask_stamp_release(
+        self, major: int, minor: int, patch: int, message: str = ""
+    ) -> tuple[str, str] | None:
         """Shows the "Stamp Release" dialog (message + major/minor/patch spin boxes seeded from the
         project's current version) and returns ``(message, version)`` if confirmed with a non-empty
         message, ``None`` otherwise -- kept as its own method purely as a test seam, same reasoning
-        as :meth:`_ask_text`."""
+        as :meth:`_ask_text`. ``message``, when given, pre-fills the release-message field (see
+        :meth:`_on_stamp_clicked`'s own "back at their release dialog" re-open)."""
         from in_reach.ide.stamp_release_dialog import StampReleaseDialog
 
-        dialog = StampReleaseDialog(major, minor, patch, self)
+        dialog = StampReleaseDialog(major, minor, patch, self, message=message)
         if dialog.exec() != StampReleaseDialog.DialogCode.Accepted:
             return None
-        message = dialog.message()
-        if not message:
+        typed_message = dialog.message()
+        if not typed_message:
             return None
-        return message, dialog.version()
+        return typed_message, dialog.version()
 
     def _confirm_duplicate_version(self, version: str) -> bool:
         """Asks whether to stamp anyway when ``version`` has already been used by a past stamp
@@ -682,12 +721,14 @@ class GitPanel(QWidget):
         self.restore_button.setEnabled(bool(sha))
         self._selected_commit_sha = sha or None
         if sha:
+            self._files_pane.show()
             self.commit_files_label.show()
             self.commit_files_list.show()
             self.commit_files_label.setText("Files Changed")
             self.commit_files_list.clear()
             self.commit_selected.emit(sha)
         else:
+            self._files_pane.hide()
             self.commit_files_label.hide()
             self.commit_files_list.hide()
 

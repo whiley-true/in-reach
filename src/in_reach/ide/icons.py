@@ -173,14 +173,18 @@ _ICON_SOURCES = {
     "kanban": (  # PROMPT.md: "under documentation please add an icon for Kanban, this should be
         # stubbed for now" -- three simple columns (a board outline plus two divider lines) each
         # holding a card or two, same "deliberately simple, not traced from any icon set" reasoning
-        # as "compass"/"map" above.
+        # as "compass"/"map" above. PROMPT.md, a later pass ("the icon is slightly malformed, the
+        # cars in the third column blends with the border"): the third column's own card used to be
+        # exactly as wide as the first two (2.3), which left it flush against the board's own right
+        # edge (unlike the first two, each with a real margin against their own column's edge) --
+        # narrowed to 1.8 so it keeps the same ~0.5-0.6 margin every other card already has.
         "0 0 16 16",
         '<rect x="1.5" y="2" width="13" height="12" rx="1" fill="none" stroke="{color}" stroke-width="1.2"/>'
         '<path d="M6 2V14M10.5 2V14" stroke="{color}" stroke-width="1"/>'
         '<rect x="2.6" y="3.4" width="2.3" height="2.6" fill="{color}"/>'
         '<rect x="2.6" y="7" width="2.3" height="1.6" fill="{color}"/>'
         '<rect x="7.1" y="3.4" width="2.3" height="1.6" fill="{color}"/>'
-        '<rect x="11.6" y="3.4" width="2.3" height="4" fill="{color}"/>',
+        '<rect x="11.6" y="3.4" width="1.8" height="4" fill="{color}"/>',
     ),
     "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
         # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"

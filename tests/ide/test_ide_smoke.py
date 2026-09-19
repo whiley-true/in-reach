@@ -2118,7 +2118,7 @@ def test_stamp_release_command_prompts_and_stamps(
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
     monkeypatch.setattr(
-        project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch: ("v1.0", "1.0.0")
+        project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch, message="": ("v1.0", "1.0.0")
     )
 
     commands = project_window.build_command_palette_commands()
@@ -2133,7 +2133,7 @@ def test_stamp_release_command_does_nothing_when_cancelled(
 ) -> None:
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
-    monkeypatch.setattr(project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch: None)
+    monkeypatch.setattr(project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch, message="": None)
 
     commands = project_window.build_command_palette_commands()
     next(c for c in commands if c.label == "Stamp Release").action()
@@ -2154,6 +2154,40 @@ def test_new_branch_command_prompts_and_creates(
     next(c for c in commands if c.label == "New Branch").action()
 
     assert vcs.current_branch(folder) == "feature"
+
+
+def test_new_branch_from_command_lists_branches_and_stamps_and_creates(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "also there is no command palette entry for make new branch from". Stamped (and
+    # stays checked out) on "feature" -- _vcs_compare_refs()'s own stamp list only ever reads the
+    # *current* branch's own history (same as the Git panel's own compare combos), so the stamp
+    # must be on whichever branch is checked out when the palette is built.
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.stamp(folder, "a release", version="1.0.0")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("from-main", True)))
+
+    commands = project_window.build_command_palette_commands()
+    new_branch_from_command = next(c for c in commands if c.label == "New Branch From")
+    assert {c.label for c in new_branch_from_command.children} == {
+        vcs.DEFAULT_BRANCH,
+        "feature",
+        "Stamp: a release",
+    }
+
+    # Branch off "main" (not the currently checked-out "feature") -- proves this really uses the
+    # picked source, not just whatever HEAD already was.
+    next(c for c in new_branch_from_command.children if c.label == vcs.DEFAULT_BRANCH).action()
+
+    assert vcs.current_branch(folder) == "from-main"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
 
 
 def test_switch_branch_command_lists_and_switches_branches(project_window: MainWindow, tmp_path: Path) -> None:
