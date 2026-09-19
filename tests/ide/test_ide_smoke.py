@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,8 @@ from in_reach.ide import icons, style, theme
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import ActivityBar
 from in_reach.ide.editor import TextEditorWidget
-from in_reach.ide.first_run_dialog import FirstRunDialog
-from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_MIN_WIDTH, MainWindow
+from in_reach.ide.main_window import _ICON_SIZE, _SIDEBAR_DEFAULT_WIDTH, MainWindow
+from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.tabs import _MAX_H_SPLITS, _MAX_V_SPLITS
 from in_reach.ide.welcome import WelcomeTab
 
@@ -293,41 +294,48 @@ def test_adjust_zoom_refreshes_explorer_and_search_panel_fonts(
 def test_sidebar_default_width_fits_the_dashboard_headers_without_eliding(
     window: MainWindow,
 ) -> None:
-    # Regression guard (PROMPT.md): the sidebar's default/minimum width used to be narrow enough
-    # that a section header's own text middle-elided. sizeHint() is exactly the width QToolButton
-    # itself says it needs to show the whole label unelided, so the sidebar must never be narrower
-    # than that.
-    assert window.primary_sidebar.width() == _SIDEBAR_MIN_WIDTH
+    # Regression guard (PROMPT.md): the sidebar's default width used to be narrow enough that a
+    # section header's own text middle-elided. sizeHint() is exactly the width QToolButton itself
+    # says it needs to show the whole label unelided, so _SIDEBAR_DEFAULT_WIDTH (the sidebar's own
+    # initial/opening width -- see _build_primary_sidebar()) must never be narrower than that.
+    # This is *not* a drag-floor guarantee any more (PROMPT.md: "the side panel needs to be
+    # resiziable to be much smaller" -- see _SIDEBAR_MIN_DRAG_WIDTH's own comment): a user who
+    # deliberately drags it narrower than this is expected to see this same text elide, the same
+    # way any other VSCode-style sidebar's content does.
     for section in (
         window.explorer_panel.stats_section,
+        window.explorer_panel.quick_launch_section,
         window.explorer_panel.settings_section,
     ):
-        assert section._toggle.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+        assert section._toggle.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH
 
 
-def test_sidebar_default_width_fits_triple_digit_stats_counts_without_wrapping(
+def test_sidebar_default_width_fits_a_triple_digit_stat_box_at_half_width(
     window: MainWindow,
 ) -> None:
     # Regression guard (PROMPT.md): "fix the panel icon width so that trigger conditions and
-    # actions should always display on the same line" -- sized against the widest this line is
-    # ever realistically going to get (see explorer.py's own ExplorerPanel.__init__ comment).
-    window.explorer_panel.stats_counts_label.setText("Triggers: 999   Conditions: 999   Actions: 999")
+    # actions should always display on the same line" -- the same guarantee, now against a single
+    # _StatBox's own worst-case (triple-digit counts) width, since a later PROMPT.md pass ("please
+    # make each the 'sub' stats have a percentage bar and a border, aligning the 5 totals across two
+    # columns") replaced the old single unwrapped line with one box per stat, two per row.
+    window.explorer_panel.trigger_stat.set_value("Triggers", 999, 999)
 
-    assert window.explorer_panel.stats_counts_label.sizeHint().width() < _SIDEBAR_MIN_WIDTH
+    assert window.explorer_panel.trigger_stat.sizeHint().width() < _SIDEBAR_DEFAULT_WIDTH // 2
 
 
-def test_sidebar_max_width_is_a_quarter_of_the_screen(window: MainWindow) -> None:
+def test_sidebar_max_width_is_half_the_screen(window: MainWindow) -> None:
     # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width",
-    # later revised to 1/4 -- checked against the same constant main_window.py's own
+    # revised to 1/4, then 1/5, then (PROMPT.md: "the side panel needs to be resiziable to be ...
+    # wider") 1/2 -- checked against the same constant main_window.py's own
     # _build_primary_sidebar() divides by, not a hardcoded fraction, so a later revision to that
     # constant doesn't leave this test silently checking the wrong ratio. Floored at
-    # _SIDEBAR_MIN_WIDTH: a small enough screen (a headless CI display, e.g.) would otherwise let
-    # the fraction-of-screen ceiling undercut the fixed minimum width, a self-contradictory
-    # min > max on the same widget -- see _build_primary_sidebar()'s own comment.
-    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION, _SIDEBAR_MIN_WIDTH
+    # _SIDEBAR_MIN_DRAG_WIDTH: an extreme (sub-400px) screen would otherwise let the fraction-of-
+    # screen ceiling undercut the minimum width, a self-contradictory min > max -- see
+    # _build_primary_sidebar()'s own comment.
+    from in_reach.ide.main_window import _SIDEBAR_MAX_WIDTH_FRACTION, _SIDEBAR_MIN_DRAG_WIDTH
 
     screen = QApplication.primaryScreen()
-    expected = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+    expected = max(_SIDEBAR_MIN_DRAG_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
     assert window.primary_sidebar.maximumWidth() == expected
 
 
@@ -338,6 +346,64 @@ def test_dragging_the_sidebar_wider_than_the_max_width_is_clamped(window: MainWi
     QApplication.processEvents()
 
     assert window.primary_sidebar.width() <= max_width
+
+
+def test_sidebar_min_drag_width_is_a_flat_floor(window: MainWindow) -> None:
+    # PROMPT.md: "the side panel needs to be resiziable to be much smaller" -- flat (not
+    # fraction-of-screen -- "genuinely narrow" means the same thing on any size screen), unlike
+    # the max side.
+    from in_reach.ide.main_window import _SIDEBAR_MIN_DRAG_WIDTH
+
+    assert window.primary_sidebar.minimumWidth() == _SIDEBAR_MIN_DRAG_WIDTH
+
+
+def test_dragging_the_sidebar_narrower_than_the_min_width_is_clamped(window: MainWindow) -> None:
+    min_width = window.primary_sidebar.minimumWidth()
+
+    window._side_splitter.setSizes([max(0, min_width - 500), 1000])
+    QApplication.processEvents()
+
+    assert window.primary_sidebar.width() >= min_width
+
+
+def test_dragging_the_sidebar_to_a_midrange_width_actually_lands_there(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # Regression guard (PROMPT.md): "the side panel needs to be resiziable to be much smaller or
+    # wider" -- the sidebar is hidden (and so takes no real space in the splitter, regardless of
+    # what setSizes() requests) until a project is open, which the bare `window` fixture's own
+    # no-project-open tests above can't actually exercise -- opens one here specifically so a drag
+    # to some ordinary value strictly between the floor and ceiling is checked against the real
+    # thing, not just the two extremes (which a sidebar stuck at its own floor would also satisfy).
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    QApplication.processEvents()
+    sidebar = project_window.primary_sidebar
+    assert sidebar.isVisible() is True
+
+    # A modest, comfortably-in-range target -- clearly above the flat _SIDEBAR_MIN_DRAG_WIDTH floor
+    # (200) and clearly below _SIDEBAR_DEFAULT_WIDTH (420), but still small enough to stay under
+    # _SIDEBAR_MAX_WIDTH_FRACTION's own ceiling (a fraction of the *screen's* own width -- see
+    # main_window.py's own _build_primary_sidebar) even on a narrow CI/headless virtual display,
+    # where that ceiling can sit well below a larger "wide" target and silently clamp it -- a
+    # failure that has nothing to do with dragging actually working.
+    from in_reach.ide.main_window import _SIDEBAR_MIN_DRAG_WIDTH
+
+    target = _SIDEBAR_MIN_DRAG_WIDTH + 50
+    assert target < sidebar.maximumWidth()  # would silently invalidate this test otherwise
+
+    project_window._side_splitter.setSizes([target, 1000])
+    QApplication.processEvents()
+
+    assert sidebar.width() == target
+
+
+def test_side_splitter_uses_non_opaque_resize(window: MainWindow) -> None:
+    # PROMPT.md: "the dragging behaviour is jerky. please fix" -- see _TopBar.__init__'s own
+    # comment (main_window.py) for why non-opaque resize is the fix: it stops the sidebar's own
+    # (potentially expensive) content from relayouting on every mouse-move event during the drag.
+    assert window._side_splitter.opaqueResize() is False
 
 
 def test_toggle_maximize_restores_to_half_screen_centered(window: MainWindow) -> None:
@@ -436,11 +502,34 @@ def test_activating_a_search_result_opens_the_file_at_that_line(
 
 
 def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
+    # PROMPT.md: "in the bottom panel please make the first tab logs".
     bottom = window.bottom_panel
     labels = [bottom.tabText(i) for i in range(bottom.count())]
-    assert labels == ["text1", "text2", "text3"]
+    assert labels == ["Logs", "text2", "text3"]
     bottom.setCurrentIndex(1)
     assert bottom.tabText(bottom.currentIndex()) == "text2"
+
+
+def test_show_logs_switches_the_bottom_panel_to_the_logs_tab(window: MainWindow) -> None:
+    bottom = window.bottom_panel
+    bottom.setCurrentIndex(1)
+
+    bottom.show_logs()
+
+    assert bottom.currentWidget() is bottom.logs_panel
+
+
+def test_view_logs_reveals_the_panel_and_switches_to_logs(window: MainWindow) -> None:
+    # PROMPT.md: "please add an entry for view logs".
+    window.top_bar.panel_toggle.setChecked(False)
+    window.bottom_panel.setCurrentIndex(1)
+    assert window._bottom_panel_card.isVisible() is False
+
+    window.view_logs()
+
+    assert window._bottom_panel_card.isVisible() is True
+    assert window.top_bar.panel_toggle.isChecked() is True
+    assert window.bottom_panel.currentWidget() is window.bottom_panel.logs_panel
 
 
 # -- gating the sidebar views on a project being open --------------------------------------------
@@ -449,23 +538,23 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
 def test_sidebar_starts_collapsed_but_its_views_stay_clickable_with_no_project_open(
     window: MainWindow,
 ) -> None:
-    # Dashboard/Locations/Search all have nothing but a "no project opened yet" placeholder to
+    # Dashboard/Map Files/Search all have nothing but a "no project opened yet" placeholder to
     # show without one, so the sidebar starts collapsed -- but the view buttons (and the top bar's
     # own sidebar toggle) stay clickable, since clicking one still pops the sidebar open onto an
     # "Open a Project to use ..." placeholder (see the test below).
     assert window.primary_sidebar.isVisible() is False
     assert window.activity_bar.explorer_button.isEnabled() is True
-    assert window.activity_bar.locations_button.isEnabled() is True
+    assert window.activity_bar.maps_button.isEnabled() is True
     assert window.activity_bar.search_button.isEnabled() is True
     assert window.top_bar.sidebar_toggle.isEnabled() is True
 
 
 def test_clicking_a_view_with_no_project_open_pops_out_a_blank_placeholder(window: MainWindow) -> None:
-    window.activity_bar.locations_button.click()
+    window.activity_bar.maps_button.click()
 
     assert window.primary_sidebar.isVisible() is True
     assert window._sidebar_stack.currentWidget() is window._no_project_page
-    assert window._no_project_page._label.text() == "Open a Project to use Locations"
+    assert window._no_project_page._label.text() == "Open a Project to use Map Files"
 
     window.activity_bar.search_button.click()
 
@@ -497,7 +586,7 @@ def test_opening_the_first_project_reveals_the_dashboard(
     project_window._on_project_opened(folder)
 
     assert project_window.activity_bar.explorer_button.isEnabled() is True
-    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.maps_button.isEnabled() is True
     assert project_window.activity_bar.search_button.isEnabled() is True
     assert project_window.top_bar.sidebar_toggle.isEnabled() is True
     # The panels were just unlocked -- reveals the Dashboard automatically rather than leaving the
@@ -534,7 +623,7 @@ def test_closing_the_last_project_collapses_the_sidebar_but_leaves_the_views_cli
 
     assert project_window.primary_sidebar.isVisible() is False
     assert project_window.activity_bar.explorer_button.isEnabled() is True
-    assert project_window.activity_bar.locations_button.isEnabled() is True
+    assert project_window.activity_bar.maps_button.isEnabled() is True
     assert project_window.activity_bar.search_button.isEnabled() is True
     assert project_window.top_bar.sidebar_toggle.isEnabled() is True
 
@@ -591,24 +680,6 @@ def test_clicking_a_different_view_icon_switches_the_sidebar(
     assert project_window.activity_bar.search_button.isChecked() is True
     assert project_window.activity_bar.explorer_button.isChecked() is False
     assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["search"]
-
-
-def test_clicking_the_locations_icon_switches_the_sidebar_to_the_stub_panel(
-    project_window: MainWindow, tmp_path: Path
-) -> None:
-    # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations) stub the panel
-    # expanded view for now" -- a real sidebar-view toggle, same as Explorer/Search.
-    folder = tmp_path / "project"
-    folder.mkdir()
-    project_window._on_project_opened(folder)
-
-    project_window.activity_bar.locations_button.click()
-
-    assert project_window.primary_sidebar.isVisible() is True
-    assert project_window.activity_bar.locations_button.isChecked() is True
-    assert project_window.activity_bar.explorer_button.isChecked() is False
-    assert project_window._sidebar_stack.currentWidget() is project_window._sidebar_pages["locations"]
-    assert project_window._sidebar_stack.currentWidget() is project_window.locations_panel
 
 
 def test_topbar_toggle_also_drives_the_sidebar_and_stays_synced(window: MainWindow) -> None:
@@ -689,31 +760,6 @@ def test_activity_bar_clicking_switches_and_collapses(qtbot) -> None:
     assert bar.search_button.isChecked() is False
 
 
-def test_rvt_button_is_a_plain_action_not_a_sidebar_view(qtbot) -> None:
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-    bar.set_rvt_enabled(True)  # starts disabled -- see test_rvt_button_starts_disabled below
-    launched = []
-    selected = []
-    bar.launch_rvt_requested.connect(lambda: launched.append(True))
-    bar.view_selected.connect(selected.append)
-
-    bar.rvt_button.click()
-
-    assert launched == [True]
-    assert selected == []
-    assert bar.rvt_button.isCheckable() is False
-
-
-def test_rvt_button_starts_disabled(qtbot) -> None:
-    # PROMPT.md: "rvt should not be launchable if no project is open" -- true from construction,
-    # before MainWindow ever gets a chance to enable it once a project opens.
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-
-    assert bar.rvt_button.isEnabled() is False
-
-
 def test_apply_button_starts_disabled(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
@@ -731,12 +777,12 @@ def test_refresh_icon_scale_resizes_the_bar_and_every_button(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
     assert bar.width() == WIDTH
-    assert bar.rvt_button.width() == _BUTTON_SIZE
+    assert bar.apply_button.width() == _BUTTON_SIZE
 
     bar.refresh_icon_scale(2.0)
 
     assert bar.width() == WIDTH * 2
-    for button in (bar.explorer_button, bar.search_button, bar.rvt_button, bar.apply_button, bar.settings_button):
+    for button in (bar.explorer_button, bar.search_button, bar.apply_button, bar.settings_button):
         assert button.width() == _BUTTON_SIZE * 2
         assert button.iconSize().width() == round(28 * 2)
 
@@ -768,18 +814,6 @@ def test_refresh_icon_scale_keeps_the_dashboard_icon_not_the_old_explorer_one(qt
     icon_size = round(28 * 1.5)
     expected = icons.icon("dashboard", color="#cccccc", size=icon_size).pixmap(icon_size, icon_size).toImage()
     assert bar.explorer_button.icon().pixmap(icon_size, icon_size).toImage() == expected
-
-
-def test_refresh_icon_scale_preserves_the_rvt_disabled_badge(qtbot) -> None:
-    bar = ActivityBar()
-    qtbot.addWidget(bar)
-    assert bar.rvt_button.isEnabled() is False
-
-    bar.refresh_icon_scale(1.5)
-
-    # Still disabled after a rescale -- the icon (and its "blocked" badge) gets re-rendered at the
-    # new size, but the enabled state itself isn't touched by a zoom change.
-    assert bar.rvt_button.isEnabled() is False
 
 
 def test_refresh_icon_scale_preserves_the_apply_disabled_badge(qtbot) -> None:
@@ -873,7 +907,18 @@ def test_activity_bar_default_icon_order(qtbot) -> None:
     bar = ActivityBar()
     qtbot.addWidget(bar)
 
-    assert bar._icon_strip.order == ["compile", "explorer", "git", "scripts", "rvt", "locations", "search"]
+    assert bar._icon_strip.order == [
+        "compile",
+        "explorer",
+        "search",
+        "git",
+        "scripts",
+        "maps",
+        "documentation",
+        "kanban",
+        "testing",
+        "llm",
+    ]
 
 
 def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) -> None:
@@ -881,32 +926,58 @@ def test_activity_bar_loads_a_persisted_order_from_env(qtbot, tmp_path: Path) ->
     from in_reach.ide.activity_bar import ORDER_ENV_KEY
 
     env_path = tmp_path / ".env"
-    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,explorer,rvt,locations,compile")
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,explorer,maps,compile")
 
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
-    # git/scripts aren't named in the saved order at all -- appended after it, in their existing
-    # (default) relative order, same as any other icon added after a user's own .env was written.
-    assert bar._icon_strip.order == ["search", "explorer", "rvt", "locations", "compile", "git", "scripts"]
+    # git/scripts/documentation/kanban/testing/llm aren't named in the saved order at all --
+    # appended after it, in their existing (default) relative order, same as any other icon added
+    # after a user's own .env was written. "compile" is pinned (PROMPT.md: "the compile icon should
+    # be stuck to the top") -- it sorts to the front regardless of where the saved order put it.
+    assert bar._icon_strip.order == [
+        "compile",
+        "search",
+        "explorer",
+        "maps",
+        "git",
+        "scripts",
+        "documentation",
+        "kanban",
+        "testing",
+        "llm",
+    ]
 
 
 def test_activity_bar_ignores_a_stale_persisted_order_gracefully(qtbot, tmp_path: Path) -> None:
-    # A key that no longer names a real button (renamed/removed icon) is dropped rather than
-    # crashing; any real button missing from the saved list (a newly-added icon, or one added
-    # after the .env entry was written) is appended rather than just vanishing.
+    # A key that no longer names a real button (renamed/removed icon -- "rvt" and "locations" are
+    # real past examples, see activity_bar.py's own history) is dropped rather than crashing; any
+    # real button missing from the saved list (a newly-added icon, or one added after the .env
+    # entry was written) is appended rather than just vanishing.
     from in_reach.app import env_file
     from in_reach.ide.activity_bar import ORDER_ENV_KEY
 
     env_path = tmp_path / ".env"
-    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,not-a-real-icon,rvt")
+    env_file.update_env_value(env_path, ORDER_ENV_KEY, "search,not-a-real-icon,rvt,locations")
 
     bar = ActivityBar(env_path=env_path)
     qtbot.addWidget(bar)
 
     order = bar._icon_strip.order
-    assert order[:2] == ["search", "rvt"]
-    assert set(order) == {"compile", "rvt", "explorer", "git", "scripts", "locations", "search"}
+    # "compile" is pinned to the front (PROMPT.md: "the compile icon should be stuck to the top").
+    assert order[:2] == ["compile", "search"]
+    assert set(order) == {
+        "compile",
+        "explorer",
+        "git",
+        "scripts",
+        "documentation",
+        "kanban",
+        "testing",
+        "maps",
+        "llm",
+        "search",
+    }
 
 
 def test_activity_bar_with_no_env_path_does_not_persist_reordering(qtbot) -> None:
@@ -1014,6 +1085,255 @@ def test_pressing_and_dragging_a_bar_button_past_the_threshold_starts_a_real_dra
     assert button_a.isDown() is False
 
 
+def test_dragging_a_bar_button_sets_a_pixmap_and_hotspot_so_it_tracks_the_cursor(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "the buttons should drag under the cursor to be more visually appealing" --
+    # without an explicit pixmap/hotspot QDrag shows no representation of the dragged icon at all.
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QDrag, QMouseEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c"):
+        strip.add_button(key, QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+    button_a = strip._buttons["a"]
+
+    seen: dict[str, object] = {}
+
+    def fake_set_pixmap(self, pixmap):
+        seen["pixmap"] = pixmap
+
+    def fake_set_hotspot(self, point):
+        seen["hotspot"] = point
+
+    def fake_exec(self, *args, **kwargs):
+        return Qt.DropAction.MoveAction
+
+    monkeypatch.setattr(QDrag, "setPixmap", fake_set_pixmap)
+    monkeypatch.setattr(QDrag, "setHotSpot", fake_set_hotspot)
+    monkeypatch.setattr(QDrag, "exec", fake_exec)
+
+    QApplication.sendEvent(
+        button_a,
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(5, 5),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        button_a,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(5, 40),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert seen["pixmap"].isNull() is False
+    assert seen["hotspot"] == QPoint(5, 40)
+
+
+def test_the_pinned_compile_button_cannot_be_dragged(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PROMPT.md: "the compile icon should be stuck to the top".
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QDrag, QMouseEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    strip.add_button("pinned", QToolButton(), pinned=True)
+    strip.add_button("b", QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+    pinned_button = strip._buttons["pinned"]
+
+    started = []
+    monkeypatch.setattr(QDrag, "exec", lambda self, *a, **k: started.append(True))
+
+    QApplication.sendEvent(
+        pinned_button,
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(5, 5),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        pinned_button,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(5, 40),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert started == []
+
+
+def test_dropping_onto_the_pinned_button_never_lands_ahead_of_it(qtbot) -> None:
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtCore import QMimeData, QPointF
+    from PyQt6.QtCore import Qt as QtNS
+    from PyQt6.QtGui import QDropEvent
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    strip.add_button("pinned", QToolButton(), pinned=True)
+    for key in ("b", "c"):
+        strip.add_button(key, QToolButton())
+    strip.resize(50, 200)
+    strip.show()
+
+    mime = QMimeData()
+    mime.setData("application/x-inreach-activitybar-icon", b"c")
+    drop_pos = QPointF(strip._buttons["pinned"].geometry().center())
+    drop_pos.setY(strip._buttons["pinned"].geometry().top())
+    event = QDropEvent(
+        drop_pos, QtNS.DropAction.MoveAction, mime, QtNS.MouseButton.LeftButton, QtNS.KeyboardModifier.NoModifier
+    )
+    strip.dropEvent(event)
+
+    assert strip.order == ["pinned", "c", "b"]
+
+
+def test_icons_that_do_not_fit_collapse_behind_an_overflow_button(qtbot) -> None:
+    # PROMPT.md: "the side panel icons are overlaying on each other becoming unreadable ...
+    # instead we want ... icons ... collapsed into a ... icon which opens a popout window".
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    for key in ("a", "b", "c", "d", "e"):
+        button = QToolButton()
+        button.setFixedSize(44, 44)
+        strip.add_button(key, button)
+    strip.resize(50, 200)  # room for ~4 buttons at most, not all 5
+    strip.show()
+
+    assert strip.hidden_keys != []
+    assert strip._overflow_button.isVisibleTo(strip) is True
+    for key in strip.hidden_keys:
+        assert strip._buttons[key].isVisibleTo(strip) is False
+    for key in strip.order:
+        if key not in strip.hidden_keys:
+            assert strip._buttons[key].isVisibleTo(strip) is True
+
+    # Growing back gives every icon its own visible slot again.
+    strip.resize(50, 600)
+
+    assert strip.hidden_keys == []
+    assert strip._overflow_button.isVisibleTo(strip) is False
+
+
+def test_overflow_button_menu_lists_hidden_icons_and_clicking_one_activates_it(qtbot) -> None:
+    from in_reach.ide.activity_bar import _IconStrip
+    from PyQt6.QtWidgets import QToolButton
+
+    strip = _IconStrip()
+    qtbot.addWidget(strip)
+    clicked: list[str] = []
+    for key in ("a", "b", "c", "d", "e"):
+        button = QToolButton()
+        button.setFixedSize(44, 44)
+        button.setToolTip(key)
+        button.clicked.connect(lambda _checked=False, k=key: clicked.append(k))
+        strip.add_button(key, button)
+    strip.resize(50, 200)
+    strip.show()
+    assert strip.hidden_keys != []
+
+    hidden_key = strip.hidden_keys[0]
+    strip._buttons[hidden_key].click()
+
+    assert clicked == [hidden_key]
+
+
+def test_activity_bar_icons_reappear_after_regrowing_the_window(window: MainWindow) -> None:
+    # Regression guard: layout.addWidget(self._icon_strip) used to pass the default stretch
+    # factor (0), which caps the strip at its own sizeHint() -- once any icon collapsed into the
+    # "..." overflow, that sizeHint() only reflected the *remaining visible* icons (a hidden
+    # QWidgetItem contributes nothing to a layout's sizeHint()), so all the leftover vertical room
+    # in ActivityBar's layout kept going to its addStretch(1) instead, and the strip could never
+    # grow back past that shrunken size -- matching PROMPT.md: "after windowing a ide, the icons
+    # collapse into the '...', but when maximised they dont reappear".
+    strip = window.activity_bar._icon_strip
+
+    # A generous height, not a fixed guess -- an earlier test in the same session may have left
+    # the app's live zoom scaled up (zoom.apply_zoom() sets the QApplication-wide font, so it
+    # outlives whatever test changed it), which inflates every icon button's own pixel size.
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []  # sanity: comfortably fits at this generous a height
+
+    window.resize(1600, 300)
+    QApplication.processEvents()
+    assert strip.hidden_keys != []
+
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []
+    assert strip._overflow_button.isVisibleTo(strip) is False
+
+
+def test_activity_bar_icon_strip_is_the_layouts_only_stretchable_item(window: MainWindow) -> None:
+    # Regression guard: layout.addWidget(self._icon_strip, 1) alongside an equally-stretched
+    # layout.addStretch(1) below it used to split any leftover vertical room 50/50 between the
+    # two (QBoxLayout distributes surplus proportionally to stretch factor, and neither item has a
+    # maximumHeight capping it) -- so regrowing the window after a shrink only ever handed the
+    # strip about half of what it actually needed to re-show every icon, leaving some stuck behind
+    # "..." even at window sizes that would comfortably fit everything if the strip got all of it
+    # (the previous test's window.resize(1600, 5000) was generous enough that even a 50% share
+    # still exceeded what was needed, so it never caught this). The strip must be the *only*
+    # stretchable item so it always claims the full leftover amount.
+    layout = window.activity_bar.layout()
+    stretches = [layout.stretch(i) for i in range(layout.count())]
+    assert stretches.count(0) == len(stretches) - 1
+    icon_strip_index = next(
+        i for i in range(layout.count()) if layout.itemAt(i).widget() is window.activity_bar._icon_strip
+    )
+    assert layout.stretch(icon_strip_index) > 0
+
+
+def test_activity_bar_icons_stay_packed_at_the_top_when_the_strip_has_spare_room(
+    window: MainWindow,
+) -> None:
+    # Regression guard: making the icon strip the layout's only stretchable item (previous test)
+    # means ActivityBar hands it plenty of extra height once the window is tall -- but the strip's
+    # own internal QVBoxLayout had no stretchable item of its own, and a QBoxLayout with none
+    # spreads its fixed-size children out evenly to fill whatever height it's given instead of
+    # leaving the extra space after the last one. Icons should stay tightly packed at the top
+    # (each button_height + spacing below the last), with the leftover space as blank room below
+    # the last icon, not distributed as gaps between every icon.
+    strip = window.activity_bar._icon_strip
+    window.resize(1600, 5000)
+    QApplication.processEvents()
+    assert strip.hidden_keys == []
+
+    spacing = strip.layout().spacing()
+    previous_bottom = None
+    for key in strip.order:
+        button = strip._buttons[key]
+        assert button.y() == (0 if previous_bottom is None else previous_bottom + spacing)
+        previous_bottom = button.y() + button.height()
+
+
 def test_adjust_zoom_resizes_the_activity_bar(window: MainWindow, tmp_path: Path) -> None:
     from in_reach.app import project
     from in_reach.ide.activity_bar import WIDTH
@@ -1051,7 +1371,7 @@ def test_adjust_zoom_keeps_an_open_settings_json_tab_at_110_percent(
 def test_rvt_button_is_disabled_with_no_project_open(window: MainWindow) -> None:
     # PROMPT.md: "rvt should not be launchable if no project is open (the icon should have a dash
     # in front of it)".
-    assert window.activity_bar.rvt_button.isEnabled() is False
+    assert window.explorer_panel.rvt_button.isEnabled() is False
 
 
 def test_rvt_button_is_enabled_once_a_project_opens(project_window: MainWindow, tmp_path: Path) -> None:
@@ -1060,7 +1380,7 @@ def test_rvt_button_is_enabled_once_a_project_opens(project_window: MainWindow, 
 
     project_window._on_project_opened(folder)
 
-    assert project_window.activity_bar.rvt_button.isEnabled() is True
+    assert project_window.explorer_panel.rvt_button.isEnabled() is True
 
 
 def test_rvt_button_is_disabled_again_once_the_project_closes(
@@ -1072,7 +1392,7 @@ def test_rvt_button_is_disabled_again_once_the_project_closes(
 
     project_window.explorer_panel.close_active_project()
 
-    assert project_window.activity_bar.rvt_button.isEnabled() is False
+    assert project_window.explorer_panel.rvt_button.isEnabled() is False
 
 
 def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
@@ -1080,11 +1400,11 @@ def test_launch_rvt_launches_the_bundled_exe_with_no_prompt(
 ) -> None:
     from in_reach.app import rvt_launcher
 
-    window.activity_bar.set_rvt_enabled(True)
+    window.explorer_panel.rvt_button.setEnabled(True)
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: calls.append((a, k)))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert len(calls) == 1
 
@@ -1097,7 +1417,7 @@ def test_clicking_the_disabled_rvt_button_does_not_launch_anything(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()  # disabled -- no project open
+    window.explorer_panel.rvt_button.click()  # disabled -- no project open
 
     assert calls == []
 
@@ -1190,6 +1510,51 @@ def test_opening_a_different_project_terminates_the_previous_ones_rvt_process(
 
     assert process.terminated is True
     assert folder_a not in project_window._rvt_processes
+
+
+def test_closing_the_window_terminates_its_own_running_rvt_process(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "also when closing a window with an open rvt, any rvt windows should be closed".
+    from in_reach.app import rvt_launcher
+
+    folder = tmp_path / "some-project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    process = _FakeRvtProcess()
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda *a, **k: process)
+    project_window.launch_rvt()
+    assert project_window._rvt_processes[folder] is process
+
+    project_window.close()
+
+    assert process.terminated is True
+    assert project_window._rvt_processes == {}
+
+
+def test_closing_the_window_terminates_every_tracked_rvt_process(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # More than one project's own RVT process can still be tracked at once (see
+    # test_opening_a_different_project_terminates_the_previous_ones_rvt_process's own docstring for
+    # why that's rare in practice -- this is a belt-and-suspenders check that closeEvent() sweeps
+    # the whole dict, not just whatever the *active* project happens to be).
+    folder_a = tmp_path / "project-a"
+    folder_b = tmp_path / "project-b"
+    process_a = _FakeRvtProcess()
+    process_b = _FakeRvtProcess()
+    project_window._rvt_processes[folder_a] = process_a
+    project_window._rvt_processes[folder_b] = process_b
+
+    project_window.close()
+
+    assert process_a.terminated is True
+    assert process_b.terminated is True
+    assert project_window._rvt_processes == {}
+
+
+def test_closing_the_window_with_no_rvt_launched_is_a_no_op(window: MainWindow) -> None:
+    window.close()  # should not raise
 
 
 # -- Apply --------------------------------------------------------------------------------------
@@ -1328,7 +1693,7 @@ def test_rvt_and_export_buttons_are_disabled_for_the_compile_call_too(
         apply_settings,
         "apply_settings_changes",
         lambda pd, f: observed.setdefault(
-            "rvt_enabled_during_compile", project_window.activity_bar.rvt_button.isEnabled()
+            "rvt_enabled_during_compile", project_window.explorer_panel.rvt_button.isEnabled()
         )
         or BuildResult(success=True),
     )
@@ -1336,7 +1701,7 @@ def test_rvt_and_export_buttons_are_disabled_for_the_compile_call_too(
     project_window.launch_rvt()
 
     assert observed["rvt_enabled_during_compile"] is False
-    assert project_window.activity_bar.rvt_button.isEnabled() is True  # restored after
+    assert project_window.explorer_panel.rvt_button.isEnabled() is True  # restored after
 
     compiled_bin = new_project.compiled_variant_path(folder)
 
@@ -1378,7 +1743,7 @@ def test_clicking_apply_syncs_a_hand_edited_title_to_the_status_bar(
     from in_reach.app import new_project
 
     assert new_project.read_project_title(folder) == "Hand-Edited Title"
-    assert project_window.status_bar._project_label.text() == f"Hand-Edited Title ({folder.name})"
+    assert project_window.quick_access.button.text() == f"Hand-Edited Title ({folder.name})"
 
 
 def test_clicking_apply_arms_the_bin_watcher_once_a_compiled_bin_first_exists(
@@ -1450,7 +1815,13 @@ def test_closing_the_project_hides_the_vcs_status_segment(project_window: MainWi
     assert project_window.status_bar.vcs_label.isVisible() is False
 
 
-def test_saving_a_file_records_a_traceable_vcs_snapshot(project_window: MainWindow, tmp_path: Path) -> None:
+def test_saving_a_file_shows_up_as_uncommitted_rather_than_auto_committing(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md (the VSCode-style VCS pass): "we want to remove the autosave entries in vcs history
+    # panel" -- a save no longer creates a commit on its own; it just changes what
+    # vcs.uncommitted_changes() reports (and the activity bar's own badge count, see
+    # MainWindow._refresh_vcs_status).
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
     before = len(vcs.history(folder))
@@ -1460,8 +1831,34 @@ def test_saving_a_file_records_a_traceable_vcs_snapshot(project_window: MainWind
     widget.setPlainText("edited\n")
     project_window.main_panel.active_pane.save_current()
 
-    assert len(vcs.history(folder)) == before + 1
-    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved just now")
+    assert len(vcs.history(folder)) == before
+    assert [c.path for c in vcs.uncommitted_changes(folder)] == ["Notes.txt"]
+    assert project_window.activity_bar.git_button._badge_count == 1
+    assert project_window.status_bar.vcs_label.text().startswith("main - not yet stamped - saved")
+
+
+def test_saving_a_file_immediately_populates_the_git_panels_own_changes_list(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # Regression guard: the badge/status-bar segment used to update the instant a file was saved
+    # (via _refresh_vcs_status), but the Git panel's own "Changes" list stayed empty/stale until
+    # some *other* VCS action (new branch, switch, ...) happened to call git_panel.refresh() for an
+    # unrelated reason -- confirmed reported: "nothing is showing under changes in vcs even when the
+    # notification shows there are changes, unless a user then makes a new branch". Fixed by folding
+    # git_panel.refresh() into _refresh_vcs_status() itself.
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    assert project_window.git_panel.changes_list.count() == 0
+
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("edited\n")
+    project_window.main_panel.active_pane.save_current()
+
+    assert project_window.git_panel.changes_list.count() == 1
+    assert project_window.git_panel.changes_list.item(0).text() == "M  Notes.txt"
+    assert project_window.git_panel.uncommitted_count == 1
+    assert project_window.git_panel.commit_button.isEnabled() is False  # no message typed yet
 
 
 def test_vcs_stamp_creates_a_labelled_snapshot_and_refreshes_the_ui(
@@ -1470,14 +1867,41 @@ def test_vcs_stamp_creates_a_labelled_snapshot_and_refreshes_the_ui(
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
 
-    project_window.vcs_stamp("First release")
+    project_window.vcs_stamp("First release", "1.2.3")
 
     assert vcs.last_stamp(folder).stamp_message == "First release"
+    assert vcs.last_stamp(folder).version == "1.2.3"
     assert "First release" in project_window.status_bar.vcs_label.text()
 
 
 def test_vcs_stamp_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
-    window.vcs_stamp("First release")  # should not raise
+    window.vcs_stamp("First release", "1.0.0")  # should not raise
+
+
+def test_git_panels_stamp_button_tracks_the_apply_buttons_enabled_state(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "it also should not be possible to stamp a non compiled gametype" -- "compiled"
+    # means the same "settings/ has nothing left for Apply to pick up" state the Apply button's own
+    # enabled-ness already tracks.
+    from in_reach.app import vcs
+
+    folder = _make_project_with_settings(tmp_path)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 1}', encoding="utf-8")
+    vcs.init(folder)
+
+    project_window._on_project_opened(folder)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is False
+    assert project_window.git_panel.stamp_button.isEnabled() is True
+
+    settings_path = folder / "settings" / "settings.json"
+    settings_path.write_text('{"a": 2}', encoding="utf-8")
+    project_window._on_file_saved(settings_path)
+
+    assert project_window.activity_bar.apply_button.isEnabled() is True
+    assert project_window.git_panel.stamp_button.isEnabled() is False
 
 
 def test_vcs_new_branch_switches_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
@@ -1506,13 +1930,38 @@ def test_vcs_new_branch_reports_a_duplicate_name_rather_than_crashing(
     assert len(errors) == 1
 
 
+def test_vcs_new_branch_from_branches_off_the_given_source_not_head(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "please make new branch trigger a drop down also providing a New Branch from
+    # option".
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    project_window.vcs_new_branch_from("from-feature", "feature")
+
+    assert vcs.current_branch(folder) == "from-feature"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "feature content\n"
+    assert project_window.git_panel.branch_combo.currentText() == "from-feature"
+
+
+def test_vcs_new_branch_from_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_new_branch_from("feature", "main")  # should not raise
+
+
 def test_vcs_switch_branch_reloads_a_clean_open_tab_from_disk(project_window: MainWindow, tmp_path: Path) -> None:
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
     project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("feature branch content\n", encoding="utf-8")
-    vcs.record_change(folder)
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature branch content")
 
     project_window.vcs_switch_branch(vcs.DEFAULT_BRANCH)
 
@@ -1565,29 +2014,138 @@ def test_vcs_switch_branch_with_no_project_open_is_a_no_op(window: MainWindow) -
     window.vcs_switch_branch("feature")  # should not raise
 
 
-def test_stamp_release_command_prompts_and_stamps(
+# -- switching branches with uncommitted VCS changes (PROMPT.md, the VSCode-style VCS pass:
+# removing the old silent auto-commit-before-switch, in favor of a real cancel/commit-first/discard
+# choice) --------------------------------------------------------------------------------------
+
+
+def test_vcs_switch_branch_warns_about_uncommitted_changes_and_can_be_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: warned.append(paths) or "cancel"
+    )
+
+    project_window.vcs_switch_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # switch refused, still on main
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "uncommitted edit\n"  # never overwritten
+
+
+def test_vcs_switch_branch_commits_first_when_chosen(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "commit")
+    monkeypatch.setattr(MainWindow, "_ask_commit_message", lambda self: "save my edit")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+    # the commit landed before the switch away, rather than being silently discarded.
+    assert "save my edit" in [s.message for s in vcs.graph_history(folder)]
+
+
+def test_vcs_switch_branch_cancels_if_the_commit_message_prompt_is_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "commit")
+    monkeypatch.setattr(MainWindow, "_ask_commit_message", lambda self: "")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # never switched
+    assert vcs.uncommitted_changes(folder) != []  # never committed either
+
+
+def test_vcs_switch_branch_discards_uncommitted_changes_when_chosen(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: "discard")
+
+    project_window.vcs_switch_branch("feature")
+
+    assert vcs.current_branch(folder) == "feature"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"  # overwritten by the switch
+
+
+def test_commit_command_prompts_and_commits(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from PyQt6.QtWidgets import QInputDialog
 
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("v1.0", True)))
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("edit notes", True)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Commit").action()
+
+    assert vcs.uncommitted_changes(folder) == []
+    assert vcs.history(folder)[0].message == "edit notes"
+
+
+def test_commit_command_does_nothing_when_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+
+    commands = project_window.build_command_palette_commands()
+    next(c for c in commands if c.label == "Commit").action()
+
+    assert vcs.uncommitted_changes(folder) != []
+
+
+def test_stamp_release_command_prompts_and_stamps(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    monkeypatch.setattr(
+        project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch, message="": ("v1.0", "1.0.0")
+    )
 
     commands = project_window.build_command_palette_commands()
     next(c for c in commands if c.label == "Stamp Release").action()
 
     assert vcs.last_stamp(folder).stamp_message == "v1.0"
+    assert vcs.last_stamp(folder).version == "1.0.0"
 
 
 def test_stamp_release_command_does_nothing_when_cancelled(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from PyQt6.QtWidgets import QInputDialog
-
     folder, vcs = _make_vcs_project(tmp_path)
     project_window._on_project_opened(folder)
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(project_window.git_panel, "_ask_stamp_release", lambda major, minor, patch, message="": None)
 
     commands = project_window.build_command_palette_commands()
     next(c for c in commands if c.label == "Stamp Release").action()
@@ -1608,6 +2166,40 @@ def test_new_branch_command_prompts_and_creates(
     next(c for c in commands if c.label == "New Branch").action()
 
     assert vcs.current_branch(folder) == "feature"
+
+
+def test_new_branch_from_command_lists_branches_and_stamps_and_creates(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "also there is no command palette entry for make new branch from". Stamped (and
+    # stays checked out) on "feature" -- _vcs_compare_refs()'s own stamp list only ever reads the
+    # *current* branch's own history (same as the Git panel's own compare combos), so the stamp
+    # must be on whichever branch is checked out when the palette is built.
+    from PyQt6.QtWidgets import QInputDialog
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.stamp(folder, "a release", version="1.0.0")
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("from-main", True)))
+
+    commands = project_window.build_command_palette_commands()
+    new_branch_from_command = next(c for c in commands if c.label == "New Branch From")
+    assert {c.label for c in new_branch_from_command.children} == {
+        vcs.DEFAULT_BRANCH,
+        "feature",
+        "Stamp: a release",
+    }
+
+    # Branch off "main" (not the currently checked-out "feature") -- proves this really uses the
+    # picked source, not just whatever HEAD already was.
+    next(c for c in new_branch_from_command.children if c.label == vcs.DEFAULT_BRANCH).action()
+
+    assert vcs.current_branch(folder) == "from-main"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
 
 
 def test_switch_branch_command_lists_and_switches_branches(project_window: MainWindow, tmp_path: Path) -> None:
@@ -1656,6 +2248,109 @@ def test_vcs_delete_branch_with_no_project_open_is_a_no_op(window: MainWindow) -
     window.vcs_delete_branch("feature")  # should not raise
 
 
+def test_vcs_merge_branch_fast_forwards_and_refreshes_the_ui(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    project_window.vcs_merge_branch("feature")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from feature\n"
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH
+    assert project_window.git_panel.uncommitted_count == 0
+
+
+def test_vcs_merge_branch_creates_a_two_parent_commit(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "feature.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    feature_sha = vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    main_sha = vcs.commit(folder, "main change")
+
+    project_window.vcs_merge_branch("feature")
+
+    merge_commit = vcs.graph_history(folder)[0]
+    assert sorted(merge_commit.parents) == sorted([main_sha, feature_sha])
+    assert (folder / "feature.txt").read_text(encoding="utf-8") == "from feature\n"
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from main\n"
+
+
+def test_vcs_merge_branch_reports_a_conflict_rather_than_crashing(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "main change")
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2]))
+
+    project_window.vcs_merge_branch("feature")
+
+    assert len(errors) == 1
+    assert "Notes.txt" in errors[0]
+    assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH  # merge refused, nothing committed
+
+
+def test_vcs_merge_branch_warns_before_overwriting_an_unsaved_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    widget.setPlainText("unsaved edit")
+    widget.document().setModified(True)
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_merge_branch_overwrite", lambda self, names: warned.append(names) or False
+    )
+
+    project_window.vcs_merge_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+
+
+def test_vcs_merge_branch_warns_about_uncommitted_changes_and_can_be_cancelled(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)  # create_branch() itself already switches
+    (folder / "Notes.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_confirm_uncommitted_before_switch", lambda self, paths: warned.append(paths) or "cancel"
+    )
+
+    project_window.vcs_merge_branch("feature")
+
+    assert warned == [["Notes.txt"]]
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "uncommitted edit\n"  # never overwritten
+
+
+def test_vcs_merge_branch_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_merge_branch("feature")  # should not raise
+
+
 def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1665,7 +2360,8 @@ def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     project_window._on_project_opened(folder)
     vcs.create_branch(folder, "feature")
     (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
-    vcs.record_change(folder)
+    vcs.stage_all(folder)
+    vcs.commit(folder, "edit notes")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
 
     opened = []
@@ -1677,6 +2373,331 @@ def test_vcs_compare_opens_a_diff_dialog_listing_the_changed_files(
     dialog = opened[0]
     assert dialog.windowTitle() == "main vs. feature"
     assert [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())] == ["M Notes.txt"]
+
+
+def test_vcs_open_diff_opens_a_diff_view_tab_for_the_uncommitted_change(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_diff("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    # old_pane's own second line is a blank alignment filler, not a real line of "hi\n"'s own
+    # content -- new_pane's "edited" line has nothing to line up with on the old side, so _align()
+    # pads old_pane with a blank row to keep both sides vertically aligned row-for-row.
+    assert widget.old_pane.toPlainText() == "hi\n"
+    assert widget.new_pane.toPlainText() == "hi\nedited"
+
+
+def test_vcs_open_diff_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_diff("Notes.txt")  # should not raise
+
+
+def test_clicking_a_changed_file_in_the_git_panel_opens_its_diff_tab(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+    project_window.git_panel.refresh()
+
+    project_window.git_panel.changes_list.itemClicked.emit(project_window.git_panel.changes_list.item(0))
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+
+
+# -- Changes context-menu actions (PROMPT.md: "in the changes it should be possible to right click
+# the file and then see: Open changes, open files, open file (HEAD), discard changes, stage changes
+# (or unstage changes), reveal in file explorer") ------------------------------------------------
+
+
+def test_vcs_open_file_opens_a_real_editable_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_file("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\nedited\n"
+    assert widget.isReadOnly() is False
+
+
+def test_vcs_open_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_file("Notes.txt")  # should not raise
+
+
+def test_vcs_open_file_head_opens_a_read_only_tab_with_the_committed_content(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+
+    project_window.vcs_open_file_head("Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert widget.isReadOnly() is True
+
+
+def test_vcs_open_file_head_reports_when_there_is_no_head_version(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
+    infos = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
+    before = project_window.main_panel.active_pane.count()
+
+    project_window.vcs_open_file_head("new_file.txt")
+
+    assert len(infos) == 1
+    assert project_window.main_panel.active_pane.count() == before
+
+
+def test_vcs_open_file_head_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_file_head("Notes.txt")  # should not raise
+
+
+def test_vcs_discard_reverts_the_file_after_confirming(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: True)
+
+    project_window.vcs_discard("Notes.txt")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert vcs.uncommitted_changes(folder) == []
+
+
+def test_vcs_discard_does_nothing_when_not_confirmed(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: False)
+
+    project_window.vcs_discard("Notes.txt")
+
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "edited\n"
+
+
+def test_vcs_discard_reloads_an_already_open_tab(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    project_window.main_panel.active_pane.open_file(folder / "Notes.txt")
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    monkeypatch.setattr(MainWindow, "_confirm_discard", lambda self, rel_path: True)
+
+    project_window.vcs_discard("Notes.txt")
+
+    widget = project_window.main_panel.active_pane.widget(project_window.main_panel.active_pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+
+
+def test_vcs_discard_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_discard("Notes.txt")  # should not raise
+
+
+def test_vcs_reveal_in_explorer_calls_the_os_explorer(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a))
+
+    project_window.vcs_reveal_in_explorer("Notes.txt")
+
+    assert len(calls) == 1
+    assert str(folder / "Notes.txt") in calls[0][0]
+
+
+def test_vcs_reveal_in_explorer_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_reveal_in_explorer("Notes.txt")  # should not raise
+
+
+def test_vcs_stage_adds_paths_to_the_staging_area(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+
+    project_window.vcs_stage(["Notes.txt"])
+
+    assert vcs.staged_paths(folder) == {"Notes.txt"}
+    assert project_window.git_panel.staged_list.count() == 1
+
+
+def test_vcs_stage_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_stage(["Notes.txt"])  # should not raise
+
+
+def test_vcs_unstage_removes_paths_from_the_staging_area(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+
+    project_window.vcs_unstage(["Notes.txt"])
+
+    assert vcs.staged_paths(folder) == set()
+    assert project_window.git_panel.changes_list.count() == 1
+
+
+def test_vcs_unstage_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_unstage(["Notes.txt"])  # should not raise
+
+
+# -- committing uncompiled changes (PROMPT.md: "please also give the user a warning if they are
+# committing changes that haven't yet been compiled (prompting them to compile)") -----------------
+
+
+def test_vcs_commit_warns_when_settings_have_unapplied_changes(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    (folder / "build").mkdir(parents=True, exist_ok=True)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    warned = []
+    monkeypatch.setattr(MainWindow, "_confirm_commit_uncompiled", lambda self: warned.append(1) or "cancel")
+
+    project_window.vcs_commit("edit notes")
+
+    assert warned == [1]
+    assert vcs.uncommitted_changes(folder) != []  # never committed -- cancelled
+
+
+def test_vcs_commit_proceeds_when_chosen_commit_anyway(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    (folder / "build").mkdir(parents=True, exist_ok=True)
+    (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
+    (folder / "build" / "settings.autogenerated.json").write_text('{"a": 0}', encoding="utf-8")
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["Notes.txt"])
+    monkeypatch.setattr(MainWindow, "_confirm_commit_uncompiled", lambda self: "commit")
+
+    project_window.vcs_commit("edit notes anyway")
+
+    assert vcs.history(folder)[0].message == "edit notes anyway"
+
+
+def test_vcs_commit_does_not_warn_when_nothing_is_unapplied(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    vcs.stage_all(folder)
+
+    project_window.vcs_commit("edit notes")  # should not raise or block -- nothing unapplied
+
+    assert vcs.history(folder)[0].message == "edit notes"
+
+
+# -- History "Files Changed" (PROMPT.md, a later pass: "please make it so that when clicking in
+# history on commits - it extends to show a list of files changed (which can then be clicked on to
+# view (please note this should be a single (not split) view, see sample.png for styling)) - and
+# right click should have the option to open file") -------------------------------------------
+
+
+def test_vcs_commit_selected_populates_the_git_panels_files_changed_list(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+
+    # Selecting a row in the graph is what actually emits commit_selected in real use, wired to
+    # vcs_commit_selected in __init__ -- select_row() rather than calling vcs_commit_selected()
+    # directly so set_commit_files()'s own "still the selected commit" staleness check (see its
+    # docstring) passes the same way it would for a real click.
+    project_window.git_panel.graph.select_row(0)
+
+    assert project_window.git_panel.commit_files_list.count() >= 1
+
+
+def test_vcs_commit_selected_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_commit_selected("deadbeef")  # should not raise
+
+
+def test_vcs_open_commit_diff_opens_a_unified_diff_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+
+    project_window.vcs_open_commit_diff(root_sha, "Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert isinstance(widget, UnifiedDiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    assert widget.sha == root_sha
+
+
+def test_vcs_open_commit_diff_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_commit_diff("deadbeef", "Notes.txt")  # should not raise
+
+
+def test_vcs_open_commit_file_opens_a_read_only_tab(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+
+    project_window.vcs_open_commit_file(root_sha, "Notes.txt")
+
+    pane = project_window.main_panel.active_pane
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert widget.isReadOnly() is True
+
+
+def test_vcs_open_commit_file_reports_when_the_file_did_not_exist_yet(
+    project_window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    root_sha = vcs.history(folder)[0].sha
+    infos = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: infos.append(a[2]))
+    before = project_window.main_panel.active_pane.count()
+
+    project_window.vcs_open_commit_file(root_sha, "never_existed.txt")
+
+    assert len(infos) == 1
+    assert project_window.main_panel.active_pane.count() == before
+
+
+def test_vcs_open_commit_file_with_no_project_open_is_a_no_op(window: MainWindow) -> None:
+    window.vcs_open_commit_file("deadbeef", "Notes.txt")  # should not raise
 
 
 def test_vcs_compare_labels_a_stamp_ref_with_its_message(
@@ -1793,6 +2814,23 @@ def test_delete_branch_command_lists_and_deletes_branches(project_window: MainWi
     next(c for c in delete_command.children if c.label == "feature").action()
 
     assert vcs.list_branches(folder) == [vcs.DEFAULT_BRANCH]
+
+
+def test_merge_branch_command_lists_other_branches_and_merges(project_window: MainWindow, tmp_path: Path) -> None:
+    folder, vcs = _make_vcs_project(tmp_path)
+    project_window._on_project_opened(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "feature.txt").write_text("from feature\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "feature change")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+
+    commands = project_window.build_command_palette_commands()
+    merge_command = next(c for c in commands if c.label == "Merge Branch")
+    assert [c.label for c in merge_command.children] == ["feature"]  # excludes the current branch
+    merge_command.children[0].action()
+
+    assert (folder / "feature.txt").read_text(encoding="utf-8") == "from feature\n"
 
 
 def test_restore_snapshot_command_lists_stamps_and_autosaves_and_restores(
@@ -2245,20 +3283,20 @@ def test_a_rename_shows_the_new_title_in_open_recent_next_time_its_opened(
     assert [a.text() for a in actions] == ["New Title"]
 
 
-def test_status_bar_shows_the_active_projects_title_and_folder_id(
+def test_quick_access_shows_the_active_projects_title_and_folder_id(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
-    # PROMPT.md: "please remove the dir location string (under the tabs section) and move that
-    # information into the bottom bar (in the centre): it should read test (uuid)"
+    # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+    # bar, we want to replace with the game file name and in brackets its uuid"
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Slayer Plus"}}', encoding="utf-8")
 
     project_window._on_project_opened(folder)
 
-    assert project_window.status_bar._project_label.text() == f"Slayer Plus ({folder.name})"
+    assert project_window.quick_access.button.text() == f"Slayer Plus ({folder.name})"
 
 
-def test_status_bar_clears_the_project_label_once_the_project_closes(
+def test_quick_access_label_reverts_to_the_workspace_name_once_the_project_closes(
     project_window: MainWindow, tmp_path: Path
 ) -> None:
     folder = _make_project_with_settings(tmp_path)
@@ -2266,10 +3304,10 @@ def test_status_bar_clears_the_project_label_once_the_project_closes(
 
     project_window.close_project()
 
-    assert project_window.status_bar._project_label.text() == ""
+    assert project_window.quick_access.button.text() == project_window.root_dir.name
 
 
-def test_status_bar_project_label_updates_after_a_rename(project_window: MainWindow, tmp_path: Path) -> None:
+def test_quick_access_label_updates_after_a_rename(project_window: MainWindow, tmp_path: Path) -> None:
     folder = _make_project_with_settings(tmp_path)
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "Old Title"}}', encoding="utf-8")
     project_window._on_project_opened(folder)
@@ -2277,7 +3315,7 @@ def test_status_bar_project_label_updates_after_a_rename(project_window: MainWin
     (folder / "settings" / "settings.json").write_text('{"meta": {"title": "New Title"}}', encoding="utf-8")
     project_window._sync_project_title(folder)
 
-    assert project_window.status_bar._project_label.text() == f"New Title ({folder.name})"
+    assert project_window.quick_access.button.text() == f"New Title ({folder.name})"
 
 
 def test_clicking_apply_shows_an_error_dialog_and_leaves_the_button_alone_on_failure(
@@ -2352,7 +3390,7 @@ def test_launch_rvt_with_a_project_open_passes_its_compiled_bin_as_the_target(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [bin_path]
 
@@ -2388,10 +3426,70 @@ def test_launch_rvt_opens_the_compiled_bin_not_the_frozen_source_one(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [compiled_bin]
     assert calls[0] != source_bin
+
+
+def test_launch_rvt_falls_back_to_the_source_variant_when_the_compile_fails(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROMPT.md: "when a user creates a new project from a personal game variant or inbuilt
+    # variant, the compile is not being ran and nothing is being generated in build folder. and
+    # hence nothing is opened when rvt is opened" -- a project created from a real (non-blank)
+    # variant can have a non-trivial script that fails to recompile (the decompile->recompile round
+    # trip isn't guaranteed lossless), which used to leave build/dist/*.bin unwritten and RVT
+    # launched against `None` (opening blank) instead of at least the source variant the user
+    # actually picked.
+    from in_reach.app import apply_settings, new_project, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project_dir = project.get_project_dir(tmp_path)
+    project_dir.mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    source_bin = new_project.source_variant_path(project_dir, folder)
+    source_bin.parent.mkdir(parents=True)
+    source_bin.write_bytes(b"the variant the user actually picked")
+    # No compiled_variant_path() file at all -- the compile below never gets far enough to write one.
+    window._on_project_opened(folder)
+    monkeypatch.setattr(
+        apply_settings,
+        "apply_settings_changes",
+        lambda pd, f: BuildResult(success=False, failure="Megalo compile failed"),
+    )
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.explorer_panel.rvt_button.click()
+
+    assert calls == [source_bin]
+
+
+def test_launch_rvt_opens_nothing_when_neither_compiled_nor_source_variant_exists(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from in_reach.app import apply_settings, project, rvt_launcher
+    from in_reach.app.rvt.compile import BuildResult
+
+    window.root_dir = tmp_path
+    project.get_project_dir(tmp_path).mkdir()
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    window._on_project_opened(folder)
+    monkeypatch.setattr(
+        apply_settings,
+        "apply_settings_changes",
+        lambda pd, f: BuildResult(success=False, failure="no settings.json"),
+    )
+    calls = []
+    monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
+
+    window.explorer_panel.rvt_button.click()
+
+    assert calls == [None]
 
 
 def test_launch_rvt_applies_present_settings_before_launching(
@@ -2421,7 +3519,7 @@ def test_launch_rvt_applies_present_settings_before_launching(
         lambda pd, f: calls.append((pd, f)) or BuildResult(success=True),
     )
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [(project_dir, folder)]
 
@@ -2566,7 +3664,7 @@ def test_launch_rvt_swallows_a_compile_failure_and_still_launches(
     launched = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: launched.append(target))
 
-    window.activity_bar.rvt_button.click()  # should not raise, should still launch
+    window.explorer_panel.rvt_button.click()  # should not raise, should still launch
 
     assert launched == [bin_path]
 
@@ -2584,7 +3682,7 @@ def test_launch_rvt_with_a_project_open_but_no_compiled_bin_passes_no_target(
     calls = []
     monkeypatch.setattr(rvt_launcher, "launch_rvt", lambda target=None, **k: calls.append(target))
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert calls == [None]
 
@@ -2673,9 +3771,12 @@ def test_the_watched_bin_changing_resyncs_the_build_snapshot(
     assert calls[0][1] == folder
 
 
-def test_the_watched_bin_changing_records_a_traceable_vcs_snapshot(
+def test_the_watched_bin_changing_shows_up_as_uncommitted_rather_than_auto_committing(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Same "no more silent auto-commit" behavior change as
+    # test_saving_a_file_shows_up_as_uncommitted_rather_than_auto_committing, but for an RVT-driven
+    # resync instead of an in-app save.
     from in_reach.app import new_project, project, vcs
 
     window.root_dir = tmp_path
@@ -2698,7 +3799,11 @@ def test_the_watched_bin_changing_records_a_traceable_vcs_snapshot(
 
     window._on_watched_bin_changed(str(bin_path))
 
-    assert len(vcs.history(folder)) == before + 1
+    assert len(vcs.history(folder)) == before
+    assert [c.path for c in vcs.uncommitted_changes(folder)] == ["settings/settings.json"]
+    # Same regression guard as test_saving_a_file_immediately_populates_the_git_panels_own_changes_
+    # list -- an RVT-driven resync must populate the Git panel's own "Changes" list immediately too.
+    assert window.git_panel.changes_list.count() == 1
     assert window.status_bar.vcs_label.isVisible() is True
 
 
@@ -2745,7 +3850,7 @@ def test_the_watched_bin_changing_carries_category_forward_but_not_title(
     assert "description" not in calls[0][2]
 
 
-def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_status_bar(
+def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_quick_access_label(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from in_reach.app import new_project, project
@@ -2772,7 +3877,7 @@ def test_the_watched_bin_changing_syncs_a_renamed_title_to_the_status_bar(
     window._on_watched_bin_changed(str(bin_path))
 
     assert new_project.read_project_title(folder) == "RVT Renamed"
-    assert window.status_bar._project_label.text() == f"RVT Renamed ({folder.name})"
+    assert window.quick_access.button.text() == f"RVT Renamed ({folder.name})"
 
 
 def test_a_resync_failure_does_not_crash_and_still_rewatches_the_file(
@@ -2948,14 +4053,14 @@ def test_launch_rvt_reports_a_launch_failure_rather_than_crashing(
     def _raise(*args, **kwargs):
         raise OSError("access denied")
 
-    window.activity_bar.set_rvt_enabled(True)
+    window.explorer_panel.rvt_button.setEnabled(True)
     monkeypatch.setattr(rvt_launcher, "launch_rvt", _raise)
     shown: list[str] = []
     monkeypatch.setattr(
         "in_reach.ide.main_window.QMessageBox.critical", lambda *a, **k: shown.append(a[2])
     )
 
-    window.activity_bar.rvt_button.click()
+    window.explorer_panel.rvt_button.click()
 
     assert len(shown) == 1
     assert "access denied" in shown[0]
@@ -3039,7 +4144,7 @@ def test_closing_a_tab_via_its_close_button_removes_it(window: MainWindow) -> No
     assert pane.count() == before - 1
 
 
-def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainWindow) -> None:
+def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainWindow, qtbot) -> None:
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
     first_pane.split_button.click()
@@ -3047,6 +4152,11 @@ def test_closing_the_last_tab_in_a_split_pane_auto_closes_the_pane(window: MainW
     assert new_pane.count() == 1
 
     new_pane.tabCloseRequested.emit(0)
+    # Pane/group removal is deferred one event-loop tick -- see on_pane_emptied's own docstring
+    # (PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- a native crash confirmed via faulthandler, from a sibling pane's
+    # editor getting resized mid-event-handling by the immediate splitter surgery this used to do).
+    qtbot.wait(10)
 
     assert new_pane not in main_panel.panes
     assert main_panel.split_count == 0
@@ -3126,7 +4236,23 @@ def test_panel_splitters_refuse_to_collapse_children(window: MainWindow) -> None
     assert first_group.splitter.childrenCollapsible() is False
 
 
-def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow) -> None:
+def test_panel_splitters_are_not_real_qsplitters(window: MainWindow) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- traced to a real, native access-violation crash reproducible just
+    # from *dragging* a real QSplitterHandle (independent of tab-closing/file type), persisting
+    # across two different PyQt6/Qt versions/two Python versions, that no amount of working around
+    # QSplitter itself (non-opaque resize, etc.) ever fully stopped. main_panel._splitter and every
+    # _PaneGroup.splitter are PaneSplitter (see pane_splitter.py) -- a from-scratch replacement that
+    # never constructs a real QSplitter/QSplitterHandle at all, rather than another attempt to work
+    # around one.
+    main_panel = window.main_panel
+    first_group = main_panel.panes[0].group
+
+    assert isinstance(main_panel._splitter, PaneSplitter)
+    assert isinstance(first_group.splitter, PaneSplitter)
+
+
+def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindow, qtbot) -> None:
     main_panel = window.main_panel
     source = main_panel.panes[0]
     main_panel.new_tab_in(source)
@@ -3152,6 +4278,7 @@ def test_moving_a_tab_between_panes_and_closing_an_emptied_one(window: MainWindo
         source.removeTab(0)
         dest.addTab(widget, label)
     main_panel.on_pane_emptied(source)
+    qtbot.wait(10)  # pane/group removal is deferred one event-loop tick
 
     assert source not in main_panel.panes
     assert main_panel.split_count == 0
@@ -3174,19 +4301,6 @@ def test_status_bar_reports_no_edges_when_maximized(window: MainWindow) -> None:
     status_bar = window.status_bar
 
     assert status_bar._edges_at(QPoint(0, status_bar.height() - 1)) == Qt.Edge(0)
-
-
-def test_status_bar_set_project_label_updates_and_clears_the_centered_text(window: MainWindow) -> None:
-    status_bar = window.status_bar
-    assert status_bar._project_label.text() == ""
-
-    status_bar.set_project_label("Slayer Plus (abcd1234)")
-
-    assert status_bar._project_label.text() == "Slayer Plus (abcd1234)"
-
-    status_bar.set_project_label("")
-
-    assert status_bar._project_label.text() == ""
 
 
 # -- bottom status bar: Ln/Col/Spaces (PROMPT.md: Quick Access Bar work) -------------------------
@@ -3278,6 +4392,20 @@ def test_status_bar_clear_vcs_status_hides_the_segment(window: MainWindow) -> No
     window.status_bar.clear_vcs_status()
 
     assert window.status_bar.vcs_label.isVisible() is False
+
+
+def test_status_bar_vcs_label_sits_centered_where_the_project_label_used_to(window: MainWindow) -> None:
+    # PROMPT.md: "so what we have in the middle of the bottom bar, we now want in the quick access
+    # bar[;] please then move the git information to the middle of the bottom bar" -- vcs_label now
+    # occupies the centered slot (stretch, widget, stretch) the old project label used to, rather
+    # than sitting flush at the far left.
+    layout = window.status_bar.layout()
+    vcs_index = next(
+        i for i in range(layout.count()) if layout.itemAt(i).widget() is window.status_bar.vcs_label
+    )
+    assert layout.itemAt(vcs_index - 1).spacerItem() is not None
+    assert layout.itemAt(vcs_index + 1).spacerItem() is not None
+    assert not hasattr(window.status_bar, "_project_label")
 
 
 def test_opening_a_txt_file_shows_the_cursor_segments(project_window: MainWindow, tmp_path: Path) -> None:
@@ -3500,18 +4628,6 @@ def test_main_tab_style_flattens_the_scroll_tear_indicator() -> None:
     assert "QTabBar::tear" in style.MAIN_TAB_STYLE
 
 
-def test_first_run_dialog_theme_buttons_apply_live_and_notify(qtbot) -> None:
-    notified = []
-    dialog = FirstRunDialog(on_theme_changed=lambda applied: notified.append(applied.name))
-    qtbot.addWidget(dialog)
-
-    dialog._apply_theme("Whiley")
-
-    assert notified == ["Whiley"]
-    assert dialog._theme_buttons["Whiley"].isChecked() is True
-    assert dialog._theme_buttons["Light"].isChecked() is False
-
-
 # -- Halo install/running status (PROMPT.md: "a flame icon which can be of different states
 # depending on the status of the players halo install and running detection") --------------------
 
@@ -3569,6 +4685,77 @@ def test_git_and_scripts_buttons_switch_the_sidebar_to_their_own_panels(
     assert project_window._sidebar_stack.currentWidget() is project_window.scripts_panel
 
 
+def test_documentation_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "move documentation to be its own panel. it should have a symbol of a book".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.documentation_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.documentation_panel
+    assert project_window.activity_bar.documentation_button.isChecked() is True
+
+
+def test_kanban_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "under documentation please add an icon for Kanban, this should be stubbed for
+    # now (please add entry into view)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.kanban_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.kanban_panel
+    assert project_window.activity_bar.kanban_button.isChecked() is True
+
+
+def test_maps_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.maps_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.maps_panel
+    assert project_window.activity_bar.maps_button.isChecked() is True
+
+
+def test_testing_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using a testube)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.testing_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.testing_panel
+    assert project_window.activity_bar.testing_button.isChecked() is True
+
+
+def test_llm_button_switches_the_sidebar_to_its_own_panel(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)".
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+
+    project_window.activity_bar.llm_button.click()
+
+    assert project_window._sidebar_stack.currentWidget() is project_window.llm_panel
+    assert project_window.activity_bar.llm_button.isChecked() is True
+
+
 def test_settings_cog_opens_the_settings_dialog(
     window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3607,39 +4794,55 @@ def test_settings_dialog_theme_change_updates_the_main_window_chrome(
     assert "#700000" in window.status_bar.styleSheet()
 
 
-def test_first_run_flag_defaults_to_true_and_flips_to_false_after_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_install_crash_logging_logs_the_exception_and_chains_to_the_previous_hook(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    env_path = project_dir / ".env"
-    env_path.write_text("FIRST_USE=true\n")
+    # PROMPT.md: "if i have two tabs open ... and i close the welcome, things crash" -- "the whole
+    # app just disappears, no error" turned out to be plausible even for an ordinary Python
+    # exception: OUTPUT_TO_STREAM defaults to false (see logging_setup), and a GUI app launched
+    # without an attached console has nowhere for the default sys.excepthook's own stderr print to
+    # land at all. This is the regression guard that an unhandled exception is now at least logged
+    # (to LOG_FILE) rather than vanishing with zero trace, and that installing this hook doesn't
+    # swallow/replace whatever hook was already there.
+    import logging
 
-    assert ide_app._is_first_use(env_path) is True
+    from in_reach.app import logging_setup
 
-    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
-    monkeypatch.setattr(FirstRunDialog, "exec", lambda self: 0)
+    in_reach_logger = logging.getLogger(logging_setup._LOGGER_NAME)
+    in_reach_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.CRITICAL, logger=logging_setup._LOGGER_NAME)
+    try:
+        chained_calls = []
+        monkeypatch.setattr(sys, "excepthook", lambda *args: chained_calls.append(args))
 
-    ide_app.run(project_dir)
+        ide_app._install_crash_logging()
 
-    assert ide_app._is_first_use(env_path) is False
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            exc_info = sys.exc_info()
+        sys.excepthook(*exc_info)
+
+        assert chained_calls == [exc_info]
+        assert any(
+            record.levelno == logging.CRITICAL and "unhandled exception" in record.message
+            for record in caplog.records
+        )
+    finally:
+        in_reach_logger.removeHandler(caplog.handler)
 
 
-def test_second_run_skips_the_first_run_dialog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project_dir = tmp_path / ".in-reach"
-    project_dir.mkdir()
-    env_path = project_dir / ".env"
-    env_path.write_text("FIRST_USE=false\n")
+def test_install_crash_logging_does_not_stack_a_second_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Called on every ide_app.run() -- e.g. more than once in the same process across tests --
+    # calling it twice must not wrap the hook twice (an ever-growing chain would eventually recurse).
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
 
-    shown = []
-    monkeypatch.setattr(FirstRunDialog, "exec", lambda self: shown.append(True))
-    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+    ide_app._install_crash_logging()
+    hook_after_first_install = sys.excepthook
 
-    ide_app.run(project_dir)
+    ide_app._install_crash_logging()
 
-    assert shown == []
+    assert sys.excepthook is hook_after_first_install
 
 
 def test_run_shows_the_restore_icon_since_it_launches_maximized(
@@ -3650,7 +4853,6 @@ def test_run_shows_the_restore_icon_since_it_launches_maximized(
     # too, or the maximize button stays stuck showing win_maximize despite already being maximized.
     project_dir = tmp_path / ".in-reach"
     project_dir.mkdir()
-    (project_dir / ".env").write_text("FIRST_USE=false\n")
     monkeypatch.setattr(QApplication, "exec", lambda self: 0)
 
     def existing_windows() -> set[int]:
@@ -3722,7 +4924,7 @@ def test_edit_menu_has_undo_redo_cut_copy_paste_with_shortcuts(project_window: M
     menu = project_window.top_bar.edit_menu_button.menu()
     actions = [action for action in menu.actions() if not action.isSeparator()]
 
-    assert [action.text() for action in actions] == ["Undo", "Redo", "Cut", "Copy", "Paste"]
+    assert [action.text() for action in actions] == ["Undo", "Redo", "Cut", "Copy", "Paste", "Find", "Replace"]
     shortcuts = {action.text(): action.shortcut().toString() for action in actions}
     assert shortcuts == {
         "Undo": "Ctrl+Z",
@@ -3730,7 +4932,250 @@ def test_edit_menu_has_undo_redo_cut_copy_paste_with_shortcuts(project_window: M
         "Cut": "Ctrl+X",
         "Copy": "Ctrl+C",
         "Paste": "Ctrl+V",
+        "Find": "Ctrl+F",
+        "Replace": "Ctrl+R",
     }
+
+
+def test_selection_menu_has_select_all_with_its_shortcut(project_window: MainWindow) -> None:
+    # PROMPT.md: "Under Selection, please add Select All (ctrl A)".
+    menu = project_window.top_bar.selection_menu_button.menu()
+    actions = menu.actions()
+
+    assert [action.text() for action in actions] == ["Select All"]
+    assert actions[0].shortcut().toString() == "Ctrl+A"
+
+
+def test_select_all_highlights_the_active_tabs_full_text(project_window: MainWindow, tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello world", encoding="utf-8")
+    project_window.open_quick_access_file(path)
+    editor = project_window._active_text_editor()
+    assert editor is not None
+
+    project_window.select_all()
+
+    assert editor.textCursor().selectedText() == "hello world"
+
+
+def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_in_order(
+    project_window: MainWindow,
+) -> None:
+    # PROMPT.md: "Under View, please add Command Palette, a sub menu for appearance, then options
+    # to switch to the appropriate side panel (which should be in this order ...): compile,
+    # dashboard, git, scripts, maps, docs, testing, ai, search ... please add an entry for view
+    # logs" -- "compile"/"rvt" aren't real sidebar views (Apply is a plain action, and RVT moved to
+    # the Dashboard's own button row, see explorer.py), so they're not menu entries here. A later
+    # PROMPT.md pass moved "Documentation" below "Testing" ("move documention to come below testing
+    # in default order and in the top bar view"). A further pass ("please move search magnifying
+    # glass to come under dashboard ... and move in view topbar tap"; "under documentation please
+    # add an icon for Kanban ... please move tests to come before llm (and re-arrange order in
+    # view)") moved Search up under Dashboard, added Kanban right after Documentation, and moved
+    # Testing to sit directly ahead of LLM.
+    menu = project_window.top_bar.view_menu_button.menu()
+    top_level = [action.text() for action in menu.actions() if not action.isSeparator()]
+
+    assert top_level == [
+        "Command Palette",
+        "Appearance",
+        "Dashboard",
+        "Search",
+        "Git",
+        "Scripts",
+        "Map Files",
+        "Documentation",
+        "Kanban",
+        "Testing",
+        "LLM",
+        "View Logs",
+    ]
+    command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")
+    assert command_palette_action.shortcut().toString() == "Ctrl+Shift+P"
+
+
+def test_view_menu_appearance_submenu_has_set_theme_and_set_ui_scale(project_window: MainWindow) -> None:
+    menu = project_window.top_bar.view_menu_button.menu()
+    appearance = next(a for a in menu.actions() if a.text() == "Appearance").menu()
+
+    assert [a.text() for a in appearance.actions()] == ["Set Theme", "Set UI Scale"]
+    theme_names = [a.text() for a in appearance.actions()[0].menu().actions()]
+    assert theme_names == list(theme.list_themes())
+    scale_actions = [a.text() for a in appearance.actions()[1].menu().actions()]
+    assert scale_actions == ["Increase", "Decrease"]
+
+
+def test_view_menu_panel_entries_click_the_matching_activity_bar_button(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    menu = project_window.top_bar.view_menu_button.menu()
+    maps_action = next(a for a in menu.actions() if a.text() == "Map Files")
+
+    maps_action.trigger()
+
+    assert project_window.activity_bar.maps_button.isChecked() is True
+    assert project_window._sidebar_stack.currentWidget() is project_window.maps_panel
+
+
+def test_view_menu_view_logs_entry_opens_the_logs_tab(project_window: MainWindow) -> None:
+    project_window.top_bar.panel_toggle.setChecked(False)
+    menu = project_window.top_bar.view_menu_button.menu()
+    view_logs_action = next(a for a in menu.actions() if a.text() == "View Logs")
+
+    view_logs_action.trigger()
+
+    assert project_window._bottom_panel_card.isVisible() is True
+    assert project_window.bottom_panel.currentWidget() is project_window.bottom_panel.logs_panel
+
+
+# -- top bar "Launch" menu (PROMPT.md: "also in the top bar next to view please add Launch with
+# options - Launch Halo MCC (greyed unless verified), Launch RVT (when available), both with
+# shortcuts") --------------------------------------------------------------------------------
+
+
+def test_launch_menu_has_mcc_and_rvt_entries_with_shortcuts(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+    assert launch_button.text() == "Launch"
+    assert launch_button.mcc_action.text() == "Launch Halo MCC"
+    assert launch_button.mcc_action.shortcut().toString() == "Ctrl+Shift+M"
+    assert launch_button.rvt_action.text() == "Launch RVT"
+    assert launch_button.rvt_action.shortcut().toString() == "Ctrl+Shift+L"
+
+
+def test_launch_menu_actions_start_disabled(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+    assert launch_button.mcc_action.isEnabled() is False
+    assert launch_button.rvt_action.isEnabled() is False
+
+
+def test_launch_menu_rvt_action_greys_out_with_no_project_open(window: MainWindow) -> None:
+    launch_button = window.top_bar.launch_menu_button
+
+    launch_button.menu().aboutToShow.emit()
+
+    assert launch_button.rvt_action.isEnabled() is False
+
+
+def test_launch_menu_rvt_action_enables_once_a_project_opens(
+    project_window: MainWindow, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    launch_button = project_window.top_bar.launch_menu_button
+
+    launch_button.menu().aboutToShow.emit()
+
+    assert launch_button.rvt_action.isEnabled() is True
+
+
+def test_launch_rvt_from_menu_is_a_no_op_with_no_project_open(window: MainWindow, monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(window, "launch_rvt", lambda: called.append(True))
+
+    window.launch_rvt_from_menu()
+
+    assert called == []
+
+
+def test_launch_rvt_from_menu_launches_once_a_project_opens(
+    project_window: MainWindow, tmp_path: Path, monkeypatch
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    called = []
+    monkeypatch.setattr(project_window, "launch_rvt", lambda: called.append(True))
+
+    project_window.launch_rvt_from_menu()
+
+    assert called == [True]
+
+
+def test_halo_mcc_verified_reflects_the_project_root_env(project_window: MainWindow) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    assert project_window.halo_mcc_verified() is False
+
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HALO_MCC_KEY, r"C:\Games\MCC")
+
+    assert project_window.halo_mcc_verified() is True
+
+
+def test_launch_mcc_from_menu_is_a_no_op_unless_verified(window: MainWindow, monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr("in_reach.ide.main_window.mcc_launcher.launch_mcc", lambda: called.append(True))
+
+    window.launch_mcc_from_menu()
+
+    assert called == []
+
+
+def test_launch_mcc_from_menu_launches_once_verified(project_window: MainWindow, monkeypatch) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HALO_MCC_KEY, r"C:\Games\MCC")
+    called = []
+    monkeypatch.setattr("in_reach.ide.main_window.mcc_launcher.launch_mcc", lambda: called.append(True))
+
+    project_window.launch_mcc_from_menu()
+
+    assert called == [True]
+
+
+# -- Dashboard "Quick Launch" Built-in/Hot Reload folder buttons (PROMPT.md: "underneath that top
+# row of buttons, we want a subheader saying 'Built-in' ... then a subheader saying hot reload")
+# ---------------------------------------------------------------------------------------------
+
+
+def test_open_builtin_folder_opens_the_env_resolved_path(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    real_folder = tmp_path / "game_variants"
+    real_folder.mkdir()
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.STANDARD_VARIANTS_KEY, str(real_folder))
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+
+    project_window.explorer_panel.open_builtin_folder_requested.emit(system_verify.STANDARD_VARIANTS_KEY)
+
+    assert opened == [real_folder]
+
+
+def test_open_builtin_folder_warns_instead_of_opening_when_unresolved(
+    project_window: MainWindow, monkeypatch
+) -> None:
+    from in_reach.app import system_verify
+
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(True)))
+
+    project_window.explorer_panel.open_builtin_folder_requested.emit(system_verify.STANDARD_VARIANTS_KEY)
+
+    assert opened == []
+    assert shown == [True]
+
+
+def test_builtin_folder_button_click_reaches_main_window(project_window: MainWindow, tmp_path: Path) -> None:
+    from in_reach.app import env_file, project, system_verify
+
+    real_folder = tmp_path / "hotreload"
+    real_folder.mkdir()
+    env_path = system_verify.env_path_for(project.get_project_dir(project_window.root_dir))
+    env_file.update_env_value(env_path, system_verify.HOTRELOAD_KEY, str(real_folder))
+    opened: list[Path] = []
+    project_window.open_folder_in_os_explorer = opened.append
+
+    project_window.explorer_panel.hotreload_button.click()
+
+    assert opened == [real_folder]
 
 
 def test_edit_menu_actions_act_on_the_active_text_editor(project_window: MainWindow, tmp_path: Path) -> None:
@@ -3792,6 +5237,27 @@ def test_open_new_window_creates_and_tracks_another_mainwindow(
     child = project_window._child_windows[0]
     assert child.root_dir == project_window.root_dir
     assert child.isMaximized() is True
+
+
+def test_open_new_window_starts_blank_even_with_a_project_already_open(
+    project_window: MainWindow, tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression test: open_new_window() used to construct the child with only root_dir, so its
+    # own __init__ fell back to restoring PROJECT_DIR_KEY from that *same* root_dir's .env --
+    # which opening a project in this window had just written -- reopening the same project in
+    # the "new" window instead of leaving it blank (same working directory, no project loaded).
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+    folder = tmp_path / "project"
+    folder.mkdir()
+    project_window._on_project_opened(folder)
+    assert project_window.explorer_panel.current_folder == folder
+
+    project_window.open_new_window()
+
+    child = project_window._child_windows[0]
+    qtbot.addWidget(child)
+    assert child.root_dir == project_window.root_dir
+    assert child.explorer_panel.current_folder is None
 
 
 def test_clicking_a_file_in_the_explorer_panel_opens_it_in_the_active_pane(

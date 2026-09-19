@@ -45,8 +45,10 @@ import shutil
 import string
 from pathlib import Path
 
-from in_reach.app import env_file, maps_io
+from in_reach.app import env_file, logging_setup, maps_io
 from in_reach.app.categories import EngineCategory, EngineIcon, default_icon_for, mismatch_warning
+
+_logger = logging_setup.get_logger(__name__)
 
 PROJECT_DIR_KEY = "PROJECT_DIR"
 
@@ -305,6 +307,7 @@ def _decompile_source_variant(
             description=description,
         )
     except Exception as exc:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+        _logger.exception("couldn't decompile %s into %s", bin_path, folder)
         return f"Couldn't decompile {bin_path.name} into this project:\n{exc}"
     return None
 
@@ -456,6 +459,8 @@ def create_gametype_project(
     # first snapshot captures the whole thing rather than a partially-written folder.
     from in_reach.app import vcs
 
-    vcs.init(folder)
+    # PROMPT.md: "when a gametype is innited it should be stamped with commit 'gametype init'".
+    vcs.init(folder, stamp_message="gametype init")
 
+    _logger.info("created gametype project %r at %s", title, folder)
     return folder, warning

@@ -524,3 +524,14 @@ def test_create_gametype_project_starts_a_shadow_history(project_dir: Path) -> N
 
     assert vcs.is_initialized(folder) is True
     assert len(vcs.history(folder)) == 1
+
+
+def test_create_gametype_project_stamps_its_first_snapshot_as_gametype_init(project_dir: Path) -> None:
+    # PROMPT.md: "when a gametype is innited it should be stamped with commit 'gametype init'".
+    from in_reach.app import vcs
+
+    folder, _warning = new_project.create_gametype_project(project_dir, "Blank")
+
+    (snapshot,) = vcs.history(folder)
+    assert snapshot.is_stamp is True
+    assert snapshot.stamp_message == "gametype init"

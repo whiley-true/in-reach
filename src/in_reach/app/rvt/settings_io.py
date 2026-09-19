@@ -24,6 +24,7 @@ reusing :func:`load_script_settings`'s lenient behavior for its own script_setti
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -139,6 +140,36 @@ def load_meta_category(path: Path) -> tuple[EngineCategory, EngineIcon | None]:
     except KeyError:
         category_icon = None
     return category, category_icon
+
+
+def load_meta_generated_at(path: Path) -> datetime | None:
+    """Reads back just ``meta.generated_at`` from an already-decompiled ``settings.json`` -- used
+    by :func:`~in_reach.app.rvt.decompile.resync_from_bin`/``write_build_snapshot``'s own callers to
+    carry this value forward across every later resync/compile (PROMPT.md: "every compile was
+    updating this value and causing git changes[;] instead created at and modified at should be set
+    to the same value of when the gametype was created in in-reach") -- same "carry the project's
+    own value forward instead of losing it to a fresh re-derivation" pattern as
+    :func:`load_meta_category`, just for a field :func:`~in_reach.app.rvt.extraction._extract_meta`
+    would otherwise always re-stamp with ``datetime.now()`` on every single extraction.
+
+    Returns ``None`` if ``path`` doesn't exist, fails to parse, or has no (or an unparseable)
+    ``meta.generated_at`` -- callers treat that the same as :func:`decompile.write_build_snapshot`'s
+    own ``created_at=None`` default: no override, so the freshly-extracted value (``datetime.now()``,
+    correct exactly once -- a project's very first decompile, which has no prior settings.json to
+    read this back from at all) wins.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    meta = data.get("meta") or {}
+    value = meta.get("generated_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def load_meta_title_description(path: Path) -> tuple[str, str]:

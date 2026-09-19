@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar
+from PyQt6 import sip
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QTabBar, QToolButton
 
 import in_reach
 from in_reach.ide import icons
@@ -385,6 +386,93 @@ def test_unpinning_leaves_the_tab_in_place(window: MainWindow) -> None:
     assert pane._tab_state_for(pane.widget(0)).pinned is False
 
 
+def test_dragging_an_unpinned_tab_cannot_land_left_of_a_pinned_one(window: MainWindow) -> None:
+    # Regression test: setMovable(True)'s own built-in drag reorder (QTabBar.moveTab under the
+    # hood, same as a real mouse drag) has no notion of pinned tabs, and used to let the user drag
+    # an unpinned tab all the way to index 0, ahead of a pinned one -- _on_tab_moved() must correct
+    # that back after every move, whatever triggered it.
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    main_panel.new_tab_in(pane)
+    welcome = pane.widget(0)
+    untitled_2 = pane.widget(2)
+    pane._toggle_pin(pane.indexOf(welcome))
+    assert pane.indexOf(welcome) == 0
+
+    # Simulates the same drag a user would perform: dragging the rightmost (unpinned) tab all the
+    # way to the front, past the pinned Welcome tab.
+    pane.tabBar().moveTab(pane.indexOf(untitled_2), 0)
+
+    assert pane.indexOf(welcome) == 0
+    assert pane._tab_state_for(welcome).pinned is True
+    assert pane._tab_state_for(untitled_2).pinned is False
+
+
+def test_pinned_tab_shows_a_pin_icon_instead_of_the_close_x(window: MainWindow) -> None:
+    # PROMPT.md: "when a tab is pinned, it should have a pin icon instead of an x icon, when the
+    # pin is clicked it should become unpinned and the pin should convert to a x."
+    pane = window.main_panel.panes[0]
+    button = pane.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide)
+
+    assert _close_icon_image(button) == _expected_icon_image("win_close")
+
+    pane._toggle_pin(0)
+    index = pane.indexOf(pane.widget(0))
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    assert _close_icon_image(button) == _expected_icon_image("tab_pin")
+
+    pane._toggle_pin(index)
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    assert _close_icon_image(button) == _expected_icon_image("win_close")
+
+
+def test_pinned_tab_close_button_actually_repaints_the_pin_icon(window: MainWindow) -> None:
+    # Regression test: setTabsClosable(True)'s auto-created close button is a private
+    # QTabBar::CloseButton whose paintEvent always draws the style's built-in close glyph and
+    # never looks at the button's own icon() -- _update_close_icon()'s setIcon() calls were
+    # silently changing that property without ever changing what got painted, so the pin/dirty
+    # icon swap never actually showed on screen despite _tab_state.pinned (and _close_icon_image,
+    # which reads icon() rather than the real paint) being correct. Asserting a real QToolButton
+    # (whose own paintEvent does honor icon()) is installed, and that its rendered pixels actually
+    # differ between states, is what would have caught that.
+    pane = window.main_panel.panes[0]
+    button = pane.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide)
+    assert type(button) is QToolButton
+    unpinned_render = button.grab().toImage()
+
+    pane._toggle_pin(0)
+    index = pane.indexOf(pane.widget(0))
+    button = pane.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    pinned_render = button.grab().toImage()
+
+    assert pinned_render != unpinned_render
+
+
+def test_clicking_the_pin_icon_unpins_instead_of_closing_the_tab(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    before = pane.count()
+    pane._toggle_pin(0)
+    assert pane._tab_state_for(pane.widget(0)).pinned is True
+
+    pane._handle_tab_close_requested(0)
+
+    assert pane.count() == before
+    assert pane._tab_state_for(pane.widget(0)).pinned is False
+
+
+def test_clicking_the_close_x_still_closes_an_unpinned_tab(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    pane = main_panel.panes[0]
+    main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    before = pane.count()
+
+    pane._handle_tab_close_requested(index)
+
+    assert pane.count() == before - 1
+
+
 # -- copy / reveal path actions -----------------------------------------------------------------
 
 
@@ -477,7 +565,8 @@ def test_context_menu_lists_the_expected_actions_in_order(window: MainWindow, mo
 
     labels = [action.text() for action in captured["menu"].actions() if not action.isSeparator()]
     assert labels == [
-        "Close",
+        "Save\tCtrl+S",
+        "Close\tCtrl+F4",
         "Close Others",
         "Close to the Right",
         "Close Saved",
@@ -489,10 +578,14 @@ def test_context_menu_lists_the_expected_actions_in_order(window: MainWindow, mo
         "Pin",
         "Split Right",
         "Split Down",
+        "Move to Window",
     ]
     by_text = {action.text(): action for action in captured["menu"].actions()}
+    # The first tab is the Welcome tab -- nothing to save, and no file path behind it yet.
+    assert by_text["Save\tCtrl+S"].isEnabled() is False
     assert by_text["Copy Path"].isEnabled() is False
     assert by_text["Reveal in File Explorer"].isEnabled() is False
+    assert by_text["Move to Window"].isEnabled() is True
 
 
 def test_context_menu_enables_path_actions_once_a_tab_has_a_file(
@@ -539,6 +632,250 @@ def test_context_menu_split_actions_grey_out_once_maxed(window: MainWindow, monk
 
     by_text = {action.text(): action for action in captured["menu"].actions()}
     assert by_text["Split Right"].isEnabled() is False
+
+
+def _actions_from_context_menu(pane: TabPane, index: int, monkeypatch) -> list:
+    captured = {}
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a, **k: captured.setdefault("menu", self))
+    pane._show_tab_context_menu(pane.tabBar().tabRect(index).center())
+    return list(captured["menu"].actions())
+
+
+def test_context_menu_save_action_is_enabled_for_a_text_editor_tab(
+    window: MainWindow, monkeypatch
+) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)  # a fresh Untitled-*.txt TextEditorWidget tab
+    index = pane.currentIndex()
+
+    by_text = {
+        action.text(): action for action in _actions_from_context_menu(pane, index, monkeypatch)
+    }
+
+    assert by_text["Save\tCtrl+S"].isEnabled() is True
+
+
+def test_context_menu_save_action_saves_the_right_clicked_tab(
+    window: MainWindow, monkeypatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "notes.txt"
+    monkeypatch.setattr(TabPane, "_ask_save_path", lambda self, default_dir, name: target)
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    pane.widget(index).setPlainText("hello")
+
+    menu_action = next(
+        action
+        for action in _actions_from_context_menu(pane, index, monkeypatch)
+        if action.text() == "Save\tCtrl+S"
+    )
+    menu_action.trigger()
+
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+# -- "Move to Window" (PROMPT.md: "please also add a move to window option - this should move the
+# tab to a popout window where other tabs can also be dragged to") -------------------------------
+
+
+def test_move_to_window_creates_a_popout_with_the_tab(window: MainWindow, monkeypatch, tmp_path: Path) -> None:
+    from in_reach.ide.tabs import _PopoutWindow
+
+    pane = window.main_panel.panes[0]
+    file_path = tmp_path / "notes.txt"
+    file_path.write_text("hi", encoding="utf-8")
+    pane.open_file(file_path)
+    index = pane.indexOf(pane.widget(pane.currentIndex()))
+    content_widget = pane.widget(index)
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert isinstance(popout, _PopoutWindow)
+    assert popout.pane.count() == 1
+    assert popout.pane.widget(0) is content_widget
+    assert popout.pane in window.main_panel.panes
+    assert popout.pane.group is None
+
+
+def test_move_to_window_title_is_the_active_project_name(qtbot, tmp_path: Path) -> None:
+    from in_reach.app import new_project
+
+    # Its own isolated root_dir (rather than the shared `window` fixture's, which defaults to the
+    # real repo cwd) -- _adopt_project() below persists "last opened project" to root_dir's own
+    # .env, which would otherwise leak into every other test's fresh MainWindow() the same way a
+    # real user's own install state would.
+    isolated_window = MainWindow(root_dir=tmp_path / "root", restore_last_project=False)
+    qtbot.addWidget(isolated_window)
+    folder = tmp_path / "project"
+    (folder / "settings").mkdir(parents=True)
+    (folder / "settings" / "settings.json").write_text(
+        '{"meta": {"title": "Slayer Plus"}}', encoding="utf-8"
+    )
+    isolated_window._adopt_project(folder)
+    pane = isolated_window.main_panel.active_pane
+    isolated_window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = isolated_window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.windowTitle() == new_project.read_project_title(folder)
+
+
+def test_move_to_window_with_no_project_open_titles_it_in_reach(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.windowTitle() == "in-reach"
+
+
+def test_move_to_window_removes_the_tab_from_the_source_pane(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    count_before = pane.count()
+
+    window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert pane.count() == count_before - 1
+
+
+def test_moved_tab_hides_split_buttons(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    assert popout.pane.split_button.isVisible() is False
+    assert popout.pane.vsplit_button.isVisible() is False
+
+
+def test_a_tab_can_be_dragged_from_the_main_window_into_a_popout(window: MainWindow) -> None:
+    # The core "other tabs can also be dragged to" guarantee: a popout's pane is a fully ordinary
+    # TabPane registered in MainPanelArea.panes, so the exact same cross-pane drop logic every
+    # other pane already uses (TabPane.dropEvent, keyed by MainPanelArea.find_pane) works unchanged.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)  # a tab to move into the popout
+    window.main_panel.new_tab_in(pane)  # a tab to drag in afterward
+    moved_index = 1
+    popout = window.main_panel.move_tab_to_new_window(pane, moved_index)
+    remaining_index = pane.currentIndex()
+    dragged_widget = pane.widget(remaining_index)
+
+    from PyQt6.QtCore import QMimeData
+    from in_reach.ide.tabs import _MIME_TYPE
+
+    class _FakeDropEvent:
+        def __init__(self, mime):
+            self._mime = mime
+
+        def mimeData(self):
+            return self._mime
+
+        def acceptProposedAction(self):
+            pass
+
+    mime = QMimeData()
+    mime.setData(_MIME_TYPE, f"{id(pane)}:{remaining_index}".encode("utf-8"))
+    popout.pane.dropEvent(_FakeDropEvent(mime))
+
+    assert popout.pane.count() == 2
+    assert dragged_widget.parentWidget() is not None
+    assert any(popout.pane.widget(i) is dragged_widget for i in range(popout.pane.count()))
+
+
+def test_closing_the_last_tab_in_a_popout_closes_the_window(qtbot, window: MainWindow) -> None:
+    # PROMPT.md: "we have a bug where if a the last tab in a popped out window is closed, it stays
+    # open. please fix this (on last tab close window should close)".
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    popout_pane = popout.pane
+
+    popout_pane._close_tab(0)
+    # on_pane_emptied()'s own removal is deferred one event-loop tick, and force_close()'s own
+    # deleteLater() can land within that same wait -- either "hidden" or "actually deleted" proves
+    # the fix (the exact bug: it used to just sit there, visibly still open, neither ever happening).
+    qtbot.waitUntil(lambda: sip.isdeleted(popout) or not popout.isVisible(), timeout=2000)
+
+    assert popout_pane not in window.main_panel.panes
+
+
+def test_clicking_the_popouts_own_close_button_with_the_last_tab_closes_it(
+    qtbot, window: MainWindow
+) -> None:
+    # PROMPT.md: "also the close icon is not closing the close window" -- the native titlebar 'X'
+    # (Alt+F4, etc.), not a tab's own close button.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    popout_pane = popout.pane
+
+    popout.close()
+    qtbot.wait(50)  # the tab closes synchronously; on_pane_emptied()'s own teardown is deferred
+
+    # force_close()'s own deleteLater() has actually run by now -- sip.isdeleted(), not
+    # isVisible(), is the real assertion that the C++ object (not just the Python bookkeeping) is
+    # actually gone, matching the exact bug: it used to just sit there, visibly still open.
+    assert sip.isdeleted(popout)
+    assert popout_pane not in window.main_panel.panes
+
+
+def test_clicking_the_popouts_own_close_button_prompts_for_a_dirty_tab(
+    window: MainWindow, monkeypatch
+) -> None:
+    from in_reach.ide.tabs import _SaveChoice
+
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    pane.widget(index).document().setModified(True)
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    monkeypatch.setattr(TabPane, "_ask_save_choice", lambda self, label: _SaveChoice.CANCEL)
+
+    popout.close()
+
+    assert sip.isdeleted(popout) is False
+    assert popout.isVisible() is True
+    assert popout.pane.count() == 1
+
+
+def test_split_actions_are_disabled_in_a_popouts_own_context_menu(
+    window: MainWindow, monkeypatch
+) -> None:
+    # A floating pane can't split at all (there's no second slot in a popout window's own layout
+    # to split into) -- Split Right/Split Down must read disabled from its own context menu too.
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+
+    by_text = {
+        action.text(): action
+        for action in _actions_from_context_menu(popout.pane, 0, monkeypatch)
+    }
+    assert by_text["Split Right"].isEnabled() is False
+    assert by_text["Split Down"].isEnabled() is False
+
+
+def test_split_from_and_vsplit_from_are_no_ops_for_a_floating_pane(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    window.main_panel.new_tab_in(pane)
+    index = pane.currentIndex()
+    popout = window.main_panel.move_tab_to_new_window(pane, index)
+    group_count_before = len(window.main_panel.groups)
+
+    window.main_panel.split_from(popout.pane)
+    window.main_panel.vsplit_from(popout.pane)
+
+    assert len(window.main_panel.groups) == group_count_before
 
 
 # -- drag/drop preserves per-tab state ------------------------------------------------------------
@@ -928,6 +1265,75 @@ def test_splitting_a_pane_with_a_regular_file_has_no_padlock_icon(
     assert new_pane.tabIcon(new_pane.currentIndex()).isNull() is True
 
 
+def test_closing_a_split_pane_source_tab_leaves_its_duplicate_usable(
+    window: MainWindow, tmp_path: Path, qtbot
+) -> None:
+    # A real, native access-violation crash (PROMPT.md: "if i have two tabs open ... and i close
+    # the welcome, things crash"), eventually traced -- via Application Verifier's page heap, well
+    # past every splitter/resize theory that came before it -- to a genuine use-after-free: a
+    # split-pane duplicate shares its source tab's own QTextDocument (module docstring), but
+    # QPlainTextEdit.setDocument() never reparents it away from whichever editor originally created
+    # it, so closing *that* editor first let Qt's own parent-child cleanup delete the document out
+    # from under the still-open duplicate. MainPanelArea._register_document_user/
+    # _unregister_document_user (wired through TabPane._track_tab/_release_tab_widget) now refcount
+    # it instead -- this closes the *source* tab (not the duplicate) and then touches the duplicate,
+    # which would raise sip's own "wrapped C/C++ object has been deleted" RuntimeError (the Python-
+    # level symptom of the same underlying bug) if the fix ever regressed.
+    source_pane = window.main_panel.panes[0]
+    path = tmp_path / "script.txt"
+    path.write_text("hello\nworld\n", encoding="utf-8")
+    source_pane.open_file(path)
+    source_index = source_pane.currentIndex()
+    source_editor = source_pane.widget(source_index)
+
+    source_pane.split_button.click()
+    duplicate_pane = window.main_panel.panes[-1]
+    duplicate_editor = duplicate_pane.widget(duplicate_pane.currentIndex())
+    assert duplicate_editor.document() is source_editor.document()
+
+    source_pane._close_tab(source_index)
+    qtbot.wait(10)
+
+    assert duplicate_editor.toPlainText() == "hello\nworld\n"
+    assert duplicate_editor.document().blockCount() == 3
+
+
+def test_document_is_only_deleted_once_every_view_of_it_closes(
+    window: MainWindow, tmp_path: Path, qtbot
+) -> None:
+    pane = window.main_panel.panes[0]
+    path = tmp_path / "script.txt"
+    path.write_text("hi", encoding="utf-8")
+    pane.open_file(path)
+    index = pane.currentIndex()
+    document = pane.widget(index).document()
+    area = window.main_panel
+
+    assert document in area._document_users
+    assert area._document_owner[document] is pane.widget(index)
+
+    pane.split_button.click()
+    duplicate_pane = window.main_panel.panes[-1]
+    assert len(area._document_users[document]) == 2
+
+    # Closing the *owner* first (source_state.path's original tab) -- see
+    # _register_document_user's own docstring for why its C++ object is deliberately kept alive
+    # (parked, hidden) here rather than actually destroyed, since the duplicate still shares its
+    # document.
+    owner_widget = pane.widget(index)
+    pane._close_tab(index)
+    qtbot.wait(10)
+    assert document in area._document_users
+    assert document in area._parked_owners
+    assert sip.isdeleted(owner_widget) is False
+
+    duplicate_index = duplicate_pane.currentIndex()
+    duplicate_pane._close_tab(duplicate_index)
+    qtbot.wait(10)
+    assert document not in area._document_users
+    assert document not in area._parked_owners
+
+
 # -- schema-checked save (PROMPT.md: "the save should fail") ------------------------------------
 
 
@@ -1128,6 +1534,190 @@ def test_open_file_reports_an_unreadable_file_rather_than_raising(
     assert pane.count() == before
 
 
+# -- open_diff (PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should
+# appear showing the original on the left and highlighted changes on the right (like vscode git)")
+
+def test_open_diff_adds_a_diff_view_tab(window: MainWindow) -> None:
+    from in_reach.ide.diff_view import DiffViewWidget
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_diff("settings/settings.json", old_text="a\n", new_text="b\n")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert isinstance(widget, DiffViewWidget)
+    assert widget.rel_path == "settings/settings.json"
+    assert pane.tabText(index) == "settings.json (diff)"
+    assert widget.old_pane.toPlainText() == "a"
+    assert widget.new_pane.toPlainText() == "b"
+
+
+def test_open_diff_switches_to_an_already_open_diff_tab_instead_of_duplicating(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert pane.count() == before
+
+
+def test_open_diff_refreshes_an_already_open_tabs_content(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    pane.open_diff("Notes.txt", old_text="x\n", new_text="y\n")
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.old_pane.toPlainText() == "x"
+    assert widget.new_pane.toPlainText() == "y"
+
+
+def test_open_diff_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
+def test_open_diff_does_not_collide_with_open_file_for_the_same_path(window: MainWindow, tmp_path: Path) -> None:
+    # A diff tab must never be mistaken for the real, editable file at the same path -- clicking
+    # the real file in the Explorer should always land on the real editable tab, not the read-only
+    # diff view, even if the diff tab happens to sit earlier in the pane.
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.txt"
+    source.write_text("hi\n", encoding="utf-8")
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="hi\n")
+
+    pane.open_file(source)
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "hi\n"
+    assert pane._tab_state_for(widget).path == source
+
+
+def test_open_diff_is_not_included_in_dirty_tab_names_under(window: MainWindow, tmp_path: Path) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_diff("Notes.txt", old_text="a\n", new_text="b\n")
+
+    assert window.main_panel.dirty_tab_names_under(tmp_path) == []
+
+
+# -- open_head_file (PROMPT.md: "in the changes it should be possible to right click the file and
+# then see: ... open file (HEAD) ...") -------------------------------------------------------------
+
+
+def test_open_head_file_adds_a_read_only_tab(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+
+    pane.open_head_file("settings/settings.json", "head content")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert pane.tabText(index) == "settings.json (HEAD)"
+    assert widget.toPlainText() == "head content"
+    assert widget.isReadOnly() is True
+
+
+def test_open_head_file_switches_to_an_already_open_tab_instead_of_duplicating(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_head_file("Notes.txt", "old content")
+    before = pane.count()
+
+    pane.open_head_file("Notes.txt", "old content")
+
+    assert pane.count() == before
+
+
+def test_open_head_file_refreshes_an_already_open_tabs_content(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_head_file("Notes.txt", "old content")
+
+    pane.open_head_file("Notes.txt", "new head content")
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "new head content"
+
+
+def test_open_head_file_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_head_file("Notes.txt", "head content")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
+def test_open_head_file_does_not_collide_with_open_file_for_the_same_path(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    pane = window.main_panel.panes[0]
+    source = tmp_path / "Notes.txt"
+    source.write_text("current content\n", encoding="utf-8")
+    pane.open_head_file("Notes.txt", "head content")
+
+    pane.open_file(source)
+
+    widget = pane.widget(pane.currentIndex())
+    assert widget.toPlainText() == "current content\n"
+    assert widget.isReadOnly() is False
+
+
+# -- open_commit_diff (PROMPT.md, a later pass: "please make it so that when clicking in history on
+# commits - it extends to show a list of files changed (which can then be clicked on to view (please
+# note this should be a single (not split) view, see sample.png for styling))") -------------------
+
+
+def test_open_commit_diff_adds_a_unified_diff_tab(window: MainWindow) -> None:
+    from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    index = pane.currentIndex()
+    widget = pane.widget(index)
+    assert isinstance(widget, UnifiedDiffViewWidget)
+    assert widget.rel_path == "Notes.txt"
+    assert widget.sha == "abcd1234ef"
+    assert pane.tabText(index) == "Notes.txt (abcd1234)"
+
+
+def test_open_commit_diff_switches_to_an_already_open_tab_for_the_same_commit(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    assert pane.count() == before
+
+
+def test_open_commit_diff_opens_a_separate_tab_for_a_different_commit(window: MainWindow) -> None:
+    pane = window.main_panel.panes[0]
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+    before = pane.count()
+
+    pane.open_commit_diff("Notes.txt", "ffff9999ab", old_text="a\n", new_text="c\n")
+
+    assert pane.count() == before + 1
+
+
+def test_open_commit_diff_is_never_dirty(window: MainWindow) -> None:
+    from in_reach.ide.tabs import _is_modified
+
+    pane = window.main_panel.panes[0]
+
+    pane.open_commit_diff("Notes.txt", "abcd1234ef", old_text="a\n", new_text="b\n")
+
+    assert _is_modified(pane.widget(pane.currentIndex())) is False
+
+
 def test_close_current_closes_the_active_tab(window: MainWindow) -> None:
     pane = window.main_panel.panes[0]
     before = pane.count()
@@ -1146,12 +1736,96 @@ def test_close_current_on_an_empty_pane_is_a_no_op(window: MainWindow) -> None:
     assert pane.close_current() is False
 
 
-def test_active_pane_is_the_first_pane(window: MainWindow) -> None:
+def test_emptying_a_pane_defers_its_removal_to_the_next_event_loop_tick(
+    window: MainWindow, qtbot
+) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- a real, native (access-violation) crash, caught via faulthandler,
+    # traced to on_pane_emptied() tearing down the emptied pane's own group *synchronously*, from
+    # deep inside the close button's own click-handling call stack: reparenting/deleting that
+    # group's widget tree reflows the whole area's splitter, resizing a *sibling* pane's editor
+    # while its own click is still being handled, which crashed Qt's native text-layout engine.
+    # Removal must happen on the next event-loop tick instead -- this is the regression guard that
+    # it still does, not just that the pane eventually goes away.
     main_panel = window.main_panel
     first_pane = main_panel.panes[0]
     first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+
+    second_pane.tabCloseRequested.emit(second_pane.currentIndex())
+
+    # Not removed yet -- the click handler's own call stack hasn't unwound back to the event loop.
+    assert second_pane in main_panel.panes
+    assert second_pane.count() == 0
+
+    qtbot.wait(10)
+
+    assert second_pane not in main_panel.panes
+
+
+def test_active_pane_defaults_to_the_first_pane(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
 
     assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_follows_the_pane_created_by_a_split(window: MainWindow) -> None:
+    # PROMPT.md: "when a new file is opened it should load in the LAST ACTIVE/USED tab" --
+    # active_pane now tracks whichever pane was most recently interacted with, not always the
+    # first one. Splitting seeds the new pane with its own first tab, which counts as activity
+    # (matching VSCode: splitting moves you into the new pane).
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    new_pane = main_panel.panes[-1]
+
+    assert main_panel.active_pane is new_pane
+
+
+def test_active_pane_follows_a_tab_switch_within_a_pane(window: MainWindow) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane  # the split itself already made it active
+
+    # Adding (and so switching to) a new tab in the first pane moves "last active" back to it.
+    main_panel.new_tab_in(first_pane)
+
+    assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_follows_keyboard_focus_landing_inside_a_pane(window: MainWindow, tmp_path: Path) -> None:
+    # Clicking into an already-current tab's own content (no tab switch at all) should still move
+    # "last active" to that pane -- caught via QApplication.focusChanged, not currentChanged.
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane
+
+    editor = first_pane.widget(first_pane.currentIndex())
+    editor.setFocus()
+
+    assert main_panel.active_pane is first_pane
+
+
+def test_active_pane_falls_back_to_the_first_pane_once_the_last_active_one_closes(
+    window: MainWindow, qtbot
+) -> None:
+    main_panel = window.main_panel
+    first_pane = main_panel.panes[0]
+    first_pane.split_button.click()
+    second_pane = main_panel.panes[-1]
+    assert main_panel.active_pane is second_pane
+
+    second_pane.tabCloseRequested.emit(second_pane.currentIndex())
+    # Pane/group removal is deferred one event-loop tick -- see on_pane_emptied's own docstring.
+    qtbot.wait(10)
+
+    assert second_pane not in main_panel.panes
+    assert main_panel.active_pane is main_panel.panes[0]
 
 
 def test_main_panel_save_all_covers_every_pane_not_just_the_first(

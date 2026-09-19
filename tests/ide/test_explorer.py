@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame
+from PyQt6.QtWidgets import QFrame, QLabel
 
 from in_reach.ide.explorer import ExplorerPanel
 
@@ -29,6 +29,16 @@ def test_stats_progress_bar_has_no_border(panel: ExplorerPanel) -> None:
     # lables and strings" -- Fusion's default QProgressBar is a rounded, bordered pill sitting
     # directly above those lines.
     assert "border: none" in panel.stats_progress.styleSheet()
+
+
+def test_progress_bars_are_smaller_than_fusions_own_default_height(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please in the dashboard make the progress bars a little smaller (they're a bit
+    # imposing at the moment)".
+    from in_reach.ide.explorer import _PROGRESS_BAR_HEIGHT
+
+    assert panel.stats_progress.height() == _PROGRESS_BAR_HEIGHT
+    assert panel.trigger_stat.progress.height() == _PROGRESS_BAR_HEIGHT
+    assert _PROGRESS_BAR_HEIGHT < 20  # meaningfully smaller than Fusion's own ~23px default
 
 
 def test_starts_with_no_project_placeholder_shown_and_boxes_hidden(panel: ExplorerPanel) -> None:
@@ -117,7 +127,7 @@ def test_no_stats_file_shows_the_placeholder_and_hides_the_progress_bar(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is False
-    assert panel.stats_counts_label.isVisible() is False
+    assert panel.stats_grid_widget.isVisible() is False
     assert "No build stats" in panel.stats_label.text()
 
 
@@ -161,13 +171,12 @@ def test_a_real_stats_file_populates_the_progress_bar_and_counts(
     # PROMPT.md: "please combine the percentage used bar to be: 10,874 / 20520 B used (53%) (and
     # with the progress bar background)" -- shown as the progress bar's own text, not a label line.
     assert "100" in panel.stats_progress.text() and "200" in panel.stats_progress.text()
-    assert panel.stats_counts_label.isVisible() is True
-    assert "Triggers: 3" in panel.stats_counts_label.text()
-    # PROMPT.md: "fix the panel icon width so that trigger conditions and actions should always
-    # display on the same line" -- word-wrap off is what actually guarantees that (see
-    # ExplorerPanel.__init__'s own comment); a wrapping label would still split it in two given a
-    # narrow enough panel.
-    assert panel.stats_counts_label.wordWrap() is False
+    # PROMPT.md: "please make each the 'sub' stats have a percentage bar and a border" -- each of
+    # Triggers/Conditions/Actions/Forge Labels gets its own bordered _StatBox, visible once real
+    # counts exist.
+    assert panel.stats_grid_widget.isVisible() is True
+    assert panel.trigger_stat.isVisible() is True
+    assert "Triggers: 3" in panel.trigger_stat.progress.text()
 
 
 def _write_strings_json(path: Path, entries: int) -> None:
@@ -199,8 +208,125 @@ def test_stats_box_shows_the_strings_count_even_with_no_build_stats(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is False
-    assert "Strings: 5" in panel.stats_label.text()
-    assert "No build stats" not in panel.stats_label.text()
+    assert panel.stats_grid_widget.isVisible() is True
+    assert panel.string_stat.isVisible() is True
+    assert "Strings: 5" in panel.string_stat.progress.text()
+    assert panel.stats_label.isVisible() is False
+
+
+def _write_build_stats(
+    path: Path,
+    *,
+    triggers: int,
+    conditions: int,
+    actions: int,
+    forge_labels: int,
+    script_options: int = 0,
+    script_stats: int = 0,
+    script_traits: int = 0,
+    script_widgets: int = 0,
+) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "space": {
+                    "bits": {
+                        "maximum": 100, "header": 1, "header_strings": 1, "cg_options": 1,
+                        "team_config": 1, "script_traits": 1, "script_options": 1,
+                        "script_strings": 1, "option_toggles": 1, "rating_params": 1,
+                        "map_perms": 1, "script_content": 1, "script_stats": 1,
+                        "script_widgets": 1, "forge_labels": 1, "title_update_1": 1,
+                    },
+                    "bytes_used": 100,
+                    "bytes_max": 200,
+                    "percent": 50.0,
+                },
+                "counts": {
+                    "triggers": triggers, "conditions": conditions, "actions": actions,
+                    "forge_labels": forge_labels, "strings": 0, "script_options": script_options,
+                    "script_stats": script_stats, "script_traits": script_traits,
+                    "script_widgets": script_widgets,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_stats_box_shows_the_known_max_amounts_alongside_each_count(
+    panel: ExplorerPanel, tmp_path: Path
+) -> None:
+    # PROMPT.md: "in the dashboard please also make it so that it also shows the max amount of
+    # tiggers, conditions, actions, forge labels and strings (if known)" -- these five caps are
+    # confirmed engine limits (see explorer.py's own _MAX_TRIGGERS et al.), not guesses.
+    folder = tmp_path / "project"
+    _write_build_stats(
+        folder / "build" / "stats.autogenerated.json",
+        triggers=3, conditions=4, actions=5, forge_labels=1,
+    )
+    _write_strings_json(folder / "settings" / "strings.json", 7)
+
+    panel.open_project(folder)
+
+    assert "Triggers: 3/320" in panel.trigger_stat.progress.text()
+    assert "Conditions: 4/512" in panel.condition_stat.progress.text()
+    # A real compile once confirmed this directly: "The compiled script contains 1052 actions, but
+    # only a maximum of 1024 are allowed" -- 1024 is a plain confirmed cap, same as the other four.
+    assert "Actions: 5/1024" in panel.action_stat.progress.text()
+    assert "Forge Labels: 1/16" in panel.forge_label_stat.progress.text()
+    assert "Strings: 7/112" in panel.string_stat.progress.text()
+
+
+def test_stats_box_shows_the_remaining_script_counts_and_their_known_max_amounts(
+    panel: ExplorerPanel, tmp_path: Path
+) -> None:
+    # PROMPT.md: "also in dashboard please add progress bars for the remaining script counts
+    # (options, traits, stats, widgets)" -- confirmed engine caps (Megalo::Limits::max_script_
+    # options/max_script_traits/max_script_stats/max_script_widgets, see explorer.py's own
+    # _MAX_SCRIPT_OPTIONS et al.), not guesses.
+    folder = tmp_path / "project"
+    _write_build_stats(
+        folder / "build" / "stats.autogenerated.json",
+        triggers=0, conditions=0, actions=0, forge_labels=0,
+        script_options=2, script_stats=1, script_traits=3, script_widgets=1,
+    )
+
+    panel.open_project(folder)
+
+    assert panel.script_option_stat.isVisible() is True
+    assert panel.script_trait_stat.isVisible() is True
+    assert panel.script_stat_stat.isVisible() is True
+    assert panel.script_widget_stat.isVisible() is True
+    assert "Options: 2/16" in panel.script_option_stat.progress.text()
+    assert "Traits: 3/16" in panel.script_trait_stat.progress.text()
+    assert "Stats: 1/4" in panel.script_stat_stat.progress.text()
+    assert "Widgets: 1/4" in panel.script_widget_stat.progress.text()
+
+
+def test_stats_box_hides_script_counts_with_no_build_stats(panel: ExplorerPanel, tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    _write_strings_json(folder / "settings" / "strings.json", 5)
+
+    panel.open_project(folder)
+
+    assert panel.script_option_stat.isVisible() is False
+    assert panel.script_trait_stat.isVisible() is False
+    assert panel.script_stat_stat.isVisible() is False
+    assert panel.script_widget_stat.isVisible() is False
+
+
+def test_stats_box_shows_the_max_string_count_even_with_no_build_stats(
+    panel: ExplorerPanel, tmp_path: Path
+) -> None:
+    folder = tmp_path / "project"
+    _write_strings_json(folder / "settings" / "strings.json", 5)
+
+    panel.open_project(folder)
+
+    assert "Strings: 5/112" in panel.string_stat.progress.text()
 
 
 def test_stats_box_shows_both_build_stats_and_strings_count_together(
@@ -240,11 +366,9 @@ def test_stats_box_shows_both_build_stats_and_strings_count_together(
     panel.open_project(folder)
 
     assert panel.stats_progress.isVisible() is True
-    assert "Triggers: 3" in panel.stats_counts_label.text()
-    # PROMPT.md: "Forge labels and Strings should be on the same line"
-    lines = panel.stats_label.text().splitlines()
-    forge_line = next(line for line in lines if "Forge Labels" in line)
-    assert "Strings: 7" in forge_line
+    assert "Triggers: 3" in panel.trigger_stat.progress.text()
+    assert "Forge Labels: 1" in panel.forge_label_stat.progress.text()
+    assert "Strings: 7" in panel.string_stat.progress.text()
 
 
 def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
@@ -293,9 +417,9 @@ def test_refresh_stats_re_reads_the_stats_file_for_the_current_project(
 
 def test_dashboard_sections_start_expanded(panel: ExplorerPanel) -> None:
     # PROMPT.md: "we then want boxes like Personal Game Variants for Script and Settings" (open by
-    # default, unlike that now-removed section) -- Stats/Settings are both central to the active
-    # project, not secondary, so they start expanded rather than collapsed.
-    for section in (panel.stats_section, panel.settings_section):
+    # default, unlike that now-removed section) -- Stats/Quick Launch/Settings are all central to
+    # the active project, not secondary, so they start expanded rather than collapsed.
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
         assert section.expanded is True
 
 
@@ -405,7 +529,7 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(panel: ExplorerPanel)
 def test_section_headers_are_10_percent_smaller_than_the_panel_font(panel: ExplorerPanel) -> None:
     panel_size = panel.font().pointSizeF()
 
-    for section in (panel.stats_section, panel.settings_section):
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
         assert section._toggle.font().pointSizeF() == pytest.approx(
             panel_size * ExplorerPanel.HEADER_TEXT_SCALE
         )
@@ -632,6 +756,41 @@ def test_export_and_view_output_buttons_each_have_their_own_background_and_no_sh
     # Each button's stylesheet is its own -- neither is empty/borrowed from a shared container
     # style that could read as one connected control.
     assert panel.export_button.styleSheet() == panel.view_output_button.styleSheet()
+
+
+def test_view_output_button_is_labeled_view_compiled(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "View Compiled (renamed from View Compiled.txt)".
+    assert panel.view_output_button.text() == "View Compiled"
+
+
+# -- Launch RVT button (PROMPT.md: "we are removing locations, and rvt ... please add a button in
+# between Export File and View Compiled ... for Launch RVT") -----------------------------------
+
+
+def test_rvt_button_starts_disabled(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "rvt should not be launchable if no project is open" -- true from construction,
+    # before MainWindow ever gets a chance to enable it once a project opens.
+    assert panel.rvt_button.isEnabled() is False
+
+
+def test_rvt_button_sits_between_export_and_view_output(panel: ExplorerPanel) -> None:
+    layout = panel.button_row.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+    assert widgets.index(panel.export_button) < widgets.index(panel.rvt_button) < widgets.index(
+        panel.view_output_button
+    )
+
+
+def test_rvt_button_emits_launch_rvt_requested(panel: ExplorerPanel, qtbot) -> None:
+    # MainWindow owns actually enabling this button (see MainWindow._on_active_project_changed) --
+    # enabled directly here to isolate what's under test: the click itself.
+    panel.rvt_button.setEnabled(True)
+    seen = []
+    panel.launch_rvt_requested.connect(lambda: seen.append(True))
+
+    qtbot.mouseClick(panel.rvt_button, Qt.MouseButton.LeftButton)
+
+    assert seen == [True]
     assert panel.button_row.styleSheet() == ""
 
 
@@ -646,35 +805,80 @@ def test_dashboard_buttons_hover_with_the_theme_highlight_not_the_unthemed_light
     assert "QToolButton:hover { background-color: palette(highlight)" in sheet
 
 
-# -- Documentation section (PROMPT.md: "add a section above Settings for Documentation") --------
+# -- Quick Launch section (PROMPT.md: "please then make a section 'Quick Launch' and add our
+# buttons underneath") ---------------------------------------------------------------------------
 
 
-def test_documentation_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
-    assert panel.documentation_section.isVisible() is False
+def test_quick_launch_section_is_hidden_with_no_project_open(panel: ExplorerPanel) -> None:
+    assert panel.quick_launch_section.isVisible() is False
 
 
-def test_documentation_section_shows_once_a_project_opens(panel: ExplorerPanel, tmp_path: Path) -> None:
+def test_quick_launch_section_shows_once_a_project_opens(panel: ExplorerPanel, tmp_path: Path) -> None:
     folder = tmp_path / "project"
     folder.mkdir()
 
     panel.open_project(folder)
+    assert panel.quick_launch_section.isVisible() is True
 
-    assert panel.documentation_section.isVisible() is True
+    panel.close_project(folder)
+    assert panel.quick_launch_section.isVisible() is False
 
 
-def test_documentation_section_sits_above_settings(panel: ExplorerPanel) -> None:
+def test_stats_section_sits_above_quick_launch_and_settings(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "please move stats to the top of the panel".
     layout = panel.layout()
-    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
-    assert widgets.index(panel.documentation_section) < widgets.index(panel.settings_section)
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+    assert widgets.index(panel.stats_section) < widgets.index(panel.quick_launch_section)
+    assert widgets.index(panel.quick_launch_section) < widgets.index(panel.settings_section)
 
 
-def test_clicking_notes_emits_notes_requested(panel: ExplorerPanel, qtbot) -> None:
-    with qtbot.waitSignal(panel.notes_requested, timeout=1000):
-        panel.notes_button.click()
+@pytest.mark.parametrize(
+    "button_name,key",
+    [
+        ("game_variants_button", "STANDARD_VARIANTS_LOC"),
+        ("map_variants_button", "STANDARD_MAP_VARIANTS_LOC"),
+        ("hopper_variants_button", "HOPPER_VARIANTS_LOC"),
+        ("hopper_maps_button", "HOPPER_MAP_VARIANTS_LOC"),
+        ("user_games_button", "PERSONAL_VARIANTS_LOC"),
+        ("user_maps_button", "PERSONAL_MAPS_LOC"),
+        ("hotreload_button", "HOTRELOAD_DIR_LOC"),
+    ],
+)
+def test_builtin_folder_buttons_emit_open_builtin_folder_requested(
+    panel: ExplorerPanel, qtbot, button_name: str, key: str
+) -> None:
+    seen = []
+    panel.open_builtin_folder_requested.connect(seen.append)
+
+    qtbot.mouseClick(getattr(panel, button_name), Qt.MouseButton.LeftButton)
+
+    assert seen == [key]
 
 
-def test_documentation_button_is_a_disabled_stub(panel: ExplorerPanel) -> None:
-    # PROMPT.md: "2nd button should be stubbed and lablled 'Documentation' -- later we will
-    # implement better doc practice and articles here".
-    assert panel.documentation_button.text() == "Documentation"
-    assert panel.documentation_button.isEnabled() is False
+def test_builtin_buttons_are_laid_out_two_per_row(panel: ExplorerPanel) -> None:
+    # PROMPT.md: "col a / col b" -- Game Variants/Map Variants, Hopper Variants/Hopper Maps, User
+    # Games/User Maps, each pair sharing a row.
+    grid = panel.game_variants_button.parentWidget().layout()
+    assert grid.rowCount() == 3
+    assert grid.columnCount() == 2
+
+
+# -- heading/subheading emphasis (PROMPT.md: "please update dashbaord so headings are bold and
+# subheadings are italic") -----------------------------------------------------------------------
+
+
+def test_section_headers_are_bold(panel: ExplorerPanel) -> None:
+    for section in (panel.stats_section, panel.quick_launch_section, panel.settings_section):
+        assert section._toggle.font().bold() is True
+
+
+def test_subheaders_are_italic_not_bold(panel: ExplorerPanel) -> None:
+    labels = [
+        child
+        for child in panel.quick_launch_section.body.findChildren(QLabel)
+        if child.text() in ("Built-in", "Hot Reload")
+    ]
+    assert len(labels) == 2
+    for label in labels:
+        assert label.font().italic() is True
+        assert label.font().bold() is False

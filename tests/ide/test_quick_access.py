@@ -247,6 +247,22 @@ def test_pill_defaults_to_twelve_times_its_natural_width(qtbot) -> None:
     assert bar.button.width() == bar.button.sizeHint().width() * 12
 
 
+def test_set_label_updates_the_pills_own_text(qtbot) -> None:
+    # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+    # bar, we want to replace with the game file name and in brackets its uuid".
+    bar = QuickAccessBar(
+        get_project_folder=lambda: None,
+        open_file=lambda p: None,
+        build_root_commands=lambda: [],
+        label="workspace",
+    )
+    qtbot.addWidget(bar)
+
+    bar.set_label("Slayer Plus (abcd1234)")
+
+    assert bar.button.text() == "Slayer Plus (abcd1234)"
+
+
 def test_opening_the_overlay_hides_the_pill_so_only_one_box_shows_at_once(qtbot, tmp_path: Path) -> None:
     # PROMPT.md: "when clicking on the search bar behaviour is unexpected, we are seeing a drop
     # down is spawned containing a text entry box (underneath the search box) ... we want them to
@@ -315,16 +331,46 @@ def test_ctrl_p_shortcut_opens_search_mode(project_window: MainWindow) -> None:
 
 
 def test_ctrl_shift_p_shortcut_opens_command_mode(project_window: MainWindow) -> None:
-    project_window._command_palette_shortcut.activated.emit()
+    # PROMPT.md: "the shortcut for ctrl + shift + P doesn't seem to be working" -- traced to the
+    # View menu's own "Command Palette" QAction (see test_view_menu_has_command_palette_... in
+    # test_ide_smoke.py, which asserts its shortcut text) carrying the identical Ctrl+Shift+P
+    # sequence a separate QShortcut also used to bind at the same WindowShortcut scope -- Qt treats
+    # that as *ambiguous* rather than picking one, so neither ever actually fired. There is no
+    # standalone QShortcut for this any more (see MainWindow.__init__'s own comment); the View
+    # menu's own action is the sole owner now, so this triggers through it directly.
+    menu = project_window.top_bar.view_menu_button.menu()
+    command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")
+
+    command_palette_action.trigger()
 
     assert project_window.quick_access.overlay._mode == "command"
     assert project_window.quick_access.overlay.isVisible() is True
 
 
 def test_no_shortcut_binds_the_same_key_sequence_twice(project_window: MainWindow) -> None:
-    for name in ("_quick_open_shortcut", "_command_palette_shortcut"):
+    for name in ("_quick_open_shortcut", "_zoom_in_shortcut", "_zoom_out_shortcut"):
         keys = [seq.toString() for seq in getattr(project_window, name).keys()]
         assert len(keys) == len(set(keys))
+
+
+def test_no_window_level_shortcut_or_menu_action_collides_with_another(project_window: MainWindow) -> None:
+    # Regression guard for the exact class of bug above: any two WindowShortcut/ApplicationShortcut
+    # -scoped QShortcut/QAction objects sharing one key sequence makes Qt treat every press of it as
+    # ambiguous, silently killing both rather than firing either.
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QAction, QShortcut
+
+    live_contexts = {Qt.ShortcutContext.WindowShortcut, Qt.ShortcutContext.ApplicationShortcut}
+    keys: list[str] = []
+    for shortcut in project_window.findChildren(QShortcut):
+        if shortcut.context() in live_contexts:
+            keys.extend(seq.toString() for seq in shortcut.keys() if not seq.isEmpty())
+    for action in project_window.findChildren(QAction):
+        if action.shortcutContext() in live_contexts and not action.shortcut().isEmpty():
+            keys.append(action.shortcut().toString())
+
+    duplicates = {key for key in keys if keys.count(key) > 1}
+    assert not duplicates, f"ambiguous window-level shortcut(s): {sorted(duplicates)}"
 
 
 def test_the_pill_is_centered_between_the_left_content_and_the_right_controls(project_window: MainWindow) -> None:
@@ -354,10 +400,13 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Set UI Scale",
         "Open Notes",
         "Set Notes Format",
+        "Commit",
         "Stamp Release",
         "New Branch",
+        "New Branch From",
         "Switch Branch",
         "Delete Branch",
+        "Merge Branch",
         "Restore Snapshot",
         "Compare",
     ]

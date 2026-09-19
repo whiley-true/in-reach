@@ -1,51 +1,72 @@
-from in_reach.app.vcs import FileDiff
+from pathlib import Path
+
+from in_reach.app import vcs
 from in_reach.ide.diff_dialog import DiffDialog
+from in_reach.ide.diff_view import DiffViewWidget
 
 
-def test_lists_every_changed_file_with_a_change_type_prefix(qtbot) -> None:
-    diffs = [
-        FileDiff(path="a.txt", change_type="modified", diff_text="--- a\n+++ b\n"),
-        FileDiff(path="b.txt", change_type="added", diff_text="+hi\n"),
-        FileDiff(path="c.txt", change_type="removed", diff_text="-bye\n"),
-    ]
-    dialog = DiffDialog(None, title="main vs. feature", diffs=diffs)
+def _project_with_a_and_b_changed(tmp_path: Path) -> Path:
+    folder = tmp_path / "abcd1234"
+    folder.mkdir()
+    (folder / "a.txt").write_text("a original\n", encoding="utf-8")
+    (folder / "b.txt").write_text("b original\n", encoding="utf-8")
+    vcs.init(folder)
+    vcs.create_branch(folder, "feature")
+    (folder / "a.txt").write_text("a changed\n", encoding="utf-8")
+    (folder / "b.txt").write_text("b changed\n", encoding="utf-8")
+    vcs.stage_all(folder)
+    vcs.commit(folder, "change a and b")
+    vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
+    return folder
+
+
+def test_lists_every_changed_file_with_a_change_type_prefix(qtbot, tmp_path: Path) -> None:
+    folder = _project_with_a_and_b_changed(tmp_path)
+    diffs = vcs.diff(folder, vcs.DEFAULT_BRANCH, "feature")
+
+    dialog = DiffDialog(None, title="main vs. feature", folder=folder, ref_a=vcs.DEFAULT_BRANCH, ref_b="feature", diffs=diffs)
     qtbot.addWidget(dialog)
 
     labels = [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())]
-    assert labels == ["M a.txt", "+ b.txt", "- c.txt"]
+    assert labels == ["M a.txt", "M b.txt"]
 
 
-def test_selecting_a_file_shows_its_own_diff_text(qtbot) -> None:
-    diffs = [
-        FileDiff(path="a.txt", change_type="modified", diff_text="diff for a"),
-        FileDiff(path="b.txt", change_type="modified", diff_text="diff for b"),
-    ]
-    dialog = DiffDialog(None, title="t", diffs=diffs)
+def test_selecting_a_file_shows_its_own_diff_view(qtbot, tmp_path: Path) -> None:
+    folder = _project_with_a_and_b_changed(tmp_path)
+    diffs = vcs.diff(folder, vcs.DEFAULT_BRANCH, "feature")
+    dialog = DiffDialog(None, title="t", folder=folder, ref_a=vcs.DEFAULT_BRANCH, ref_b="feature", diffs=diffs)
     qtbot.addWidget(dialog)
 
     dialog.file_list.setCurrentRow(1)
 
-    assert dialog.diff_text.toPlainText() == "diff for b"
+    assert isinstance(dialog._diff_view, DiffViewWidget)
+    assert dialog._diff_view.rel_path == "b.txt"
+    assert dialog._diff_view.old_pane.toPlainText() == "b original"
+    assert dialog._diff_view.new_pane.toPlainText() == "b changed"
 
 
-def test_defaults_to_showing_the_first_files_diff(qtbot) -> None:
-    diffs = [FileDiff(path="a.txt", change_type="modified", diff_text="diff for a")]
-    dialog = DiffDialog(None, title="t", diffs=diffs)
+def test_defaults_to_showing_the_first_files_diff(qtbot, tmp_path: Path) -> None:
+    folder = _project_with_a_and_b_changed(tmp_path)
+    diffs = vcs.diff(folder, vcs.DEFAULT_BRANCH, "feature")
+    dialog = DiffDialog(None, title="t", folder=folder, ref_a=vcs.DEFAULT_BRANCH, ref_b="feature", diffs=diffs)
     qtbot.addWidget(dialog)
 
-    assert dialog.diff_text.toPlainText() == "diff for a"
+    assert dialog._diff_view.rel_path == "a.txt"
+    assert dialog._diff_view.old_pane.toPlainText() == "a original"
+    assert dialog._diff_view.new_pane.toPlainText() == "a changed"
 
 
-def test_no_differences_shows_a_placeholder_message(qtbot) -> None:
-    dialog = DiffDialog(None, title="t", diffs=[])
+def test_no_differences_shows_a_placeholder_message(qtbot, tmp_path: Path) -> None:
+    dialog = DiffDialog(None, title="t", folder=tmp_path, ref_a="main", ref_b="main", diffs=[])
     qtbot.addWidget(dialog)
 
     assert dialog.file_list.count() == 0
-    assert "no differences" in dialog.diff_text.toPlainText()
+    assert dialog._empty_label.isHidden() is False
+    assert dialog._diff_view is None
 
 
-def test_window_title_matches_the_given_title(qtbot) -> None:
-    dialog = DiffDialog(None, title="v1.0 vs. v2.0", diffs=[])
+def test_window_title_matches_the_given_title(qtbot, tmp_path: Path) -> None:
+    dialog = DiffDialog(None, title="v1.0 vs. v2.0", folder=tmp_path, ref_a="main", ref_b="main", diffs=[])
     qtbot.addWidget(dialog)
 
     assert dialog.windowTitle() == "v1.0 vs. v2.0"

@@ -24,15 +24,22 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QMouseEvent, QPaintEvent
+from PyQt6.QtCore import QMimeData, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QDrag,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QMouseEvent,
+    QPaintEvent,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QMenu,
     QMessageBox,
-    QSplitter,
     QStyle,
     QStyleOptionTab,
     QStylePainter,
@@ -44,8 +51,10 @@ from PyQt6.QtWidgets import (
 )
 
 from in_reach.app.new_project import is_generated_file
-from in_reach.ide import icons, schema_check, style
+from in_reach.ide import file_dialogs, icons, schema_check, style
+from in_reach.ide.diff_view import DiffViewWidget
 from in_reach.ide.editor import TextEditorWidget
+from in_reach.ide.pane_splitter import PaneSplitter
 from in_reach.ide.markdown_preview import MarkdownPreviewWidget
 from in_reach.ide.welcome import WelcomeTab
 
@@ -55,6 +64,20 @@ _MAX_V_SPLITS = 1  # -> up to 2 panes stacked within one group
 _SPLIT_ICON_COLOR = "#808080"
 _TAB_CLOSE_ICON_COLOR = "#808080"
 _TAB_CLOSE_ICON_SIZE = 14
+# A little larger than the icon itself for a comfortable click target -- roughly matches the
+# footprint Qt's own auto-created close button used before _install_close_button() replaced it.
+_TAB_CLOSE_BUTTON_SIZE = 20
+#: PROMPT.md: "When right clicking a tab there should be shortcuts for actions" -- shown as plain
+#: (non-interactive) hint text next to the two context-menu entries that already have a real,
+#: permanent global shortcut elsewhere (``main_window.py``'s own File menu, ``_SHORTCUT_CLOSE_
+#: EDITOR``/``_SHORTCUT_SAVE``). Duplicated as plain strings rather than imported -- main_window.py
+#: itself imports this module, so importing back from it here would be circular -- and appended
+#: straight into the action's own label text (a QMenu right-aligns text after a literal tab
+#: character) rather than via ``QAction.setShortcut()``, which would register a second *live*
+#: accelerator for the same key sequence and immediately go ambiguous with the File menu's already-
+#: registered one the moment this context menu is open.
+_SHORTCUT_HINT_CLOSE = "Ctrl+F4"
+_SHORTCUT_HINT_SAVE = "Ctrl+S"
 
 
 class _SaveChoice(Enum):
@@ -215,12 +238,14 @@ class TabPane(QTabWidget):
         self.group: "_PaneGroup | None" = None  # set by _PaneGroup.add_pane()
         self.card: QWidget | None = None  # set by _PaneGroup.add_pane()
         self._tab_state: dict[QWidget, _TabState] = {}
+        self._enforcing_pin_order = False
         self.currentChanged.connect(lambda _index: self.cursor_info_changed.emit())
         self.currentChanged.connect(lambda _index: self._refresh_preview_button())
         self.setTabBar(_DragTabBar(self))
         self.setMovable(True)
+        self.tabBar().tabMoved.connect(self._on_tab_moved)
         self.setTabsClosable(True)
-        self.tabCloseRequested.connect(self._maybe_close)
+        self.tabCloseRequested.connect(self._handle_tab_close_requested)
         self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
         self.setAcceptDrops(True)
@@ -290,10 +315,68 @@ class TabPane(QTabWidget):
     def _track_tab(self, index: int, widget: QWidget, state: "_TabState | None" = None) -> None:
         self._tab_state[widget] = state or _TabState()
         widget._owner_pane = self  # read back dynamically by _on_editor_modified
+        if isinstance(widget, TextEditorWidget):
+            # Idempotent (a cross-pane drag re-tracks the same already-registered widget/document
+            # pair here too, not just a genuinely new tab) -- see MainPanelArea.
+            # _register_document_user's own docstring for why this needs to happen at all.
+            self._area._register_document_user(widget.document(), widget)
+        self._install_close_button(index, widget)
         self._update_close_icon(index)
+        # A tab tracked with pinned=True (a cross-pane drag of an already-pinned tab -- see
+        # dropEvent()) lands wherever addTab() appended it, which can leave it to the right of an
+        # unpinned tab in the destination pane -- re-enforce the same "pinned tabs are always
+        # leftmost" invariant _toggle_pin()/_on_tab_moved() keep everywhere else.
+        self._enforce_pinned_order()
+
+    def _install_close_button(self, index: int, widget: QWidget) -> None:
+        """Swaps ``setTabsClosable(True)``'s auto-created close button for a real ``QToolButton``
+        we own. Qt's own auto-created button is a private ``QTabBar::CloseButton`` whose
+        ``paintEvent`` always draws the style's built-in ``PE_IndicatorTabClose`` glyph and never
+        looks at the button's own ``icon()`` -- ``_update_close_icon``'s ``setIcon()`` calls change
+        that button's ``icon`` property without ever changing what actually gets painted, so the
+        dirty-dot/pin icon swap silently never showed (confirmed by forcing an unmistakable icon on
+        the stock button and grabbing it -- the paint never changed). A plain ``QToolButton``
+        installed via ``setTabButton`` paints its own ``icon()`` normally, so the rest of
+        ``_update_close_icon`` needs no change once this is in front of it.
+
+        A no-op once a tab already has its own button installed (idempotent, like ``_track_tab``
+        itself) -- only ever replaces Qt's own stock button the first time."""
+        bar = self.tabBar()
+        position = QTabBar.ButtonPosition.RightSide
+        existing = bar.tabButton(index, position)
+        if isinstance(existing, QToolButton):
+            return
+        button = QToolButton(bar)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedSize(_TAB_CLOSE_BUTTON_SIZE, _TAB_CLOSE_BUTTON_SIZE)
+        button.setIconSize(QSize(_TAB_CLOSE_ICON_SIZE, _TAB_CLOSE_ICON_SIZE))
+        # Resolves the tab's *current* index at click time (not whatever index was captured here)
+        # -- a pin/reorder/drag can move this tab well after this button was installed.
+        button.clicked.connect(lambda _checked=False, w=widget: self._handle_tab_close_requested(self.indexOf(w)))
+        bar.setTabButton(index, position, button)
 
     def _tab_state_for(self, widget: QWidget) -> _TabState:
         return self._tab_state.setdefault(widget, _TabState())
+
+    def _release_tab_widget(self, widget: QWidget | None) -> None:
+        """Common cleanup for a tab's content widget wherever it's actually being destroyed (never
+        for a cross-pane drag, which reparents the same widget rather than destroying it) -- pairs
+        with the registration ``_track_tab`` does, so a shared document's own original owner is
+        never destroyed while another view still shares it (see ``MainPanelArea.
+        _register_document_user``'s own docstring for why that specifically -- not just the
+        document -- has to wait)."""
+        if widget is None:
+            return
+        self._tab_state.pop(widget, None)
+        if isinstance(widget, TextEditorWidget):
+            if not self._area._unregister_document_user(widget.document(), widget):
+                # Kept alive rather than destroyed -- see _unregister_document_user's own
+                # docstring; MainPanelArea itself deletes it once it's safe to.
+                widget.hide()
+                widget.setParent(None)
+                return
+        widget.deleteLater()
 
     def _refresh_preview_button(self) -> None:
         """Shows :attr:`preview_button` only while the active tab is an editable Markdown one --
@@ -305,7 +388,8 @@ class TabPane(QTabWidget):
         is_editable_markdown = (
             isinstance(widget, TextEditorWidget) and widget.path is not None and widget.path.suffix.lower() == ".md"
         )
-        self.preview_button.setVisible(is_editable_markdown)
+        # A floating (popout-window) pane can't split at all -- see split_from's own docstring.
+        self.preview_button.setVisible(is_editable_markdown and self.group is not None)
 
     def _update_close_icon(self, index: int) -> None:
         button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
@@ -316,17 +400,33 @@ class TabPane(QTabWidget):
         self.tabBar().update()
         if button is None:
             return
-        name = "tab_dirty" if _is_modified(self.widget(index)) else "win_close"
+        widget = self.widget(index)
+        if self._tab_state_for(widget).pinned:
+            name = "tab_pin"
+        elif _is_modified(widget):
+            name = "tab_dirty"
+        else:
+            name = "win_close"
         button.setIcon(icons.icon(name, color=_TAB_CLOSE_ICON_COLOR, size=_TAB_CLOSE_ICON_SIZE))
 
     # -- closing, with unsaved-changes handling ---------------------------------------------
 
+    def _handle_tab_close_requested(self, index: int) -> None:
+        """The tab bar's built-in close button, clicked -- redirected to unpin instead of close
+        for a pinned tab (PROMPT.md: "when a tab is pinned it should have a pin icon instead of an
+        x icon, when the pin is clicked it should become unpinned and the pin should convert to a
+        x"), since that same button already swaps to the pin icon while pinned (see
+        :meth:`_update_close_icon`)."""
+        widget = self.widget(index)
+        if widget is not None and self._tab_state_for(widget).pinned:
+            self._toggle_pin(index)
+            return
+        self._maybe_close(index)
+
     def _close_tab(self, index: int) -> None:
         widget = self.widget(index)
         self.removeTab(index)
-        if widget is not None:
-            self._tab_state.pop(widget, None)
-            widget.deleteLater()
+        self._release_tab_widget(widget)
         self._area.on_pane_emptied(self)
 
     def _maybe_close(self, index: int) -> bool:
@@ -364,7 +464,7 @@ class TabPane(QTabWidget):
 
     def _ask_save_path(self, default_dir: Path, suggested_name: str) -> Path | None:
         """Also its own method for the same test-seam reason as ``_ask_save_choice``."""
-        chosen, _selected_filter = QFileDialog.getSaveFileName(
+        chosen, _selected_filter = file_dialogs.get_save_file_name(
             self, "Save As", str(default_dir / suggested_name)
         )
         return Path(chosen) if chosen else None
@@ -456,9 +556,9 @@ class TabPane(QTabWidget):
                 :meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`).
             editable_markdown: Opens a ``.md`` file as a real, editable
                 :class:`~in_reach.ide.editor.TextEditorWidget` instead of the usual read-only
-                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, the
-                Documentation section's "Notes" button when Notes format is Markdown: "editor
-                should be .md" -- with the magnifying-glass split-to-live-preview icon, see
+                :class:`~in_reach.ide.markdown_preview.MarkdownPreviewWidget` (PROMPT.md, "Notes"
+                when Notes format is Markdown: "editor should be .md" -- with the magnifying-glass
+                split-to-live-preview icon, see
                 :meth:`_refresh_preview_button`, this is where an editable Markdown source and its
                 live rendered preview both come from). Ignored for any other suffix.
         """
@@ -501,8 +601,7 @@ class TabPane(QTabWidget):
         if reuse_index is not None:
             old_widget = self.widget(reuse_index)
             self.removeTab(reuse_index)
-            self._tab_state.pop(old_widget, None)
-            old_widget.deleteLater()
+            self._release_tab_widget(old_widget)
             if tab_icon is not None:
                 new_index = self.insertTab(reuse_index, widget, tab_icon, path.name)
             else:
@@ -512,6 +611,118 @@ class TabPane(QTabWidget):
         else:
             new_index = self.addTab(widget, path.name)
         self._track_tab(new_index, widget, state=_TabState(path=path))
+        self.setCurrentIndex(new_index)
+
+    def open_diff(self, rel_path: str, *, old_text: str | None, new_text: str | None) -> None:
+        """Opens (or refreshes and switches to, if already open) a side-by-side
+        :class:`~in_reach.ide.diff_view.DiffViewWidget` tab for ``rel_path``'s own uncommitted
+        change -- PROMPT.md: "when clicking on changes to a file (in the changes tab) a tab should
+        appear showing the original on the left and highlighted changes on the right (like vscode
+        git)". Called by ``MainWindow.vcs_open_diff`` whenever a file is clicked in the Git panel's
+        own "Changes" list.
+
+        Tracked with ``_TabState(path=None)`` deliberately, unlike :meth:`open_file` -- a diff view
+        isn't the real file itself (giving it that same :class:`Path` would make this method's own
+        dedup below collide with :meth:`open_file`'s: clicking ``rel_path`` in the Explorer while
+        its diff tab happens to sit earlier in this pane would silently land on the read-only diff
+        instead of the real editable file). Matched by :attr:`~in_reach.ide.diff_view.
+        DiffViewWidget.rel_path` instead, a plain widget attribute :meth:`open_file` never looks at,
+        so the two can never step on each other.
+
+        Always refreshes an already-open tab's own content before switching to it (unlike
+        ``open_file``'s ``force_reload``, which defaults to leaving a re-opened file's stale
+        content alone) -- an uncommitted change is live working-tree state, stale the moment
+        anything else touches the file, so there's no "intentionally frozen" reading to preserve
+        the way there is for `force_reload`'s own default.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, DiffViewWidget) and widget.rel_path == rel_path:
+                widget.set_diff(old_text, new_text)
+                self.setCurrentIndex(index)
+                return
+        diff_widget = DiffViewWidget(rel_path=rel_path, old_text=old_text, new_text=new_text)
+        label = Path(rel_path).name
+        new_index = self.addTab(diff_widget, icons.icon("git", color=_SPLIT_ICON_COLOR), f"{label} (diff)")
+        self._track_tab(new_index, diff_widget, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
+    def open_head_file(self, rel_path: str, text: str) -> None:
+        """Opens (or refreshes and switches to, if already open) a read-only tab showing
+        ``rel_path``'s own content at ``HEAD`` -- "Open File (HEAD)" (PROMPT.md: "in the changes it
+        should be possible to right click the file and then see: ... open file (HEAD) ...").
+
+        Tracked with ``_TabState(path=None)``, same reasoning as :meth:`open_diff` -- matched by its
+        own ``_head_rel_path`` attribute (a plain widget attribute :meth:`open_file` never looks at)
+        instead, so it can never collide with a real editable tab for the same file.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if getattr(widget, "_head_rel_path", None) == rel_path:
+                widget.setPlainText(text)
+                widget.document().setModified(False)
+                self.setCurrentIndex(index)
+                return
+        editor = TextEditorWidget(path=Path(rel_path))
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor._head_rel_path = rel_path
+        _connect_editor_signals(editor)
+        label = f"{Path(rel_path).name} (HEAD)"
+        new_index = self.addTab(editor, icons.lock_icon(), label)
+        self._track_tab(new_index, editor, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
+    def open_commit_diff(
+        self, rel_path: str, sha: str, *, old_text: str | None, new_text: str | None
+    ) -> None:
+        """Opens (or refreshes and switches to, if already open) a single, *unified* (not split)
+        :class:`~in_reach.ide.unified_diff_view.UnifiedDiffViewWidget` tab for ``rel_path`` as
+        changed by commit ``sha`` -- PROMPT.md: "please make it so that when clicking in history on
+        commits - it extends to show a list of files changed (which can then be clicked on to view
+        (please note this should be a single (not split) view, see sample.png for styling))".
+
+        Tracked with ``_TabState(path=None)``, same reasoning as :meth:`open_diff`/
+        :meth:`open_head_file` -- matched by ``(rel_path, sha)`` together (a single file can appear
+        in more than one commit, and different commits' own diffs of it are never the same tab).
+        """
+        from in_reach.ide.unified_diff_view import UnifiedDiffViewWidget
+
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, UnifiedDiffViewWidget) and widget.rel_path == rel_path and widget.sha == sha:
+                widget.set_diff(old_text, new_text)
+                self.setCurrentIndex(index)
+                return
+        diff_widget = UnifiedDiffViewWidget(rel_path=rel_path, sha=sha, old_text=old_text, new_text=new_text)
+        label = f"{Path(rel_path).name} ({sha[:8]})"
+        new_index = self.addTab(diff_widget, icons.icon("git", color=_SPLIT_ICON_COLOR), label)
+        self._track_tab(new_index, diff_widget, state=_TabState(path=None))
+        self.setCurrentIndex(new_index)
+
+    def open_commit_file(self, rel_path: str, sha: str, text: str) -> None:
+        """Opens (or refreshes and switches to, if already open) a read-only tab showing
+        ``rel_path``'s own content as of commit ``sha`` -- "Open File" (PROMPT.md, a later pass:
+        "and right click should have the option to open file", the Git panel's own History section
+        "Files Changed" list). Same shape as :meth:`open_head_file`, just for an arbitrary commit
+        instead of always ``HEAD`` -- tracked with ``_TabState(path=None)``, matched by ``(rel_path,
+        sha)`` together, same reasoning as :meth:`open_commit_diff`.
+        """
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if getattr(widget, "_commit_file_key", None) == (rel_path, sha):
+                widget.setPlainText(text)
+                widget.document().setModified(False)
+                self.setCurrentIndex(index)
+                return
+        editor = TextEditorWidget(path=Path(rel_path))
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor._commit_file_key = (rel_path, sha)
+        _connect_editor_signals(editor)
+        label = f"{Path(rel_path).name} ({sha[:8]})"
+        new_index = self.addTab(editor, icons.lock_icon(), label)
+        self._track_tab(new_index, editor, state=_TabState(path=None))
         self.setCurrentIndex(new_index)
 
     def _reusable_tab_index(self) -> int | None:
@@ -619,15 +830,36 @@ class TabPane(QTabWidget):
         widget = self.widget(index)
         state = self._tab_state_for(widget)
         state.pinned = not state.pinned
-        if state.pinned:
-            pinned_before = sum(
-                1
-                for i in range(self.count())
-                if self.widget(i) is not widget and self._tab_state_for(self.widget(i)).pinned
-            )
-            current_index = self.indexOf(widget)
-            if current_index != pinned_before:
-                self.tabBar().moveTab(current_index, pinned_before)
+        self._enforce_pinned_order()
+        self._update_close_icon(self.indexOf(widget))
+
+    def _on_tab_moved(self, _from: int, _to: int) -> None:
+        """A plain drag reorder (``setMovable(True)``'s own built-in handling, see _DragTabBar's
+        docstring) has no notion of pinned tabs at all, and would happily let the user drag an
+        unpinned tab to the left of a pinned one -- re-enforce the invariant after every move,
+        whatever moved it."""
+        self._enforce_pinned_order()
+
+    def _enforce_pinned_order(self) -> None:
+        """Pinned tabs must always occupy the front of the strip, in their own existing relative
+        order, with every unpinned tab after them in *its* own existing relative order -- a stable
+        partition on the current left-to-right order, not a fixed target position, so this is
+        idempotent (a no-op once the invariant already holds, which it will after every call here)
+        and never reorders within either group on its own."""
+        if self._enforcing_pin_order:
+            return
+        self._enforcing_pin_order = True
+        try:
+            widgets = [self.widget(i) for i in range(self.count())]
+            pinned = [w for w in widgets if self._tab_state_for(w).pinned]
+            unpinned = [w for w in widgets if not self._tab_state_for(w).pinned]
+            bar = self.tabBar()
+            for target_index, widget in enumerate(pinned + unpinned):
+                current_index = self.indexOf(widget)
+                if current_index != target_index:
+                    bar.moveTab(current_index, target_index)
+        finally:
+            self._enforcing_pin_order = False
 
     # -- copy/reveal path actions -------------------------------------------------------------
 
@@ -678,7 +910,16 @@ class TabPane(QTabWidget):
         has_path = state.path is not None
 
         menu = QMenu(self)
-        menu.addAction("Close", lambda: self._maybe_close(index))
+        # PROMPT.md: "Please also add a save option (for the jsons (other tab types may later have
+        # other options))" -- only ever meaningful for a real TextEditorWidget tab (a Markdown
+        # preview/the Welcome tab has no source buffer to write back out, see _save_tab's own
+        # guard), so it's disabled rather than shown for every other tab type.
+        menu.addAction(
+            f"Save\t{_SHORTCUT_HINT_SAVE}", lambda: self._save_tab(index)
+        ).setEnabled(isinstance(widget, TextEditorWidget))
+        menu.addSeparator()
+
+        menu.addAction(f"Close\t{_SHORTCUT_HINT_CLOSE}", lambda: self._maybe_close(index))
         menu.addAction("Close Others", lambda: self._close_others(index))
         menu.addAction("Close to the Right", lambda: self._close_to_the_right(index))
         menu.addAction("Close Saved", self._close_saved)
@@ -698,10 +939,17 @@ class TabPane(QTabWidget):
         menu.addAction("Unpin" if state.pinned else "Pin", lambda: self._toggle_pin(index))
         menu.addSeparator()
 
-        can_hsplit = self._area.split_count < _MAX_H_SPLITS
-        can_vsplit = self.group is None or self.group.vsplit_count < _MAX_V_SPLITS
+        can_hsplit = self.group is not None and self._area.split_count < _MAX_H_SPLITS
+        can_vsplit = self.group is not None and self.group.vsplit_count < _MAX_V_SPLITS
         menu.addAction("Split Right", lambda: self._split_tab(index, vertical=False)).setEnabled(can_hsplit)
         menu.addAction("Split Down", lambda: self._split_tab(index, vertical=True)).setEnabled(can_vsplit)
+        menu.addSeparator()
+
+        # PROMPT.md: "please also add a move to window option - this should move the tab to a
+        # popout window where other tabs can also be dragged to" -- see
+        # MainPanelArea.move_tab_to_new_window's own docstring for how the popout window shares
+        # this same area's drag-and-drop/document-lifetime machinery.
+        menu.addAction("Move to Window", lambda: self._area.move_tab_to_new_window(self, index))
 
         menu.exec(self.tabBar().mapToGlobal(pos))
 
@@ -755,8 +1003,12 @@ class _PaneGroup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.splitter = QSplitter(Qt.Orientation.Vertical)
-        self.splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
+        # PaneSplitter, not a real QSplitter -- see pane_splitter.py's own module docstring for why
+        # (PROMPT.md: "if i have two tabs open ... and i close the welcome, things crash", which
+        # turned out to be a native access violation reproducible from manually dragging a real
+        # QSplitterHandle, independent of tab-closing/file type, that no amount of working around
+        # QSplitter itself (setOpaqueResize(False), etc.) ever fully stopped).
+        self.splitter = PaneSplitter(Qt.Orientation.Vertical)
         self.splitter.setHandleWidth(style.PANEL_GAP)
         # A pane dragged down to (or past) its neighbor's edge must not be able to collapse it to
         # zero height -- only the tab-close/auto-close path should ever remove a pane.
@@ -779,6 +1031,7 @@ class _PaneGroup(QWidget):
     def remove_pane(self, pane: TabPane) -> None:
         self.panes.remove(pane)
         card = pane.card
+        self.splitter.removeWidget(card)
         card.setParent(None)
         card.deleteLater()
         self._equalize()
@@ -791,9 +1044,72 @@ class _PaneGroup(QWidget):
         self.splitter.setSizes([total // count] * count)
 
 
+class _PopoutWindow(QWidget):
+    """A floating top-level window for a single tab moved out via "Move to Window" (PROMPT.md,
+    see :meth:`MainPanelArea.move_tab_to_new_window`'s own docstring) -- hosts exactly one
+    :class:`TabPane`, which other tabs (from this window or the main one) can be dragged into just
+    like any other pane.
+
+    Closing this window (its own titlebar close button, Alt+F4, etc.) never destroys it directly --
+    it instead runs every tab in :attr:`pane` through the same prompt-if-dirty close path a single
+    tab's own close button uses (cancellable, same as closing any other tab), then ignores that
+    *particular* close event itself. Once :attr:`pane` is genuinely empty, ``on_pane_emptied``'s own
+    (deliberately one-event-loop-tick-deferred, see its own docstring) teardown calls
+    :meth:`force_close` -- the *only* place this window is ever really torn down, whether it emptied
+    by every tab being closed this way or by the last one being dragged back out into another pane
+    instead. Routing both through the same path avoids re-introducing the exact class of reentrant-
+    teardown crash ``on_pane_emptied`` was written to fix in the first place (PROMPT.md: "if i have
+    two tabs open ... and i close the welcome, things crash").
+
+    PROMPT.md: "we have a bug where if a the last tab in a popped out window is closed, it stays
+    open ... also the close icon is not closing the close window" -- :meth:`force_close` needs its
+    own ``_closing`` flag rather than just calling :meth:`close` a second time, because ``close()``
+    re-enters this exact :meth:`closeEvent` -- and by the time :meth:`force_close` runs, ``pane`` is
+    already empty, so the ``while`` loop below no-ops and execution falls straight through to the
+    same unconditional ``event.ignore()`` the first (real, tab-still-open) close used, permanently
+    refusing to ever actually close the window. ``_closing`` is what tells this *second* pass to
+    accept instead.
+    """
+
+    def __init__(self, pane: TabPane, *, title: str) -> None:
+        super().__init__(None)  # no parent -- a real top-level window, movable/closable on its own
+        self.pane = pane
+        self._closing = False
+        self.setWindowTitle(title)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(style.wrap_tab_widget(pane, flush_top=True))
+        self.resize(900, 650)
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001 -- QCloseEvent
+        if self._closing:
+            event.accept()
+            return
+        while self.pane.count() > 0:
+            if not self.pane._maybe_close(0):
+                event.ignore()
+                return
+        event.ignore()  # see this class's own docstring -- force_close() closes it for real
+
+    def force_close(self) -> None:
+        """The only real way this window ever actually closes -- see this class's own docstring
+        for why plain :meth:`close` can't do it once :attr:`pane` is already empty."""
+        self._closing = True
+        self.close()
+
+
 class MainPanelArea(QWidget):
     """Holds one or more :class:`_PaneGroup` instances side by side in a horizontal splitter, up
     to :data:`_MAX_H_SPLITS` horizontal splits, each in turn holding up to one vertical split."""
+
+    #: Re-emitted whenever *any* pane's own ``cursor_info_changed`` fires (a tab switch, or the
+    #: current tab's cursor/selection moving) -- MainWindow connects to this once, rather than to
+    #: one specific pane's own signal, since which pane is :attr:`active_pane` can now change over
+    #: the panel's lifetime (see that property's own docstring). ``_update_status_cursor_info``
+    #: always re-reads :attr:`active_pane` fresh when this fires, so a background pane's own cursor
+    #: moving harmlessly recomputes the same (unchanged) status-bar text rather than the active
+    #: one's.
+    cursor_info_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -804,6 +1120,7 @@ class MainPanelArea(QWidget):
         on_project_opened: Callable[[Path], None] | None = None,
         on_settings_changed: Callable[[], None] | None = None,
         on_file_saved: Callable[[Path], None] | None = None,
+        project_title: Callable[[], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.root_dir = root_dir or Path.cwd()
@@ -811,18 +1128,49 @@ class MainPanelArea(QWidget):
         self.on_project_opened = on_project_opened
         self.on_settings_changed = on_settings_changed
         self.on_file_saved = on_file_saved
+        #: PROMPT.md: "the top of the popout window should be called the gametype name (so that if
+        #: multiple projects with multiple popouts are open it doesnt get confusing)" -- injectable
+        #: (MainWindow passes the active project's own title, see :meth:`move_tab_to_new_window`),
+        #: same reasoning as ``reveal_in_explorer``/``on_project_opened`` above: this widget stays
+        #: framework-agnostic about what "the active project" even means.
+        self.project_title = project_title
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
+        # See _PaneGroup.splitter's own comment -- same reasoning applies to this (horizontal,
+        # between pane-groups) splitter too.
+        self._splitter = PaneSplitter(Qt.Orientation.Horizontal)
         self._splitter.setHandleWidth(style.PANEL_GAP)
         # Same reasoning as _PaneGroup.splitter above -- in particular, this is what stops the
         # leftmost pane-group from being drag-resized down to zero width (effectively hiding it).
         self._splitter.setChildrenCollapsible(False)
         layout.addWidget(self._splitter)
 
+        # PROMPT.md: "when a new file is opened it should load in the LAST ACTIVE/USED tab" -- the
+        # pane most recently given keyboard focus (clicking into its content) or switched to a
+        # different tab within it; see :attr:`active_pane`/:meth:`_mark_active`/
+        # :meth:`_on_focus_changed`.
+        self._last_active_pane: TabPane | None = None
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+        # Every QTextDocument any currently-open TextEditorWidget displays, keyed to the set of
+        # widgets currently displaying it; _document_owner tracks which one of those widgets
+        # originally created it, and _parked_owners holds one kept-alive-but-hidden past its own
+        # tab closing (deferred destruction) -- see _register_document_user's own docstring.
+        self._document_users: dict[QTextDocument, set[TextEditorWidget]] = {}
+        self._document_owner: dict[QTextDocument, TextEditorWidget] = {}
+        self._parked_owners: dict[QTextDocument, TextEditorWidget] = {}
+
         self.groups: list[_PaneGroup] = []
+        #: Panes living in a popout window (PROMPT.md: "move to window") rather than any
+        #: _PaneGroup/the main splitter -- see :meth:`move_tab_to_new_window`. Kept separate from
+        #: ``groups`` (rather than e.g. a group-of-one with no splitter) since a popout is a
+        #: completely different top-level window, not another slot in this widget's own layout.
+        self._floating_panes: list[TabPane] = []
+        #: The popout window hosting each of :attr:`_floating_panes`, keyed by pane -- a plain
+        #: Python reference is also what keeps a parent-less top-level QWidget alive at all.
+        self._popout_windows: dict[TabPane, "_PopoutWindow"] = {}
+
         first_group = self._new_group()
         first_pane = self._new_pane()
         welcome = self._new_welcome_tab()
@@ -831,20 +1179,105 @@ class MainPanelArea(QWidget):
         first_group.add_pane(first_pane)
         self._add_group(first_group)
         self._next_tab_number = 1
+        self._last_active_pane = first_pane
 
     @property
     def panes(self) -> list[TabPane]:
-        return [pane for group in self.groups for pane in group.panes]
+        return [pane for group in self.groups for pane in group.panes] + self._floating_panes
 
     @property
     def active_pane(self) -> TabPane:
-        """The pane the File menu's New File/Open File/Save/Close Editor actions target.
-
-        Always the first pane for now -- this area doesn't yet track which pane last had keyboard
-        focus across a multi-pane split, so a File-menu action always lands in the same place
-        regardless of which split the user was just looking at.
-        """
+        """The pane the File menu's New File/Open File/Save/Close Editor actions target -- the
+        pane most recently interacted with (a tab switch within it, or a click into its content),
+        tracked by :meth:`_mark_active`/:meth:`_on_focus_changed`. Falls back to the first pane if
+        the last-active one has since been closed (or nothing has been interacted with yet)."""
+        if self._last_active_pane is not None and self._last_active_pane in self.panes:
+            return self._last_active_pane
         return self.panes[0]
+
+    def _mark_active(self, pane: TabPane) -> None:
+        self._last_active_pane = pane
+
+    # -- shared-document lifetime (split-pane duplicates) -----------------------------------------
+
+    def _register_document_user(self, document: QTextDocument, widget: "TextEditorWidget") -> None:
+        """A confirmed, reproducible native crash (PROMPT.md: "if i have two tabs open ... and i
+        close the welcome, things crash"), isolated -- via Application Verifier's page heap, and
+        eventually a from-scratch, zero-custom-code repro (two bare ``QPlainTextEdit``s, no gutter/
+        minimap/breadcrumb/splitter/pane code at all) -- to a genuine PyQt6/Qt6 bug: destroying the
+        *specific* editor whose own construction first created a ``QTextDocument`` corrupts that
+        document's internal state for every other view still sharing it (this app's split-editor
+        duplicate -- module docstring: "the duplicate shares the same underlying QTextDocument, so
+        both views edit the same buffer"), *regardless* of the document's own Qt-parent, its own
+        deletion state, or how many other views reference it. Destroying any *other* (non-owning)
+        view sharing the same document is always safe. (A single ``setDocument()`` call per editor
+        instance, never a second one replacing an already-set document, is also required --
+        :meth:`~in_reach.ide.editor._PlainTextEditor.__init__`'s own docstring covers that half.)
+
+        Every :class:`TextEditorWidget` tab registers its own document here as soon as it's tracked
+        (see ``TabPane._track_tab``); the first registration for a given document also records
+        ``widget`` as that document's owner (see :meth:`_unregister_document_user`). A cross-pane
+        drag re-registers the same widget/document pair (harmless -- a plain ``set``, not a counter)
+        rather than a second, more meaningful share.
+        """
+        users = self._document_users.get(document)
+        if users is None:
+            users = set()
+            self._document_users[document] = users
+            self._document_owner[document] = widget
+        users.add(widget)
+
+    def _unregister_document_user(self, document: QTextDocument, widget: "TextEditorWidget") -> bool:
+        """Pairs with :meth:`_register_document_user` -- called wherever a tab's content widget
+        would normally be destroyed (never for a cross-pane drag, which reparents rather than
+        destroys). Returns whether the caller may actually ``deleteLater()`` ``widget`` now.
+
+        Ordinarily ``True`` -- but if ``widget`` is the document's own owner (see
+        :meth:`_register_document_user`) and other views still share it, returns ``False`` instead:
+        the caller must keep ``widget`` alive (hidden, unparented) rather than destroy it, per this
+        method's own docstring. :meth:`~in_reach.ide.tabs.TabPane._release_tab_widget` is the only
+        caller, and does exactly that. Once every other sharing view has since closed too, whichever
+        one closes last triggers this method to finally ``deleteLater()`` the parked owner itself
+        (its own destruction cascades to the document too, since it was never reparented away from
+        it) -- the caller never needs to know that happened.
+        """
+        users = self._document_users.get(document)
+        if users is None:
+            return True
+        users.discard(widget)
+
+        owner = self._document_owner.get(document)
+        parked = self._parked_owners.get(document)
+        if parked is not None:
+            if users - {parked}:
+                return True  # still other real views besides the parked owner
+            self._document_users.pop(document, None)
+            self._document_owner.pop(document, None)
+            del self._parked_owners[document]
+            parked.deleteLater()
+            return True
+
+        if not users:
+            self._document_users.pop(document, None)
+            self._document_owner.pop(document, None)
+            return True
+
+        if owner is widget:
+            self._parked_owners[document] = widget
+            return False
+
+        return True
+
+    def _on_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
+        """Catches keyboard focus landing anywhere *inside* a pane's own current tab (clicking into
+        an editor without switching tabs) -- :meth:`_mark_active` alone only fires on an actual tab
+        switch, which misses that case entirely."""
+        widget = new
+        while widget is not None:
+            if isinstance(widget, TabPane) and widget in self.panes:
+                self._mark_active(widget)
+                return
+            widget = widget.parentWidget()
 
     @property
     def split_count(self) -> int:
@@ -924,7 +1357,11 @@ class MainPanelArea(QWidget):
             pane._reload_tab(index)
 
     def _new_pane(self) -> TabPane:
-        return TabPane(self)
+        pane = TabPane(self)
+        # Switching tabs within a pane counts as "using" it -- see active_pane's own docstring.
+        pane.currentChanged.connect(lambda _index, p=pane: self._mark_active(p))
+        pane.cursor_info_changed.connect(self.cursor_info_changed.emit)
+        return pane
 
     def _new_group(self) -> _PaneGroup:
         return _PaneGroup(self)
@@ -972,11 +1409,10 @@ class MainPanelArea(QWidget):
 
         generated = False
         if isinstance(widget, TextEditorWidget):
-            duplicate: QWidget = TextEditorWidget()
-            duplicate.setDocument(widget.document())
-            # set_path() *after* setDocument() -- it attaches the JSON highlighter (if any) to
-            # whatever document is current at the time, which needs to be the shared one both
-            # views actually edit, not the throwaway blank document TextEditorWidget() started with.
+            # document=widget.document(), not a separate setDocument() call after construction --
+            # see editor.py's _PlainTextEditor.__init__ docstring for why a *second* setDocument()
+            # on the same instance is itself the thing that used to crash here.
+            duplicate: QWidget = TextEditorWidget(document=widget.document())
             duplicate.set_path(source_state.path)
             # A duplicate is its own QWidget, not sharing widget-level (as opposed to document-
             # level) state with the source -- read-only doesn't carry over on its own, so a split
@@ -998,8 +1434,10 @@ class MainPanelArea(QWidget):
 
     def split_from(self, source: TabPane) -> None:
         """Horizontal split: adds a new pane-group beside ``source``'s own group, seeded with a
-        duplicate of ``source``'s current tab."""
-        if self.split_count >= _MAX_H_SPLITS:
+        duplicate of ``source``'s current tab. A no-op for a floating (popout-window) pane --
+        see :meth:`move_tab_to_new_window`'s own docstring -- since a popout doesn't participate in
+        this area's own splitter layout at all."""
+        if source.group is None or self.split_count >= _MAX_H_SPLITS:
             return
         new_group = self._new_group()
         new_pane = self._new_pane()
@@ -1031,7 +1469,7 @@ class MainPanelArea(QWidget):
         is_editable_markdown = (
             isinstance(widget, TextEditorWidget) and path is not None and path.suffix.lower() == ".md"
         )
-        if not is_editable_markdown or self.split_count >= _MAX_H_SPLITS:
+        if not is_editable_markdown or source.group is None or self.split_count >= _MAX_H_SPLITS:
             return
         label = source.tabText(index)
         preview = MarkdownPreviewWidget(path=path)
@@ -1096,8 +1534,43 @@ class MainPanelArea(QWidget):
 
     def on_pane_emptied(self, pane: TabPane) -> None:
         """Called after a tab is dragged or closed out of ``pane`` -- removes it (and its group, if
-        that was the group's last pane) unless it's the very last pane in the whole area."""
+        that was the group's last pane) unless it's the very last pane in the whole area.
+
+        The actual removal is deferred one event-loop tick (``QTimer.singleShot(0, ...)``) rather
+        than done immediately, in :meth:`_remove_empty_pane`. This is reached synchronously from
+        deep inside a tab's own close-button click handler (``_maybe_close`` -> ``_close_tab`` ->
+        here), and reparenting/deleting a whole pane-group's widget tree from there reflows this
+        area's own splitter *while that click is still being handled* -- confirmed (PROMPT.md: "if
+        i have two tabs open (1 on welcome and one on any json) and i close the welcome, things
+        crash") to be able to crash Qt's own native text-layout engine outright: an access
+        violation inside a *sibling* pane's ``TextEditorWidget.resizeEvent``, caught via
+        ``faulthandler``, from the resize that splitter reflow triggers landing mid-event-handling
+        like that. Letting the click handler's own call stack unwind back to the event loop first --
+        the same reason ``QWidget.deleteLater()`` defers destruction rather than doing it inline --
+        avoids it.
+        """
         if pane.count() != 0 or len(self.panes) <= 1:
+            return
+        QTimer.singleShot(0, lambda: self._remove_empty_pane(pane))
+
+    def _remove_empty_pane(self, pane: TabPane) -> None:
+        # Re-checked against whatever's true *now*, one event-loop tick after on_pane_emptied's own
+        # check above -- e.g. a tab could have been dropped back into `pane` in the meantime, or
+        # every other pane could have since closed too.
+        if pane.count() != 0 or pane not in self.panes or len(self.panes) <= 1:
+            return
+
+        if pane.group is None:
+            # A floating (popout-window) pane -- see move_tab_to_new_window's own docstring. Never
+            # subject to the main splitter's group-removal bookkeeping below; this is the one place
+            # a popout window is actually torn down, whether it emptied by its last tab closing or
+            # by that tab being dragged out into another pane (see _PopoutWindow.closeEvent's own
+            # docstring for why closing the window itself funnels through here too).
+            self._floating_panes.remove(pane)
+            window = self._popout_windows.pop(pane, None)
+            if window is not None:
+                window.force_close()
+                window.deleteLater()
             return
 
         group = pane.group
@@ -1106,7 +1579,52 @@ class MainPanelArea(QWidget):
             group._equalize()
         else:
             self.groups.remove(group)
+            self._splitter.removeWidget(group)
             group.setParent(None)
             group.deleteLater()
             self._equalize_groups()
         self._update_split_buttons()
+
+    def move_tab_to_new_window(self, source: TabPane, index: int) -> "_PopoutWindow":
+        """"Move to Window" (the tab context menu) -- PROMPT.md: "please also add a move to window
+        option - this should move the tab to a popout window where other tabs can also be dragged
+        to[; t]he top of the popout window should be called the gametype name".
+
+        The new pane is a fully ordinary :class:`TabPane` sharing this same :class:`MainPanelArea`
+        (registered in :attr:`_floating_panes` rather than any :class:`_PaneGroup`) -- so dragging a
+        tab between it and any other pane, in this window or the main one, needs no special-casing
+        at all: :class:`TabPane`'s own drag/drop only ever looks a source pane up by id via
+        :meth:`find_pane`, which walks :attr:`panes` (already extended to include floating ones),
+        indifferent to which top-level window either pane actually lives in -- Qt's own drag-and-
+        drop already works across top-level windows in the same process for free. Shared documents
+        (a split Markdown/text tab), the active-pane tracker, and every dirty-tab-by-path lookup
+        used elsewhere all keep working the same way for the same reason.
+
+        Split buttons are hidden on the new pane -- see :meth:`split_from`'s own docstring for why a
+        floating pane can never actually split (there's no second slot in a popout window's own
+        layout to split into).
+        """
+        label = source.tabText(index)
+        icon = source.tabIcon(index)
+        content = source.widget(index)
+        state = source._tab_state.pop(content, _TabState())
+        source.removeTab(index)
+
+        new_pane = self._new_pane()
+        new_pane.split_button.hide()
+        new_pane.vsplit_button.hide()
+        if icon is not None and not icon.isNull():
+            new_index = new_pane.addTab(content, icon, label)
+        else:
+            new_index = new_pane.addTab(content, label)
+        new_pane._track_tab(new_index, content, state=state)
+        new_pane.setCurrentIndex(new_index)
+        self._floating_panes.append(new_pane)
+
+        title = self.project_title() if self.project_title is not None else "in-reach"
+        window = _PopoutWindow(new_pane, title=title)
+        self._popout_windows[new_pane] = window
+        window.show()
+
+        self.on_pane_emptied(source)
+        return window

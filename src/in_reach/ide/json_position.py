@@ -107,3 +107,80 @@ def find_value_span(text: str, loc: tuple) -> tuple[int, int] | None:
     except (IndexError, ValueError):
         return None
     return found
+
+
+def _collect_value_spans(
+    tokens: list[_Token], i: int, path: tuple, targets: set[tuple], found: dict[tuple, tuple[int, int]]
+) -> int:
+    """Single-pass sibling of :func:`_value_span`: parses the value starting at ``tokens[i]``,
+    recording ``found[path] = span`` for every ``path`` (built up incrementally while descending)
+    that's a member of ``targets`` -- one full walk of the document locates *every* requested loc at
+    once, rather than one full walk per loc (see :func:`find_value_spans`'s own docstring for why
+    that distinction matters). Returns the token index just past this value."""
+    tok = tokens[i]
+    if tok.text == "{":
+        start = tok.start
+        i += 1
+        if tokens[i].text == "}":
+            end = tokens[i].end
+            if path in targets:
+                found[path] = (start, end)
+            return i + 1
+        while True:
+            key = json.loads(tokens[i].text)
+            i += 2  # the key string, then ':'
+            i = _collect_value_spans(tokens, i, (*path, key), targets, found)
+            if tokens[i].text == ",":
+                i += 1
+                continue
+            end = tokens[i].end
+            i += 1
+            break
+        if path in targets:
+            found[path] = (start, end)
+        return i
+    if tok.text == "[":
+        start = tok.start
+        i += 1
+        if tokens[i].text == "]":
+            end = tokens[i].end
+            if path in targets:
+                found[path] = (start, end)
+            return i + 1
+        index = 0
+        while True:
+            i = _collect_value_spans(tokens, i, (*path, index), targets, found)
+            index += 1
+            if tokens[i].text == ",":
+                i += 1
+                continue
+            end = tokens[i].end
+            i += 1
+            break
+        if path in targets:
+            found[path] = (start, end)
+        return i
+    # Scalar: string, number, or true/false/null -- always one token.
+    if path in targets:
+        found[path] = (tok.start, tok.end)
+    return i + 1
+
+
+def find_value_spans(text: str, locs: list[tuple]) -> list[tuple[int, int] | None]:
+    """Same result as calling :func:`find_value_span` once per entry of ``locs``, in one single walk
+    of ``text`` regardless of how many locs are asked for -- editor.py's own protected-field spans
+    (dozens of individual fields on a large settings/script_settings.json, recomputed on every
+    keystroke -- see its own ``_protected_spans_cache`` docstring) confirmed a real, severe
+    performance regression calling :func:`find_value_span` in a loop instead: each call re-walks the
+    *entire* parsed tree from the root looking for just its own one loc, making the total cost
+    ``O(fields x document size)`` instead of this function's ``O(document size)``."""
+    tokens = _tokenize(text)
+    if not tokens:
+        return [None for _ in locs]
+    targets = {tuple(loc) for loc in locs}
+    found: dict[tuple, tuple[int, int]] = {}
+    try:
+        _collect_value_spans(tokens, 0, (), targets, found)
+    except (IndexError, ValueError):
+        pass
+    return [found.get(tuple(loc)) for loc in locs]

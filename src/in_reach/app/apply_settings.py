@@ -21,10 +21,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from in_reach.app import new_project
+from in_reach.app import logging_setup, new_project
 from in_reach.app.rvt import decompile
 from in_reach.app.rvt.compile import BuildResult, run_compile
 from in_reach.app.rvt.strings_io import LANGUAGES as _LANGUAGE_CODES
+
+_logger = logging_setup.get_logger(__name__)
 
 _LANGUAGE_CODE_SET = frozenset(_LANGUAGE_CODES)
 
@@ -194,6 +196,14 @@ def _load_stripped_json(path: Path) -> object:
     ``meta.description[0]`` does), leaving settings.json's copy permanently stale relative to
     build's snapshot the moment it's edited that way, the same as the fields above.
 
+    ``multiplayer.game_settings.metadata.category`` is stripped for the same reason again -- per
+    ``settings_writer.py``'s own module docstring, it's "deliberately NOT applied here (confirmed
+    by direct testing against a real .bin that writing it has no observable effect anywhere)", the
+    one field from that docstring's list this function didn't yet strip (PROMPT.md: "also sometimes
+    compile buttons seems to need pushing twice" -- a project whose category was ever hand-edited in
+    ``settings.json`` left Apply reading "unapplied" forever after, the exact same class of bug as
+    every field above).
+
     Returns ``None`` if ``path`` doesn't exist or isn't valid JSON, distinct from any real
     (dict/list) value.
     """
@@ -229,6 +239,7 @@ def _strip_never_applied_multiplayer_mirrors(data: dict) -> None:
         return
     if isinstance(metadata, dict):
         metadata.pop("description_string", None)
+        metadata.pop("category", None)
 
 
 def _strip_never_applied_script_settings_text(data: dict) -> None:
@@ -335,4 +346,9 @@ def apply_settings_changes(project_dir: Path, folder: Path) -> BuildResult:
         (PROMPT.md: "raise errors in text window") and blocks ``build/`` from changing when it
         does, simply by virtue of ``run_compile`` never having written anything on a failure.
     """
-    return run_compile(project_dir, folder, save=True)
+    result = run_compile(project_dir, folder, save=True)
+    if result.success:
+        _logger.info("applied settings for %s", folder)
+    else:
+        _logger.warning("apply failed for %s: %s", folder, result.failure)
+    return result

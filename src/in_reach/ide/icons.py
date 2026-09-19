@@ -93,6 +93,26 @@ _ICON_SOURCES = {
         "0 0 16 16",
         '<circle cx="8" cy="8" r="3.5"/>',
     ),
+    "tab_pin": (  # PROMPT.md: "when a tab is pinned, it should have a pin icon instead of an x
+        # icon" -- shown instead of the close 'x' on a pinned tab (see tabs.py's
+        # TabPane._update_close_icon). A plain pin: a rounded head, a body, and a point, same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"dashboard".
+        "0 0 16 16",
+        '<circle cx="8" cy="5" r="3" fill="{color}"/>'
+        '<path d="M8 8V14" stroke="{color}" stroke-width="1.6" stroke-linecap="round"/>',
+    ),
+    "book": (  # PROMPT.md: "move documentation to be its own panel. it should have a symbol of a
+        # book" -- a closed book (a cover outline, a spine fold near the left edge, and a few
+        # horizontal "text line" strokes standing in for pages), same "deliberately simple, not
+        # traced from any icon set" reasoning as "compass"/"map" above. Deliberately distinct from
+        # "bookshelf" (Scripts' own icon, a row of book spines standing on a shelf) so the two never
+        # get confused for each other.
+        "0 0 16 16",
+        '<rect x="3" y="2" width="10" height="12" rx="1" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<path d="M5.5 2V14" stroke="{color}" stroke-width="1.1"/>'
+        '<path d="M7.7 4.8H11M7.7 7.3H11M7.7 9.8H9.6" stroke="{color}" stroke-width="0.9"'
+        ' stroke-linecap="round"/>',
+    ),
     "compass": (  # PROMPT.md: "please also add a side icon of a bookshelf (titled Locations)",
         # later: "for locations please use a compass icon" -- a ring plus a two-tone needle
         # (the north half solid, the south half translucent, both traced as plain kite-shaped
@@ -102,6 +122,29 @@ _ICON_SOURCES = {
         '<circle cx="8" cy="8" r="6.3" fill="none" stroke="{color}" stroke-width="1.3"/>'
         '<path d="M8 3.2L9.6 8L8 8.9L6.4 8Z" fill="{color}"/>'
         '<path d="M8 12.8L6.4 8L8 7.1L9.6 8Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "testtube": (  # PROMPT.md: "above maps icon, please add a stubbed entrance for Testing (using
+        # a testube)" -- a simple test tube: a neck, a rounded-bottom body, and a translucent
+        # liquid fill in the bulb, same "deliberately simple, not traced from any icon set"
+        # reasoning as "compass"/"map" above.
+        "0 0 16 16",
+        '<path d="M6 1.5H10" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
+        '<path d="M6.5 1.5V6.3L4.2 11.6C3.6 13 4.6 14.5 6.1 14.5H9.9C11.4 14.5 12.4 13 11.8 11.6'
+        'L9.5 6.3V1.5" fill="none" stroke="{color}" stroke-width="1.2" stroke-linejoin="round"/>'
+        '<path d="M4.9 10.3L4.2 11.6C3.6 13 4.6 14.5 6.1 14.5H9.9C11.4 14.5 12.4 13 11.8 11.6'
+        'L11.1 10.3Z" fill="{color}" fill-opacity="0.45"/>',
+    ),
+    "robot": (  # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)" -- a plain
+        # robot head (an antenna, a rounded-rect face, two eyes, a mouth line, two side arms), same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"map" above.
+        "0 0 16 16",
+        '<circle cx="8" cy="1.1" r="0.9" fill="{color}"/>'
+        '<path d="M8 2V3.3" stroke="{color}" stroke-width="1.1" stroke-linecap="round"/>'
+        '<rect x="3" y="3.3" width="10" height="9" rx="2" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<circle cx="6" cy="7.5" r="1.1" fill="{color}"/>'
+        '<circle cx="10" cy="7.5" r="1.1" fill="{color}"/>'
+        '<path d="M6 10.3H10" fill="none" stroke="{color}" stroke-width="1.1" stroke-linecap="round"/>'
+        '<path d="M1.5 6V9M14.5 6V9" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>',
     ),
     "git": (  # PROMPT.md: "a git symbol (stubbed empty panel for now (where we will implement a
         # dulwich gui))" -- a plain three-node branch graph (a main-line commit at top and bottom,
@@ -113,6 +156,35 @@ _ICON_SOURCES = {
         '<circle cx="12" cy="9" r="1.5" fill="{color}"/>'
         '<path d="M4 4.5V11.5" stroke="{color}" stroke-width="1.3" fill="none"/>'
         '<path d="M4 7.5C4 9 5 9.8 7 9.8C9 9.8 10 9.5 10.6 9.3" fill="none" stroke="{color}" stroke-width="1.3"/>',
+    ),
+    "map": (  # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)"
+        # -- a classic folded paper map (a zigzag-edged strip with two fold creases), same
+        # "deliberately simple, not traced from any icon set" reasoning as "compass"/"git" above.
+        # Went through a globe, then a folded-map-plus-pin, then a redraw off a user-supplied
+        # reference (map_sample.png) after this -- brought back on request ("please try the first
+        # map svg you had at the start"). A later pass ("please remove the dot in the circle of the
+        # map") dropped the small location-dot marker this used to have in its center -- just the
+        # folded paper itself now.
+        "0 0 16 16",
+        '<path d="M1 3L5 1L11 3L15 1V13L11 15L5 13L1 15Z" fill="none" stroke="{color}"'
+        ' stroke-width="1.2" stroke-linejoin="round"/>'
+        '<path d="M5 1V13M11 3V15" fill="none" stroke="{color}" stroke-width="1.2"/>',
+    ),
+    "kanban": (  # PROMPT.md: "under documentation please add an icon for Kanban, this should be
+        # stubbed for now" -- three simple columns (a board outline plus two divider lines) each
+        # holding a card or two, same "deliberately simple, not traced from any icon set" reasoning
+        # as "compass"/"map" above. PROMPT.md, a later pass ("the icon is slightly malformed, the
+        # cars in the third column blends with the border"): the third column's own card used to be
+        # exactly as wide as the first two (2.3), which left it flush against the board's own right
+        # edge (unlike the first two, each with a real margin against their own column's edge) --
+        # narrowed to 1.8 so it keeps the same ~0.5-0.6 margin every other card already has.
+        "0 0 16 16",
+        '<rect x="1.5" y="2" width="13" height="12" rx="1" fill="none" stroke="{color}" stroke-width="1.2"/>'
+        '<path d="M6 2V14M10.5 2V14" stroke="{color}" stroke-width="1"/>'
+        '<rect x="2.6" y="3.4" width="2.3" height="2.6" fill="{color}"/>'
+        '<rect x="2.6" y="7" width="2.3" height="1.6" fill="{color}"/>'
+        '<rect x="7.1" y="3.4" width="2.3" height="1.6" fill="{color}"/>'
+        '<rect x="11.6" y="3.4" width="1.8" height="4" fill="{color}"/>',
     ),
     "bookshelf": (  # PROMPT.md: "a bookshelf with the label Scripts" -- a row of book spines
         # (plain rectangles, varying height) standing on a shelf line, same "deliberately simple"
@@ -132,6 +204,16 @@ _ICON_SOURCES = {
         '<path d="M6.2 6.1c0-1.05.85-1.9 1.9-1.9s1.9.72 1.9 1.7c0 .95-.6 1.35-1.15 1.75'
         '-.5.36-.75.6-.75 1.15" fill="none" stroke="{color}" stroke-width="1.2" stroke-linecap="round"/>'
         '<circle cx="8" cy="11.2" r="0.75" fill="{color}"/>',
+    ),
+    "more": (  # codicon "ellipsis" -- shown by the activity bar's own overflow "..." button once
+        # too many reorderable icons no longer fit the bar's available height (PROMPT.md: "the
+        # side panel icons are overlaying on each other ... instead we want ... icons ... collapsed
+        # into a ... icon which opens a popout window"), same "deliberately simple" plain-dots
+        # reasoning as "compass"/"help" above.
+        "0 0 16 16",
+        '<circle cx="3.5" cy="8" r="1.5" fill="{color}"/>'
+        '<circle cx="8" cy="8" r="1.5" fill="{color}"/>'
+        '<circle cx="12.5" cy="8" r="1.5" fill="{color}"/>',
     ),
     # Window controls: plain geometric shapes only (no glyph tracing needed at all).
     "win_minimize": (

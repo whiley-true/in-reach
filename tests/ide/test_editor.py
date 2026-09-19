@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPalette, QTextFormat
+from PyQt6.QtCore import QMimeData, Qt
+from PyQt6.QtGui import QPalette, QTextCursor, QTextFormat
 from PyQt6.QtWidgets import QApplication
 
 from in_reach.app import indent_settings
@@ -28,14 +28,6 @@ def _has_opaque_pixel(image) -> bool:
     )
 
 
-def test_editor_reserves_viewport_space_for_the_gutter(qtbot) -> None:
-    editor = TextEditorWidget()
-    qtbot.addWidget(editor)
-
-    assert editor.viewportMargins().left() == editor.line_number_area_width()
-    assert editor.viewportMargins().left() > 0
-
-
 def test_gutter_width_grows_as_line_count_passes_a_digit_boundary(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
@@ -49,7 +41,7 @@ def test_gutter_width_grows_as_line_count_passes_a_digit_boundary(qtbot) -> None
     assert triple_digit_width > single_digit_width
 
 
-def test_gutter_repaints_wider_when_the_viewport_margin_changes(qtbot) -> None:
+def test_gutter_column_grows_as_the_line_count_passes_a_digit_boundary(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
     editor.show()
@@ -58,7 +50,7 @@ def test_gutter_repaints_wider_when_the_viewport_margin_changes(qtbot) -> None:
     editor.setPlainText("\n".join(str(i) for i in range(200)))
     QApplication.processEvents()
 
-    assert editor.viewportMargins().left() == editor.line_number_area_width()
+    assert editor._line_number_area.width() == editor.line_number_area_width()
 
 
 def test_line_number_area_paints_visible_digits(qtbot) -> None:
@@ -75,20 +67,39 @@ def test_line_number_area_paints_visible_digits(qtbot) -> None:
     assert _has_opaque_pixel(pixmap.toImage())
 
 
-def test_resize_event_repositions_the_gutter_to_fill_the_left_edge(qtbot) -> None:
+def test_resize_repositions_the_gutter_to_fill_the_left_edge(qtbot) -> None:
+    # PROMPT.md: "if i have two tabs open (1 on welcome and one on any json) and i close the
+    # welcome, things crash" -- traced to a real, native access-violation crash (confirmed via a
+    # WinDbg-analyzed crash dump) inside Qt's own internal resize handling, specifically triggered
+    # by the gutter/breadcrumb/minimap all being *overlay* children positioned into
+    # setViewportMargins()-reserved space. They're now ordinary QGridLayout-managed siblings of the
+    # real QPlainTextEdit instead (see editor.py's own module docstring) -- this is the regression
+    # guard that the gutter still ends up in the right place under that new layout, not overlapping
+    # the text or the breadcrumb.
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
     editor.show()
     editor.resize(400, 300)
     QApplication.processEvents()
 
-    geometry = editor._line_number_area.geometry()
-    assert geometry.left() == editor.contentsRect().left()
-    assert geometry.width() == editor.line_number_area_width()
-    # The gutter sits below the breadcrumb bar (see test_breadcrumb.py), not the full contents
-    # height -- the breadcrumb bar itself owns that top strip.
-    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
-    assert geometry.height() == editor.contentsRect().height() - editor._breadcrumb.height()
+    gutter = editor._line_number_area.geometry()
+    assert gutter.left() == 0
+    assert gutter.width() == editor.line_number_area_width()
+    # The gutter sits below the breadcrumb bar and beside the real text edit, not overlapping
+    # either.
+    assert gutter.top() == editor._breadcrumb.height()
+    assert gutter.right() < editor._edit.geometry().left()
+
+
+def test_resize_keeps_the_real_editor_and_gutter_from_overlapping(qtbot) -> None:
+    editor = TextEditorWidget()
+    qtbot.addWidget(editor)
+    editor.show()
+    editor.resize(400, 300)
+    QApplication.processEvents()
+
+    assert editor._edit.geometry().left() >= editor._line_number_area.geometry().right()
+    assert editor._minimap.geometry().left() >= editor._edit.geometry().right()
 
 
 def test_scrolling_updates_the_gutter_without_raising(qtbot) -> None:
@@ -475,19 +486,373 @@ def test_an_untitled_tab_with_no_path_never_shows_an_error(qtbot) -> None:
     assert editor._error_spans == []
 
 
+# -- "$schema" line protection (PROMPT.md: "the schema section of the jsons should not be
+# editable") ----------------------------------------------------------------------------------
+
+_SCHEMA_TEXT = '{\n  "$schema": "../../schema/settings.schema.json",\n  "difficulty": "normal"\n}'
+
+
+def _place_cursor(editor: TextEditorWidget, pos: int) -> None:
+    cursor = editor.textCursor()
+    cursor.setPosition(pos)
+    editor.setTextCursor(cursor)
+
+
+def test_typing_inside_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index("schema.json"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_backspace_at_the_start_of_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    # Backspacing right at the line's own start would otherwise merge the previous line into it
+    # without deleting any of the line-detection's own matched text, silently defeating protection
+    # on every check afterwards -- see _blocks_protected_edit()'s own docstring.
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index('"$schema"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Backspace)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_deleting_a_selection_spanning_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_SCHEMA_TEXT.index('"$schema"') - 1)
+    cursor.setPosition(_SCHEMA_TEXT.index('"difficulty"') + 3, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Delete)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_pasting_into_the_schema_line_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index("schema.json"))
+    mime = QMimeData()
+    mime.setText("PASTED")
+    editor._edit.insertFromMimeData(mime)
+
+    assert editor.toPlainText() == _SCHEMA_TEXT
+
+
+def test_editing_other_lines_of_a_schema_backed_file_still_works(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    _place_cursor(editor, _SCHEMA_TEXT.index('"difficulty"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() != _SCHEMA_TEXT
+    assert editor.toPlainText().count("x") == 1
+
+
+def test_a_json_file_with_no_schema_key_is_fully_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "difficulty": "normal"\n}')
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText().startswith("x")
+
+
+def test_a_non_json_file_containing_the_literal_text_is_fully_editable(qtbot) -> None:
+    path = Path("/project/script/output.txt")
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    text = '"$schema": "not actually json here"'
+    editor.setPlainText(text)
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() != text
+
+
+def test_hovering_the_schema_line_shows_a_warning_elsewhere_reports_none(qtbot, tmp_path) -> None:
+    # PROMPT.md: "add a helper text when a user hovers over schema in settings that warns the user
+    # they cannot edit that section of the jsons".
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.resize(400, 200)
+    editor.show()
+    QApplication.processEvents()
+    editor.setPlainText(_SCHEMA_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_SCHEMA_TEXT.index("schema.json"))
+    inside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(inside_pos) == (
+        "This line is managed automatically and can't be edited."
+    )
+
+    cursor.setPosition(_SCHEMA_TEXT.index('"difficulty"'))
+    outside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(outside_pos) is None
+
+
+# -- forge_labels[].name protection (PROMPT.md: "entries in forge labels (in script_settings.json)
+# should instead not be changeable (the entry in the forge_labels name must always be none editable
+# in scrip_settings.json)") ------------------------------------------------------------------------
+
+_FORGE_LABELS_TEXT = (
+    "{\n"
+    '  "forge_labels": [\n'
+    '    {\n'
+    '      "name": "Blue Base",\n'
+    '      "required_number": 1\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
+
+
+def test_typing_inside_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index("Blue Base"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_backspace_at_the_start_of_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index('"Blue Base"'))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Backspace)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_pasting_into_a_forge_label_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index("Blue Base"))
+    mime = QMimeData()
+    mime.setText("PASTED")
+    editor._edit.insertFromMimeData(mime)
+
+    assert editor.toPlainText() == _FORGE_LABELS_TEXT
+
+
+def test_other_forge_label_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    _place_cursor(editor, _FORGE_LABELS_TEXT.index('"required_number": 1') + len('"required_number": '))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _FORGE_LABELS_TEXT
+    assert '"required_number": 91' in editor.toPlainText()
+
+
+def test_a_json_file_with_no_forge_labels_array_is_fully_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText('{\n  "difficulty": "normal"\n}')
+
+    _place_cursor(editor, 0)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText().startswith("x")
+
+
+def test_hovering_a_forge_label_name_shows_a_warning(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.resize(400, 200)
+    editor.show()
+    QApplication.processEvents()
+    editor.setPlainText(_FORGE_LABELS_TEXT)
+
+    cursor = editor.textCursor()
+    cursor.setPosition(_FORGE_LABELS_TEXT.index("Blue Base"))
+    inside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(inside_pos) == (
+        "Forge label names are fixed and can't be edited here."
+    )
+
+    cursor.setPosition(_FORGE_LABELS_TEXT.index('"required_number"'))
+    outside_pos = editor.cursorRect(cursor).center()
+    assert editor._error_message_at(outside_pos) is None
+
+
+# -- other never-applied text fields (edit -> save -> Apply silently reverts the edit, since these
+# route through strings.json/aren't written by a real compile at all -- see editor.py's own
+# _never_applied_field_spans() docstring) --------------------------------------------------------
+
+_SETTINGS_MIRROR_TEXT = (
+    "{\n"
+    '  "multiplayer": {\n'
+    '    "game_settings": {\n'
+    '      "metadata": {\n'
+    '        "description_string": "Old description",\n'
+    '        "category": "Slayer"\n'
+    "      },\n"
+    '      "team_settings": {\n'
+    '        "teams": [\n'
+    '          {"name": "Red Team", "index": 0}\n'
+    "        ]\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}"
+)
+
+
+def test_typing_inside_description_string_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Old description"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_typing_inside_metadata_category_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Slayer"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_typing_inside_a_team_name_is_blocked(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index("Red Team"))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SETTINGS_MIRROR_TEXT
+
+
+def test_other_settings_json_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SETTINGS_MIRROR_TEXT.index('"index": 0') + len('"index": '))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _SETTINGS_MIRROR_TEXT
+    assert '"index": 90' in editor.toPlainText()
+
+
+_SCRIPT_SETTINGS_MIRROR_TEXT = (
+    "{\n"
+    '  "forge_labels": [\n'
+    '    {"required_object_type_name": "Skull", "required_number": 1}\n'
+    "  ],\n"
+    '  "scripted_options": [\n'
+    '    {"name": "Zombie Damage", "desc": "Zombie melee multiplier", "default_value_index": 0}\n'
+    "  ],\n"
+    '  "scripted_player_traits": [\n'
+    '    {"name": "Zombie Traits", "desc": "Traits for zombies"}\n'
+    "  ],\n"
+    '  "scripted_stats": [\n'
+    '    {"name": "Zombie Kills"}\n'
+    "  ],\n"
+    '  "required_object_types": {\n'
+    '    "object_type_indices": [3],\n'
+    '    "object_type_names": ["Weapon Rack"]\n'
+    "  }\n"
+    "}"
+)
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [
+        "Skull",
+        "Zombie Damage",
+        "Zombie melee multiplier",
+        "Zombie Traits",
+        "Traits for zombies",
+        "Zombie Kills",
+        "Weapon Rack",
+    ],
+)
+def test_typing_inside_a_script_settings_mirror_field_is_blocked(qtbot, tmp_path, needle) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCRIPT_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(editor, _SCRIPT_SETTINGS_MIRROR_TEXT.index(needle))
+    qtbot.keyClick(editor._edit, Qt.Key.Key_X)
+
+    assert editor.toPlainText() == _SCRIPT_SETTINGS_MIRROR_TEXT
+
+
+def test_other_script_settings_json_fields_stay_editable(qtbot, tmp_path) -> None:
+    path = tmp_path / "script_settings.json"
+    editor = TextEditorWidget(path=path)
+    qtbot.addWidget(editor)
+    editor.setPlainText(_SCRIPT_SETTINGS_MIRROR_TEXT)
+
+    _place_cursor(
+        editor,
+        _SCRIPT_SETTINGS_MIRROR_TEXT.index('"object_type_indices": [3]') + len('"object_type_indices": ['),
+    )
+    qtbot.keyClick(editor._edit, Qt.Key.Key_9)
+
+    assert editor.toPlainText() != _SCRIPT_SETTINGS_MIRROR_TEXT
+    assert '"object_type_indices": [93]' in editor.toPlainText()
+
+
 # -- minimap (PROMPT.md: "a live code preview on the right hand side next to the scrollbar") -----
 
 
-def test_editor_reserves_viewport_space_for_the_minimap(qtbot) -> None:
-    from in_reach.ide.editor import _MINIMAP_WIDTH
-
-    editor = TextEditorWidget()
-    qtbot.addWidget(editor)
-
-    assert editor.viewportMargins().right() == _MINIMAP_WIDTH
-
-
-def test_resize_event_positions_the_minimap_along_the_right_edge(qtbot) -> None:
+def test_resize_positions_the_minimap_along_the_right_edge(qtbot) -> None:
     from in_reach.ide.editor import _MINIMAP_WIDTH
 
     editor = TextEditorWidget()
@@ -497,9 +862,9 @@ def test_resize_event_positions_the_minimap_along_the_right_edge(qtbot) -> None:
     QApplication.processEvents()
 
     geometry = editor._minimap.geometry()
-    assert geometry.right() == editor.contentsRect().right()
+    assert geometry.right() == editor.width() - 1
     assert geometry.width() == _MINIMAP_WIDTH
-    assert geometry.top() == editor.contentsRect().top() + editor._breadcrumb.height()
+    assert geometry.top() == editor._breadcrumb.height()
 
 
 def test_minimap_paints_without_raising_on_an_empty_document(qtbot) -> None:
@@ -712,15 +1077,48 @@ def test_refresh_font_scale_tracks_a_later_app_font_change(qtbot, tmp_path) -> N
         app.setFont(original)
 
 
+def test_refresh_font_scale_regrows_the_gutter_column_for_the_new_font(qtbot, tmp_path) -> None:
+    # A font-only change (a live zoom change re-applying refresh_font_scale() to an already-loaded
+    # tab -- see MainWindow._adjust_zoom(), which calls this directly, with no set_path()/text
+    # change in between) never touches the block count, so line_number_area_width()'s own cached
+    # sizeHint() would otherwise go stale -- painting the *new* (bigger) font's digits inside the
+    # *old* font's (narrower) gutter column, clipping them. See editor.py's own refresh_font_scale().
+    from PyQt6.QtGui import QFont
+
+    editor = TextEditorWidget(path=tmp_path / "settings.json")  # already +10% enlarged
+    qtbot.addWidget(editor)
+    editor.setPlainText("\n".join(f"line {i}" for i in range(30)))
+    editor.show()
+    QApplication.processEvents()
+
+    app = QApplication.instance()
+    original = QFont(app.font())
+    try:
+        bigger = QFont(original)
+        bigger.setPointSizeF(original.pointSizeF() * 3)
+        app.setFont(bigger)
+
+        editor.refresh_font_scale()  # exactly what MainWindow._adjust_zoom() calls
+        QApplication.processEvents()
+
+        assert editor._line_number_area.width() == editor.line_number_area_width()
+    finally:
+        app.setFont(original)
+
+
 # -- Tab key indentation (PROMPT.md: Quick Access Bar work -- "Indent using spaces") -------------
 
 
 def test_tab_inserts_spaces_when_the_indent_style_is_spaces(qtbot) -> None:
+    # keyPressEvent() lives on the real inner QPlainTextEdit (editor._edit) -- the wrapper itself
+    # doesn't handle key events directly, it just lays that widget out (see editor.py's own module
+    # docstring); a real click would land on _edit directly since it fills the wrapper's own
+    # interior, same as this targets it explicitly.
     indent_state.set_indent(indent_settings.STYLE_SPACES, 3)
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
 
-    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Tab)
 
     assert editor.toPlainText() == "   "
 
@@ -730,7 +1128,7 @@ def test_tab_inserts_a_literal_tab_when_the_indent_style_is_tabs(qtbot) -> None:
     editor = TextEditorWidget()
     qtbot.addWidget(editor)
 
-    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+    qtbot.keyClick(editor._edit, Qt.Key.Key_Tab)
 
     assert editor.toPlainText() == "\t"
 

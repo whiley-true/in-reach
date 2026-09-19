@@ -1,0 +1,353 @@
+"""A VSCode/``git log --graph``-style commit graph widget (PROMPT.md: "we also want to show a git
+graph of commits, branches and stamps instead in vscode style") -- replaces the Git panel's old flat
+``QListWidget`` history list with a lane-painted canvas: one dot per commit, a colored vertical lane
+per branch, diagonal connectors where two branches share a fork point (or a merge commit's own extra
+parent, see below), a star marker on stamped commits, and each branch's name labelled at its own
+tip.
+
+Lane assignment (:func:`compute_lanes`) is plain, framework-free logic over
+:func:`~in_reach.app.vcs.graph_history`'s own ``Snapshot.parents``/``Snapshot.branches`` -- kept
+separate from :class:`GitGraphWidget`'s painting so it's cheaply unit-testable without a live Qt
+event loop.
+
+PROMPT.md (a later pass): "we also need buttons/functionality to: ... merge branch (this will need
+History Graph update to show merging of branches)" -- :func:`~in_reach.app.vcs.merge_branch` can now
+give a commit *two* parents (never more -- this shadow VCS only ever performs a plain two-branch
+merge, not git's own multi-parent octopus merge), so a row's own :attr:`LaneRow.parent_lanes` is a
+list, not a single "continues" flag: its first entry is always this row's own :attr:`LaneRow.lane`
+itself (a plain straight continuation), and a second entry (only present for a real merge commit) is
+a *new* lane the row's own dot also connects down into with a diagonal line -- the exact same
+lane-convergence machinery :attr:`LaneRow.incoming_lanes` already used for two branches sharing a
+fork point, just running forward (this row diverging into two future lanes) instead of backward
+(two past lanes converging into this row).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFontMetrics, QMouseEvent, QPainter, QPainterPath, QPen
+from PyQt6.QtWidgets import QWidget
+
+from in_reach.app.vcs import Snapshot
+
+#: Cycled through by lane index -- distinct enough to tell adjacent lanes apart at a glance, same
+#: role as VSCode's own per-branch graph colors.
+_LANE_COLORS = [
+    "#4FC1FF", "#B180D7", "#FF8A65", "#89D185", "#F0DF6E", "#FF6B9E", "#5CD3C4", "#E8AB53",
+]
+
+_ROW_HEIGHT = 28
+_LANE_WIDTH = 18
+_DOT_RADIUS = 5
+_LEFT_MARGIN = 12
+_TEXT_GAP = 10
+
+
+def _lane_color(lane: int) -> QColor:
+    return QColor(_LANE_COLORS[lane % len(_LANE_COLORS)])
+
+
+def elide_row_text(
+    label: str, branches: list[str], *, metrics: QFontMetrics, text_x: int, sha_x: int
+) -> tuple[str, str]:
+    """``(label, branch_text)`` -- ``label`` elided (with a trailing "...") to fit the gap between
+    ``text_x`` and ``sha_x`` if it wouldn't otherwise, and ``branch_text`` (every entry of
+    ``branches``, formatted the same ``"[name]  [name]  ..."`` way :meth:`GitGraphWidget.paintEvent`
+    always has) similarly elided against whatever room is left *after* the label -- or dropped to
+    ``""`` outright if the label alone already used up the row.
+
+    PROMPT.md: "sometimes the text overlaps on one row" -- pulled out of ``paintEvent`` as a plain,
+    framework-free function (same "cheaply unit-testable without a live Qt event loop" reasoning
+    this module's own docstring already gives for :func:`compute_lanes`) so a long commit message
+    (or a pile of branch tags) can never run into the right-aligned sha text drawn at ``sha_x``,
+    however narrow the row's own available width actually is.
+    """
+    text_end_x = max(text_x, sha_x - _TEXT_GAP)
+    available = max(0, text_end_x - text_x)
+    elided_label = metrics.elidedText(label, Qt.TextElideMode.ElideRight, available)
+
+    if not branches or elided_label != label:
+        # Either there are no branch tags to show at all, or the label itself already had to be
+        # elided -- no room left in this row for anything more.
+        return elided_label, ""
+
+    branch_text = "  ".join(f"[{name}]" for name in sorted(branches))
+    branch_x = text_x + metrics.horizontalAdvance(label) + _TEXT_GAP
+    elided_branch_text = metrics.elidedText(branch_text, Qt.TextElideMode.ElideRight, max(0, text_end_x - branch_x))
+    return elided_label, elided_branch_text
+
+
+@dataclass
+class LaneRow:
+    """One :class:`~in_reach.app.vcs.Snapshot`, positioned into the graph -- everything
+    :class:`GitGraphWidget` needs to paint one row without re-deriving lane topology itself."""
+
+    snapshot: Snapshot
+    lane: int
+    #: Lanes (from the row directly above) that connect down into this row's own :attr:`lane` --
+    #: more than one entry means two branches converge here (a shared ancestor commit); each is
+    #: drawn as a diagonal line into this row's dot, except the entry equal to :attr:`lane` itself,
+    #: which is a plain straight vertical continuation.
+    incoming_lanes: list[int] = field(default_factory=list)
+    #: One lane per parent, in parent order -- empty for a root commit (no parent), which simply
+    #: ends its lane here. The first entry is always this row's own :attr:`lane` itself (a plain
+    #: straight continuation); a second entry appears only for a merge commit's own second parent,
+    #: and points at a freshly-allocated lane this row's dot also diverges down into.
+    parent_lanes: list[int] = field(default_factory=list)
+    #: How many lanes are simultaneously in play at this row -- the widest this row's own painting
+    #: needs to reserve horizontal space for.
+    active_lane_count: int = 1
+
+    @property
+    def continues(self) -> bool:
+        """Whether this row's own lane continues to the next (older) row at all -- ``False`` only
+        for a root commit. Kept as a convenience derived from :attr:`parent_lanes` rather than a
+        separately-tracked flag, so it can never disagree with the real parent-lane list."""
+        return bool(self.parent_lanes)
+
+
+def compute_lanes(snapshots: list[Snapshot]) -> list[LaneRow]:
+    """Assigns each of ``snapshots`` (newest-first, as :func:`~in_reach.app.vcs.graph_history`
+    returns them) a lane index, plus enough topology (:attr:`LaneRow.incoming_lanes`,
+    :attr:`LaneRow.parent_lanes`) to draw straight/diagonal connector lines between rows.
+
+    Each of ``snapshots``' own :attr:`~in_reach.app.vcs.Snapshot.parents` is 0, 1, or (for a merge
+    commit from :func:`~in_reach.app.vcs.merge_branch`) 2 entries -- a commit with 0 parents is a
+    branch root; one with 1 either continues its own lane (nothing else was already waiting for that
+    parent) or converges into a lane that reached the same parent first (two branches sharing a fork
+    point); one with 2 does the same for its first parent *and* additionally diverges a brand new
+    lane down to its second parent, exactly like a fresh branch root would, except this one starts
+    from an already-existing row instead of the top of the graph.
+    """
+    active: dict[str, list[int]] = {}
+    free_lanes: list[int] = []
+    next_lane = 0
+    rows: list[LaneRow] = []
+    for snapshot in snapshots:
+        incoming = active.pop(snapshot.sha, [])
+        if incoming:
+            lane = min(incoming)
+            for extra in incoming:
+                if extra != lane:
+                    free_lanes.append(extra)
+        elif free_lanes:
+            free_lanes.sort()
+            lane = free_lanes.pop(0)
+        else:
+            lane = next_lane
+            next_lane += 1
+
+        parent_lanes: list[int] = []
+        for position, parent in enumerate(snapshot.parents):
+            if position == 0:
+                parent_lane = lane
+            elif free_lanes:
+                free_lanes.sort()
+                parent_lane = free_lanes.pop(0)
+            else:
+                parent_lane = next_lane
+                next_lane += 1
+            parent_lanes.append(parent_lane)
+            active.setdefault(parent, []).append(parent_lane)
+        if not snapshot.parents:
+            free_lanes.append(lane)
+
+        active_count = max(
+            (l for lanes in active.values() for l in lanes), default=lane
+        ) + 1 if active else lane + 1
+        rows.append(
+            LaneRow(
+                snapshot=snapshot,
+                lane=lane,
+                incoming_lanes=incoming or [lane],
+                parent_lanes=parent_lanes,
+                active_lane_count=active_count,
+            )
+        )
+    return rows
+
+
+class GitGraphWidget(QWidget):
+    """Paints a list of :class:`LaneRow` (see :func:`compute_lanes`) as a scrollable commit graph --
+    one row per commit, a dot per commit colored by its own lane, connector lines between rows,
+    branch-name labels at tip commits, and a small star marker on stamped commits. Meant to sit
+    inside a ``QScrollArea`` (its own :meth:`sizeHint` reports the full content height, not a
+    clamped viewport size)."""
+
+    #: Emitted with a commit's sha when a row is clicked.
+    snapshot_selected = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._rows: list[LaneRow] = []
+        self._selected_sha: str | None = None
+        self.setMinimumHeight(_ROW_HEIGHT)
+
+    def set_snapshots(self, snapshots: list[Snapshot]) -> None:
+        self._rows = compute_lanes(snapshots)
+        self._selected_sha = None
+        self._update_geometry()
+        self.update()
+
+    def selected_sha(self) -> str | None:
+        return self._selected_sha
+
+    def _update_geometry(self) -> None:
+        width = _LEFT_MARGIN + max((r.active_lane_count for r in self._rows), default=1) * _LANE_WIDTH + 420
+        height = max(_ROW_HEIGHT, len(self._rows) * _ROW_HEIGHT)
+        self.setMinimumWidth(width)
+        self.setFixedHeight(height)
+
+    def sizeHint(self):  # noqa: ANN201 -- QSize, matches QWidget.sizeHint's own signature
+        from PyQt6.QtCore import QSize
+
+        return QSize(self.minimumWidth(), max(_ROW_HEIGHT, len(self._rows) * _ROW_HEIGHT))
+
+    def row_count(self) -> int:
+        return len(self._rows)
+
+    def _row_at(self, y: int) -> LaneRow | None:
+        index = y // _ROW_HEIGHT
+        if 0 <= index < len(self._rows):
+            return self._rows[index]
+        return None
+
+    def select_row(self, index: int) -> None:
+        """Programmatically selects row ``index`` (0 = newest), exactly as if it had been clicked --
+        the test/keyboard-navigation seam mouse input alone doesn't cover."""
+        if 0 <= index < len(self._rows):
+            self._select(self._rows[index].snapshot.sha)
+
+    def _select(self, sha: str) -> None:
+        self._selected_sha = sha
+        self.update()
+        self.snapshot_selected.emit(sha)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        row = self._row_at(int(event.position().y()))
+        if row is not None:
+            self._select(row.snapshot.sha)
+        super().mousePressEvent(event)
+
+    def _lane_x(self, lane: int) -> int:
+        return _LEFT_MARGIN + lane * _LANE_WIDTH + _LANE_WIDTH // 2
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001 -- QPaintEvent
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        text_color = self.palette().color(self.foregroundRole())
+        muted_color = QColor(text_color)
+        muted_color.setAlpha(140)
+        metrics = QFontMetrics(self.font())
+
+        for index, row in enumerate(self._rows):
+            y = index * _ROW_HEIGHT
+            center_y = y + _ROW_HEIGHT // 2
+            if row.snapshot.sha == self._selected_sha:
+                painter.fillRect(0, y, self.width(), _ROW_HEIGHT, self._selection_color())
+
+            self._paint_connectors(painter, row, index, y, center_y)
+
+            dot_color = _lane_color(row.lane)
+            dot_x = self._lane_x(row.lane)
+            painter.setBrush(dot_color)
+            painter.setPen(QPen(dot_color.darker(130), 1))
+            painter.drawEllipse(QRectF(dot_x - _DOT_RADIUS, center_y - _DOT_RADIUS, _DOT_RADIUS * 2, _DOT_RADIUS * 2))
+            if row.snapshot.is_stamp:
+                self._paint_star(painter, dot_x, center_y)
+
+            text_x = _LEFT_MARGIN + (max((r.active_lane_count for r in self._rows), default=1)) * _LANE_WIDTH + _TEXT_GAP
+            label = row.snapshot.stamp_message if row.snapshot.is_stamp else row.snapshot.message
+
+            # PROMPT.md: "sometimes the text overlaps on one row" -- the label/branch text used to
+            # be drawn at its own full natural width regardless of how much room was actually left
+            # before the right-aligned sha column, so a long commit message (or several branch tags
+            # on one commit) could run straight into it. elide_row_text() (see its own docstring)
+            # keeps every row's text inside its own lane, however narrow the panel gets -- computed
+            # from this row's *actual* self.width(), which now really does track the sidebar's own
+            # width (see the QScrollArea comment in git_panel.py).
+            sha_text = row.snapshot.sha[:8]
+            sha_x = self.width() - metrics.horizontalAdvance(sha_text) - _LEFT_MARGIN
+            elided_label, elided_branch_text = elide_row_text(
+                label, row.snapshot.branches, metrics=metrics, text_x=text_x, sha_x=sha_x
+            )
+
+            painter.setPen(text_color)
+            painter.drawText(text_x, center_y + metrics.ascent() // 2 - 1, elided_label)
+
+            if elided_branch_text:
+                branch_x = text_x + metrics.horizontalAdvance(label) + _TEXT_GAP
+                painter.setPen(QColor("#569CD6"))
+                painter.drawText(branch_x, center_y + metrics.ascent() // 2 - 1, elided_branch_text)
+
+            painter.setPen(muted_color)
+            painter.drawText(sha_x, center_y + metrics.ascent() // 2 - 1, sha_text)
+        painter.end()
+
+    def _selection_color(self) -> QColor:
+        color = self.palette().color(self.foregroundRole())
+        color.setAlpha(30)
+        return color
+
+    def _paint_connectors(self, painter: QPainter, row: LaneRow, index: int, y: int, center_y: int) -> None:
+        # Straight continuation lines for every lane that's simply passing through this row
+        # untouched (not this row's own incoming/outgoing lanes).
+        touched = set(row.incoming_lanes) | {row.lane} | set(row.parent_lanes)
+        for lane in range(row.active_lane_count):
+            if lane in touched:
+                continue
+            x = self._lane_x(lane)
+            painter.setPen(QPen(_lane_color(lane), 2))
+            painter.drawLine(x, y, x, y + _ROW_HEIGHT)
+
+        # Connectors from each incoming lane (the row above) into this row's own dot.
+        for lane in row.incoming_lanes:
+            x_from = self._lane_x(lane)
+            x_to = self._lane_x(row.lane)
+            pen = QPen(_lane_color(lane if lane != row.lane else row.lane), 2)
+            painter.setPen(pen)
+            if x_from == x_to:
+                painter.drawLine(x_from, y, x_to, center_y)
+            else:
+                path = QPainterPath()
+                path.moveTo(x_from, y)
+                path.cubicTo(x_from, center_y, x_to, y, x_to, center_y)
+                painter.strokePath(path, pen)
+
+        # This row's own lane(s) continuing down to the next (older) row -- one entry per parent;
+        # the first is always this row's own straight-line continuation, any further entries (only
+        # for a merge commit) diverge diagonally into a freshly allocated lane.
+        for parent_lane in row.parent_lanes:
+            x_from = self._lane_x(row.lane)
+            x_to = self._lane_x(parent_lane)
+            pen = QPen(_lane_color(parent_lane), 2)
+            painter.setPen(pen)
+            if x_from == x_to:
+                painter.drawLine(x_from, center_y, x_to, y + _ROW_HEIGHT)
+            else:
+                path = QPainterPath()
+                path.moveTo(x_from, center_y)
+                path.cubicTo(x_from, y + _ROW_HEIGHT, x_to, center_y, x_to, y + _ROW_HEIGHT)
+                painter.strokePath(path, pen)
+
+    def _paint_star(self, painter: QPainter, cx: int, cy: int) -> None:
+        import math
+
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#F0C000"))
+        points = []
+        outer, inner = 8.0, 3.5
+        for i in range(10):
+            radius = outer if i % 2 == 0 else inner
+            angle = math.pi / 2 + i * math.pi / 5
+            points.append((cx + radius * math.cos(angle), cy - 14 - radius * math.sin(angle)))
+        path = QPainterPath()
+        path.moveTo(*points[0])
+        for point in points[1:]:
+            path.lineTo(*point)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.restore()

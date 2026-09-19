@@ -338,7 +338,11 @@ class QuickAccessBar(QWidget):
         # PROMPT.md: "rename the search bar text to be the name of the parent folder where
         # in-reach has been installed" -- the caller passes ``root_dir.name`` (see
         # ``MainWindow.root_dir``'s own docstring: the repo root the ``.in-reach`` project folder
-        # lives under), so the pill reads as "which workspace is this?" rather than a generic verb.
+        # lives under) as the initial, no-project-open text; :meth:`set_label` (PROMPT.md: "where
+        # we presently have the name of the parent directory in the quick access bar, we want to
+        # replace with the game file name and in brackets its uuid") retargets it live once a
+        # project opens, so the pill reads as "which workspace/project is this?" rather than a
+        # generic verb.
         self.button = QPushButton(label)
         self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.setStyleSheet(_PILL_STYLE)
@@ -348,6 +352,14 @@ class QuickAccessBar(QWidget):
 
         self.overlay = QuickAccessOverlay(self)
         self.overlay.on_hidden = self.button.show
+
+    def set_label(self, text: str) -> None:
+        """Retargets the always-visible pill's own text -- PROMPT.md: "where we presently have the
+        name of the parent directory in the quick access bar, we want to replace with the game file
+        name and in brackets its uuid" -- called by MainWindow whenever the active project changes
+        (or is renamed), same "just set the text, let the widget elide within its own fixed width"
+        contract the label already had at construction."""
+        self.button.setText(text)
 
     def _position_overlay(self) -> None:
         """Hides the pill and drops the overlay in exactly the screen space it just vacated --

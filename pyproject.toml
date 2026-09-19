@@ -7,7 +7,7 @@ name = "in-reach"
 version = "0.2.0"
 description = "Python tooling and mini-IDE to help improve the Halo Reach scripting experience."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Whiley True", email = "inreach.python@gmail.com" }]
 dependencies = [
@@ -17,6 +17,7 @@ dependencies = [
     "PyQt6==6.11.0",
     "pydantic==2.13.4",
     "dulwich==1.2.12",
+    "merge3==0.0.16",
 ]
 
 [project.optional-dependencies]

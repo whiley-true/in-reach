@@ -76,3 +76,33 @@ def test_load_meta_title_description_defaults_for_unparsable_json(tmp_path: Path
     path.write_text("not json", encoding="utf-8")
 
     assert settings_io.load_meta_title_description(path) == ("", "")
+
+
+def test_load_meta_generated_at_round_trips_what_dump_game_settings_wrote(tmp_path: Path) -> None:
+    stamp = datetime(2024, 3, 5, 12, 30, tzinfo=timezone.utc)
+    settings = GameSettings(meta=Meta(source_file="x.bin", generated_at=stamp))
+    out_path = tmp_path / "settings.json"
+
+    settings_io.dump_game_settings(settings, out_path)
+
+    assert settings_io.load_meta_generated_at(out_path) == stamp
+
+
+def test_load_meta_generated_at_defaults_for_a_missing_file(tmp_path: Path) -> None:
+    assert settings_io.load_meta_generated_at(tmp_path / "nope.json") is None
+
+
+def test_load_meta_generated_at_defaults_for_unparsable_json(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text("not json", encoding="utf-8")
+
+    assert settings_io.load_meta_generated_at(path) is None
+
+
+def test_load_meta_generated_at_defaults_for_a_missing_or_malformed_value(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text('{"meta": {"source_file": "x.bin"}}', encoding="utf-8")
+    assert settings_io.load_meta_generated_at(path) is None
+
+    path.write_text('{"meta": {"generated_at": "not a date"}}', encoding="utf-8")
+    assert settings_io.load_meta_generated_at(path) is None

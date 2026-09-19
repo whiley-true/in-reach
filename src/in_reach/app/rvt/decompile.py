@@ -19,13 +19,30 @@ its own, for ``MainWindow``'s own ``.bin``-file-watcher to call whenever RVT sav
 ``.bin`` out from under a running project -- ``script/output.txt`` is deliberately never touched by
 that resync, since it's the one genuinely hand-editable thing here, not a live mirror of the
 ``.bin`` the way everything else now is.
+
+Like :mod:`in_reach.app.rvt.compile`, both public entry points here (:func:`decompile_into_project`/
+:func:`resync_from_bin`) run their real work (:func:`_decompile_into_project_in_process`/
+:func:`_resync_from_bin_in_process`, everything from :func:`~in_reach.app.rvt.rvt_bridge.get_rvt`
+onward) in an isolated child process rather than directly in whatever process called them -- see
+``compile.py``'s own module docstring for why (the bundled native extension's own Qt5 conflicting
+with this app's own PyQt6/Qt6 in the same process). Decompiling happens at every single project
+creation, and on every RVT save while a project is open (the ``.bin``-file-watcher's own resync) --
+by far the most common way the native extension ever gets loaded into the GUI process at all, so
+isolating it here matters at least as much as isolating ``compile.py``'s own less-frequent calls.
 """
 from __future__ import annotations
 
+import dataclasses
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
-from in_reach.app import maps_io, new_project
+from in_reach.app import logging_setup, maps_io, new_project
 from in_reach.app.categories import EngineCategory, EngineIcon
 
 from . import schema_io, settings_io, strings_io
@@ -36,6 +53,8 @@ from .models.game_settings import GameSettings
 from .models.script_settings import ScriptSettings
 from .models.strings import StringsDocument
 from .rvt_bridge import get_rvt
+
+_logger = logging_setup.get_logger(__name__)
 
 SETTINGS_FILENAME = "settings.json"
 SCRIPT_SETTINGS_FILENAME = "script_settings.json"
@@ -60,6 +79,17 @@ SCRIPT_SETTINGS_SCHEMA_FILENAME = "script_settings.schema.json"
 STRINGS_SCHEMA_FILENAME = "strings.schema.json"
 
 
+def normalize_script_text(text: str) -> str:
+    """``"\\r\\n"``/``"\\r"`` -> ``"\\n"`` -- applied to a decompiled script before it's ever
+    written to ``script/output.txt`` (see :func:`_decompile_into_project_in_process`'s own comment:
+    ``write_text()``'s default text-mode translation would otherwise double each ``"\\r\\n"`` into
+    ``"\\r\\r\\n"`` on Windows, PROMPT.md: "when it is generated it is has alternating blanks
+    lines"). Public (not module-private) since :mod:`~in_reach.app.rvt.compile` needs the exact same
+    normalization to compare a freshly re-``decompile_script()``'d string against that file's own
+    on-disk content -- see that module's own "skip recompiling an unchanged script" comment."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass
 class _Decompiled:
     game_settings: GameSettings
@@ -77,6 +107,7 @@ def _build_decompiled(
     category_icon: EngineIcon | None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> _Decompiled:
     """The shared second half of :func:`_decompile` (loads-then-builds) and
     :func:`write_build_snapshot` (already-loaded/compiled-then-builds) -- everything that turns an
@@ -103,6 +134,20 @@ def _build_decompiled(
         game_settings.meta.title = title
     if description is not None:
         game_settings.meta.description = description[:127]
+    # PROMPT.md: "every compile was updating this value and causing git changes[;] instead created
+    # at and modified at should be set to the same value of when the gametype was created in
+    # in-reach" -- extract_game_settings() above always stamps meta.generated_at fresh with
+    # datetime.now() (see extraction.py's own _extract_meta()), which is exactly correct exactly
+    # once (a project's very first decompile, decompile_into_project -- there's no prior
+    # settings.json for that value to have come from yet), and wrong every time after (every later
+    # resync_from_bin/write_build_snapshot call, which would otherwise re-stamp it to "now" again on
+    # every single compile, a real, confirmed source of pointless VCS-tracked churn -- settings.json
+    # changing on every Apply with nothing the user actually edited). Every caller past the first
+    # passes this project's own already-established value back in (see
+    # settings_io.load_meta_generated_at()) so it only ever gets set once, the same
+    # "override-with-this-project's-own-value" pattern as category/category_icon above.
+    if created_at is not None:
+        game_settings.meta.generated_at = created_at
     script_settings = (
         game_settings.multiplayer.script_settings
         if game_settings.multiplayer is not None
@@ -120,11 +165,18 @@ def _decompile(
     category_icon: EngineIcon | None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> _Decompiled:
     rvt = get_rvt()
     variant = rvt.load(str(bin_path))
     return _build_decompiled(
-        variant, bin_path, category=category, category_icon=category_icon, title=title, description=description
+        variant,
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
 
 
@@ -137,6 +189,7 @@ def write_build_snapshot(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     """Extracts from an already-loaded/compiled ``variant`` (see
     :mod:`in_reach.app.rvt.compile`'s ``run_compile()``) and writes *only*
@@ -157,9 +210,19 @@ def write_build_snapshot(
             ``settings/settings.json`` (see
             :func:`~in_reach.app.rvt.settings_io.load_meta_category`/``load_meta_title_description``)
             rather than losing them.
+        created_at: This project's own ``meta.generated_at``, same reasoning as
+            category/category_icon -- callers should read it back via
+            :func:`~in_reach.app.rvt.settings_io.load_meta_generated_at` so a real compile doesn't
+            re-stamp it to ``datetime.now()`` (see :meth:`_build_decompiled`'s own comment on why).
     """
     decompiled = _build_decompiled(
-        variant, out_path, category=category, category_icon=category_icon, title=title, description=description
+        variant,
+        out_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
     _write_generated_files(
         decompiled,
@@ -171,6 +234,107 @@ def write_build_snapshot(
     )
 
 
+def _serialize_decompile_request(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory,
+    category_icon: EngineIcon | None,
+    title: str | None,
+    description: str | None,
+    created_at: datetime | None,
+    map_entries: list[maps_io.MapEntry],
+) -> dict:
+    """Everything :func:`_run_decompile_isolated` needs the child process to reconstruct before
+    calling the real ``_in_process`` function -- plain JSON-safe types only (see
+    :mod:`in_reach.app.rvt.decompile_subprocess`'s own deserialization, the exact inverse)."""
+    return {
+        "bin_path": str(bin_path),
+        "folder": str(folder),
+        "category": int(category),
+        "category_icon": int(category_icon) if category_icon is not None else None,
+        "title": title,
+        "description": description,
+        "created_at": created_at.isoformat() if created_at is not None else None,
+        "map_entries": [dataclasses.asdict(entry) for entry in map_entries],
+    }
+
+
+def _run_decompile_isolated(
+    mode: str,
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory,
+    category_icon: EngineIcon | None,
+    title: str | None,
+    description: str | None,
+    created_at: datetime | None,
+    map_entries: list[maps_io.MapEntry],
+) -> None:
+    """Runs ``mode`` (``"into_project"`` or ``"resync"``) in a fresh, isolated ``python -m`` child
+    process -- see this module's own docstring for why. Shared by :func:`decompile_into_project`/
+    :func:`resync_from_bin`, whose real (``_in_process``) implementations differ only in which
+    generated files they write, not in how they need isolating.
+
+    Raises:
+        RuntimeError: The child process reported a failure, or crashed outright (e.g. the same
+            native access violation this isolation exists to contain) -- wrapping whatever the
+            child's own exception message was, or its exit code if it never got the chance to
+            report one at all. Never the *original* exception type/traceback -- those can't cross
+            a process boundary -- but every real caller here only ever needed the message anyway
+            (see e.g. :func:`~in_reach.app.new_project._decompile_source_variant`'s own
+            ``except Exception as exc: f"...: {exc}"``).
+    """
+    request = _serialize_decompile_request(
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
+        map_entries=map_entries,
+    )
+    request_fd, request_path_str = tempfile.mkstemp(prefix="in-reach-decompile-req-", suffix=".json")
+    result_fd, result_path_str = tempfile.mkstemp(prefix="in-reach-decompile-res-", suffix=".json")
+    os.close(result_fd)
+    request_path = Path(request_path_str)
+    result_path = Path(result_path_str)
+    try:
+        with os.fdopen(request_fd, "w", encoding="utf-8") as handle:
+            json.dump(request, handle)
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "in_reach.app.rvt.decompile_subprocess", mode, str(request_path), str(result_path)],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            _logger.error(
+                "decompile subprocess (%s) for %s exited with code %s: %s",
+                mode,
+                folder,
+                proc.returncode,
+                (proc.stderr or proc.stdout).strip(),
+            )
+            raise RuntimeError(
+                f"The decompile process exited unexpectedly (code {proc.returncode})."
+                f"{(' ' + proc.stderr.strip()) if proc.stderr.strip() else ''}"
+            )
+        try:
+            outcome = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _logger.exception("couldn't read decompile subprocess result for %s", folder)
+            raise RuntimeError(f"Couldn't read the decompile result: {exc}") from exc
+        if not outcome.get("success"):
+            raise RuntimeError(outcome.get("error") or "Decompile failed for an unknown reason.")
+    finally:
+        request_path.unlink(missing_ok=True)
+        result_path.unlink(missing_ok=True)
+
+
 def decompile_into_project(
     bin_path: Path,
     folder: Path,
@@ -179,6 +343,61 @@ def decompile_into_project(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
+    map_entries: list[maps_io.MapEntry] = (),
+) -> None:
+    """Isolated-child-process wrapper around :func:`_decompile_into_project_in_process` -- see this
+    module's own docstring for why, and that function's own docstring for what this actually does
+    and its arguments/raises."""
+    _run_decompile_isolated(
+        "into_project",
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
+        map_entries=list(map_entries),
+    )
+
+
+def resync_from_bin(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory = EngineCategory.none,
+    category_icon: EngineIcon | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    created_at: datetime | None = None,
+    map_entries: list[maps_io.MapEntry] = (),
+) -> None:
+    """Isolated-child-process wrapper around :func:`_resync_from_bin_in_process` -- see this
+    module's own docstring for why, and that function's own docstring for what this actually does
+    and its arguments/raises."""
+    _run_decompile_isolated(
+        "resync",
+        bin_path,
+        folder,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
+        map_entries=list(map_entries),
+    )
+
+
+def _decompile_into_project_in_process(
+    bin_path: Path,
+    folder: Path,
+    *,
+    category: EngineCategory = EngineCategory.none,
+    category_icon: EngineIcon | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Loads ``bin_path`` through the bundled ReachVariantTool extension and writes what it decodes
@@ -203,6 +422,11 @@ def decompile_into_project(
             title the source ``.bin`` itself carries in its own header.
         description: This project's own description, stamped into ``meta.description`` the same
             way (truncated to fit that field's own, shorter, engine-derived length limit).
+        created_at: Left ``None`` by this function's own real caller (project creation, which has
+            no prior ``settings/settings.json`` for a value to have come from yet) -- see
+            :func:`_build_decompiled`'s own comment for why ``None`` is exactly correct here (the
+            freshly-extracted ``datetime.now()`` becomes this project's own permanent "created in
+            in-reach" timestamp) and wrong for every later resync/compile.
         map_entries: The shared ``.in-reach/maps.json`` scan (see
             :func:`~in_reach.app.maps_io.scan_maps`), narrowed down into ``settings/valid_maps.json``
             via :func:`~in_reach.app.maps_io.filter_maps_for_gametype`.
@@ -211,9 +435,18 @@ def decompile_into_project(
         Whatever the native extension or pydantic validation raises for a ``.bin`` it can't load or
         make sense of -- callers decide whether that should block project creation or just surface
         as a warning (see that function's own handling).
+
+    Only ever called from :mod:`in_reach.app.rvt.decompile_subprocess`, inside the isolated child
+    process the public :func:`decompile_into_project` spawns -- never call this directly from the
+    GUI process, see this module's own docstring for why.
     """
     decompiled = _decompile(
-        bin_path, category=category, category_icon=category_icon, title=title, description=description
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
 
     script_dir = folder / new_project.SCRIPT_DIRNAME
@@ -223,7 +456,7 @@ def decompile_into_project(
     # "\r\r\n" on Windows, which reads back as two lines (a blank line after every real one, see
     # PROMPT.md: "when it is generated it is has alternating blanks lines"). Normalizing to a bare
     # "\n" first sidesteps that double-translation regardless of platform.
-    script_text = decompiled.script_text.replace("\r\n", "\n").replace("\r", "\n")
+    script_text = normalize_script_text(decompiled.script_text)
     (script_dir / SCRIPT_FILENAME).write_text(script_text, encoding="utf-8")
 
     _write_generated_files(
@@ -247,7 +480,7 @@ def decompile_into_project(
     )
 
 
-def resync_from_bin(
+def _resync_from_bin_in_process(
     bin_path: Path,
     folder: Path,
     *,
@@ -255,6 +488,7 @@ def resync_from_bin(
     category_icon: EngineIcon | None = None,
     title: str | None = None,
     description: str | None = None,
+    created_at: datetime | None = None,
     map_entries: list[maps_io.MapEntry] = (),
 ) -> None:
     """Re-decompiles ``bin_path`` and rewrites ``folder``'s ``settings/`` and
@@ -285,6 +519,12 @@ def resync_from_bin(
             :func:`~in_reach.app.new_project.read_project_title`). Still accepted as real overrides
             for anything that *does* want one (see ``test_resync_from_bin_carries_title_and_
             description_through``).
+        created_at: Same reasoning as category/category_icon above, NOT title/description -- a
+            project's own "created in in-reach" moment isn't something RVT has any concept of
+            either, so every real caller should read this back via
+            :func:`~in_reach.app.rvt.settings_io.load_meta_generated_at` rather than letting it
+            re-stamp to ``datetime.now()`` on every resync (see :func:`_build_decompiled`'s own
+            comment for why that would otherwise be a real, git-tracked-churn bug).
         map_entries: Same as :func:`decompile_into_project` -- callers should read this back from
             ``.in-reach/maps.json`` (see :func:`~in_reach.app.maps_io.read_maps_json`) rather than
             re-scanning the map-variant folders on every resync.
@@ -292,9 +532,18 @@ def resync_from_bin(
     Raises:
         Same as :func:`decompile_into_project` -- callers watching for RVT saves should treat this
         as best-effort and not let it crash the whole app over a ``.bin`` RVT left mid-write.
+
+    Only ever called from :mod:`in_reach.app.rvt.decompile_subprocess`, inside the isolated child
+    process the public :func:`resync_from_bin` spawns -- never call this directly from the GUI
+    process, see this module's own docstring for why.
     """
     decompiled = _decompile(
-        bin_path, category=category, category_icon=category_icon, title=title, description=description
+        bin_path,
+        category=category,
+        category_icon=category_icon,
+        title=title,
+        description=description,
+        created_at=created_at,
     )
     _write_generated_files(
         decompiled,
@@ -343,6 +592,9 @@ def _write_generated_files(
         strings_schema_path = schema_io.dump_json_schema(StringsDocument, schema_dir / STRINGS_SCHEMA_FILENAME)
 
     settings_io.dump_game_settings(decompiled.game_settings, out_dir / settings_filename, settings_schema_path)
+    # PROMPT.md: "in script_setting.json please remove [the] '_comment'" (see git history) -- entries
+    # in forge_labels are protected directly in the editor instead (PROMPT.md: "entries in forge
+    # labels ... should instead not be changeable"), see editor.py's own forge-label-name protection.
     settings_io.dump_script_settings(
         decompiled.script_settings, out_dir / script_settings_filename, script_settings_schema_path
     )

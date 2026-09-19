@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,21 @@ def _patch(monkeypatch, variant, settings) -> None:
     monkeypatch.setattr(decompile, "get_rvt", lambda: type("Rvt", (), {"load": staticmethod(lambda path: variant)})())
     monkeypatch.setattr(decompile, "extract_game_settings", lambda v, path: settings)
     monkeypatch.setattr(decompile.strings_io, "extract_strings", lambda mp: {"meta": {}, "teams": [], "script_strings": []})
+    # decompile_into_project()/resync_from_bin() normally isolate the real work in a fresh child
+    # process (see decompile.py's own module docstring for why) -- a separate interpreter that
+    # would never see any of the monkeypatches above. These tests are about the orchestration/
+    # writing logic around a *fake* native layer, not the isolation boundary itself (see
+    # test_run_decompile_isolated_* below for that), so route straight to the in-process
+    # implementations instead of actually spawning a subprocess.
+    monkeypatch.setattr(
+        decompile,
+        "_run_decompile_isolated",
+        lambda mode, bin_path, folder, **kwargs: (
+            decompile._decompile_into_project_in_process
+            if mode == "into_project"
+            else decompile._resync_from_bin_in_process
+        )(bin_path, folder, **kwargs),
+    )
 
 
 def test_decompile_into_project_writes_settings_strings_and_script(
@@ -364,6 +380,56 @@ def test_resync_from_bin_without_an_override_keeps_the_bins_own_title(tmp_path: 
     assert settings_json["meta"]["description"] == "RVT's own description"
 
 
+def test_resync_from_bin_carries_generated_at_through(tmp_path: Path, monkeypatch) -> None:
+    # PROMPT.md: "we want to update our compiling process so it no longers updates a game's created
+    # at ... this is because every compile was updating this value and causing git changes[;]
+    # instead created at and modified at should be set to the same value of when the gametype was
+    # created in in-reach" -- resync_from_bin's own real caller (MainWindow's .bin-watcher, firing
+    # after every successful Apply) now reads this project's own already-established
+    # meta.generated_at back via settings_io.load_meta_generated_at() and passes it through as
+    # created_at, so it stops re-stamping to datetime.now() (a real, confirmed source of pointless
+    # settings.json churn on every single compile) once a project has one.
+    settings = _game_settings()
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    fixed = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    decompile.resync_from_bin(bin_path, folder, created_at=fixed)
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    build_json = json.loads((folder / "build" / decompile.GENERATED_SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["generated_at"] == fixed.isoformat().replace("+00:00", "Z")
+    assert build_json["meta"]["generated_at"] == fixed.isoformat().replace("+00:00", "Z")
+
+
+def test_resync_from_bin_without_an_override_uses_the_freshly_extracted_generated_at(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The one caller that's *supposed* to get a fresh stamp -- a project's very first decompile,
+    # which has no prior settings.json for a value to have come from yet (see decompile.py's own
+    # _build_decompiled() comment).
+    fresh = datetime(2024, 6, 15, tzinfo=timezone.utc)
+    settings = _game_settings()
+    settings.meta.generated_at = fresh
+    variant = _FakeVariant(_FakeMultiplayer())
+    _patch(monkeypatch, variant, settings)
+
+    bin_path = tmp_path / "source.bin"
+    bin_path.write_bytes(b"\x00")
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    decompile.resync_from_bin(bin_path, folder)
+
+    settings_json = json.loads((folder / "settings" / decompile.SETTINGS_FILENAME).read_text(encoding="utf-8"))
+    assert settings_json["meta"]["generated_at"] == fresh.isoformat().replace("+00:00", "Z")
+
+
 def test_decompile_into_project_defaults_to_no_category(tmp_path: Path, monkeypatch) -> None:
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())
@@ -430,3 +496,76 @@ def test_decompile_into_project_against_a_real_bin(tmp_path: Path) -> None:
 
     stats = json.loads((folder / "build" / decompile.GENERATED_STATS_FILENAME).read_text(encoding="utf-8"))
     assert stats["space"]["bytes_used"] > 0
+
+
+# -- isolated child process (see decompile.py's own module docstring for why) --------------------
+
+
+@pytest.mark.skipif(not rvt_bridge.is_available(), reason="native _reachvarianttool extension not available on this platform")
+def test_decompile_into_project_raises_a_plain_exception_for_an_unreadable_bin(tmp_path: Path) -> None:
+    # The isolated child can't pass its own real exception type/traceback back across the process
+    # boundary -- see _run_decompile_isolated's own docstring -- so every caller only ever gets a
+    # RuntimeError with a message, regardless of what the native extension itself actually raised.
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError):
+        decompile.decompile_into_project(tmp_path / "does-not-exist.bin", folder)
+
+
+def test_run_decompile_isolated_reports_a_crashed_child_process(tmp_path: Path, monkeypatch) -> None:
+    # The one failure mode this isolation exists to contain (see the module's own docstring): a
+    # hard crash in the child process must surface as an ordinary RuntimeError here, never a crash
+    # of *this* (the caller's) process.
+    import subprocess as subprocess_module
+
+    def _fake_run(*_args, **_kwargs):
+        return subprocess_module.CompletedProcess(args=[], returncode=-1073741819, stdout="", stderr="")
+
+    monkeypatch.setattr(decompile.subprocess, "run", _fake_run)
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError, match="exited unexpectedly"):
+        decompile.decompile_into_project(tmp_path / "source.bin", folder)
+
+
+def test_run_decompile_isolated_reports_unparseable_child_output(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as subprocess_module
+
+    def _fake_run(*_args, **kwargs):
+        return subprocess_module.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(decompile.subprocess, "run", _fake_run)
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with pytest.raises(RuntimeError, match="[Cc]ouldn't read"):
+        decompile.decompile_into_project(tmp_path / "source.bin", folder)
+
+
+def test_serialize_decompile_request_round_trips_map_entries(tmp_path: Path) -> None:
+    from in_reach.app.maps_io import MapEntry
+
+    entry = MapEntry(
+        filename="foo.mvar",
+        source="standard",
+        title="Foo",
+        description="A map",
+        map_id=42,
+        base_canvas_map="forge_island",
+        forge_labels=["a", "b"],
+    )
+
+    request = decompile._serialize_decompile_request(
+        tmp_path / "x.bin",
+        tmp_path / "project",
+        category=decompile.EngineCategory.none,
+        category_icon=None,
+        title=None,
+        description=None,
+        created_at=None,
+        map_entries=[entry],
+    )
+
+    assert request["map_entries"] == [dataclasses.asdict(entry)]

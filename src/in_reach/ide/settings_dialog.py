@@ -85,8 +85,8 @@ class SettingsDialog(QDialog):
 
 
 def _build_ui_tab(notes_format: str, on_notes_format_changed: Callable[[str], None] | None) -> QWidget:
-    """PROMPT.md: the Documentation section's "Notes" button "launches editor in notes.txt OR
-    notes.md (can be set in settings or command palette)" -- this is the "in settings" half; see
+    """PROMPT.md: "Notes" "launches editor in notes.txt OR notes.md (can be set in settings or
+    command palette)" -- this is the "in settings" half; see
     ``MainWindow.build_command_palette_commands`` for the matching "Set Notes Format" palette
     entries."""
     tab = QWidget()

@@ -7,10 +7,14 @@ Also the one widget that actually sits at the frameless window's true bottom edg
 bottom/corner edge-resize hover/press detection itself -- see :class:`~in_reach.ide.main_window.
 _ResizableBody`'s own docstring for why that widget, which sits directly above this one, does not.
 
-PROMPT.md: "please remove the dir location string (under the tabs section) and move that
-information into the bottom bar (in the centre): it should read test (uuid)" -- the Dashboard's
-own project-tabs subheading used to show the active project's folder id there; now it's this bar's
-:meth:`set_project_label`, centered rather than left-aligned since nothing else shares the strip.
+PROMPT.md: "present branch - last stamped - last saved should be showin in the left of the bottom
+bar" -- :meth:`set_vcs_status`/:meth:`clear_vcs_status`'s own ``vcs_label``, originally left-aligned
+(alongside a centered "<title> (<folder id>)" project label). A later pass (PROMPT.md: "so what we
+have in the middle of the bottom bar, we now want in the quick access bar[;] please then move the
+git information to the middle of the bottom bar") moved that project text into the top bar's own
+Quick Access pill instead (see :meth:`~in_reach.ide.quick_access.QuickAccessBar.set_label`) and
+recentered ``vcs_label`` into the slot it vacated, since nothing else shares the strip's left side
+any more.
 
 PROMPT.md (Quick Access Bar work): bottom-right "Ln X, Col Y (N selected)"/"Spaces: N" (or
 "Tabs: N", whichever indent style is actually live -- PROMPT.md: "spaces [segment] should
@@ -66,22 +70,17 @@ class StatusBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        # PROMPT.md: "present branch - last stamped - last saved should be showin in the left of
-        # the bottom bar" -- clickable the same way cursor_label/spaces_label are, opening the Git
-        # panel rather than a quick-pick. Hidden with no project open (see set_vcs_status), same
-        # convention as the right-side segments.
+        # PROMPT.md: "please then move the git information to the middle of the bottom bar" --
+        # clickable the same way cursor_label/spaces_label are, opening the Git panel rather than a
+        # quick-pick. Hidden with no project open (see set_vcs_status), same convention as the
+        # right-side segments. Two equal stretches keep it centered in the gap between the (now
+        # empty) left side and the right-side cursor/spaces segments -- the same "center between
+        # two stretches" trick as the top bar's own Quick Access pill -- in the slot the project
+        # label used to occupy before it moved to that pill (see this module's own docstring).
+        layout.addStretch(1)
         self.vcs_label = _ClickableLabel()
         self.vcs_label.hide()
         layout.addWidget(self.vcs_label)
-        # Two equal stretches around the project label keep it centered in the gap between
-        # vcs_label and the right-side cursor/spaces segments -- the same "center between two
-        # stretches" trick as the top bar's own Quick Access pill, replacing the old fixed-width
-        # spacer this used before vcs_label existed (that trick only works when both sides are
-        # fixed-width, which the left side no longer is).
-        layout.addStretch(1)
-        self._project_label = QLabel()
-        self._project_label.setStyleSheet("color: #ffffff;")
-        layout.addWidget(self._project_label)
         layout.addStretch(1)
 
         self.cursor_label = _ClickableLabel()
@@ -98,15 +97,10 @@ class StatusBar(QWidget):
         # thing that does).
         self.setStyleSheet(f"QWidget#statusBar {{ background-color: {color_hex}; }}")
 
-    def set_project_label(self, text: str) -> None:
-        """Sets the centered "<title> (<folder id>)" text (PROMPT.md), or clears it for ``""``
-        once no project is open."""
-        self._project_label.setText(text)
-
     def set_vcs_status(
         self, branch: str, last_stamp: str | None, last_saved: str, *, on_click: Callable[[], None]
     ) -> None:
-        """Shows/refreshes the bottom-left "<branch> - <last stamped> - <last saved>" segment
+        """Shows/refreshes the centered "<branch> - <last stamped> - <last saved>" segment
         (PROMPT.md). ``last_stamp`` is already formatted (e.g. ``"v1.0"``) or ``None`` for "never
         stamped yet"; ``last_saved`` is already a relative/absolute time string -- this method just
         joins and displays them, leaving the actual formatting to the caller (mirroring

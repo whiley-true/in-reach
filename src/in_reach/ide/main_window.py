@@ -12,11 +12,18 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer
-from PyQt6.QtGui import QKeySequence, QMouseEvent, QPalette, QShortcut, QTextCursor
+from PyQt6.QtCore import QFileSystemWatcher, QPoint, Qt, QTimer, QUrl
+from PyQt6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QKeySequence,
+    QMouseEvent,
+    QPalette,
+    QShortcut,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -32,30 +39,38 @@ from in_reach.app import (
     env_file,
     halo_status,
     indent_settings,
+    logging_setup,
+    mcc_launcher,
     new_project,
     project,
     recent,
     rvt_launcher,
     system_verify,
 )
-from in_reach.ide import icons, style
+from in_reach.ide import file_dialogs, icons, style
 from in_reach.ide import indent_state
 from in_reach.ide import theme as theme_module
 from in_reach.ide import zoom as zoom_module
 from in_reach.ide.activity_bar import DEFAULT_VIEW, ActivityBar
 from in_reach.ide.bottom_panel import BottomPanel
+from in_reach.ide.documentation_panel import DocumentationPanel
 from in_reach.ide.editor import TextEditorWidget
 from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
-from in_reach.ide.locations_panel import LocationsPanel
+from in_reach.ide.kanban_panel import KanbanPanel
+from in_reach.ide.llm_panel import LlmPanel
+from in_reach.ide.maps_panel import MapsPanel
 from in_reach.ide.quick_access import Command, QuickAccessBar
 from in_reach.ide.scripts_panel import ScriptsPanel
 from in_reach.ide.search_panel import SearchPanel
 from in_reach.ide.settings_dialog import SettingsDialog
 from in_reach.ide.status_bar import StatusBar
 from in_reach.ide.tabs import MainPanelArea
+from in_reach.ide.testing_panel import TestingPanel
 from in_reach.ide.theme import Theme
 from in_reach.ide.window_resize import cursor_for_edges, resize_edges
+
+_logger = logging_setup.get_logger(__name__)
 
 _TOP_BAR_HEIGHT = 36
 _ICON_SIZE = 16
@@ -82,12 +97,31 @@ _HALO_STATUS_POLL_MS = 500
 #: Segoe UI at an equal point size), not anything zoom-related on its own. 420 leaves real headroom
 #: over that 360px measurement rather than just barely clearing it, so a slightly different distro
 #: default font doesn't immediately reopen this same regression.
-_SIDEBAR_MIN_WIDTH = 420
+#:
+#: PROMPT.md: "this is good but the side panel needs to be resiziable to be much smaller or wider"
+#: -- this used to *also* double as the hard minimum-drag floor (see git history), which on any
+#: screen under ~2500px wide (i.e. almost every real monitor) collided with the fraction-of-screen
+#: max below once that was introduced, flooring both to this exact same number and leaving zero
+#: actual drag range at all. Split in two: this constant now only ever sets the sidebar's *initial*
+#: width (still tuned so nothing wraps the moment a project first opens), and
+#: :data:`_SIDEBAR_MIN_DRAG_WIDTH` below is the real, much smaller, floor a user can actually drag
+#: down to -- going narrower than 420 by choice can elide the Stats/section-header text above, same
+#: as dragging any real sidebar (VSCode's included) narrow does; that's expected, not the regression
+#: this constant was originally tuned against (an unwantedly-narrow *default*).
+_SIDEBAR_DEFAULT_WIDTH = 420
 
-#: PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen width" --
-#: later revised to 1/4 -- same "screen's normal, non-maximized size" reasoning (and the same
-#: primaryScreen() read, taken once at construction) as the window's own minimum-size floor below.
-_SIDEBAR_MAX_WIDTH_FRACTION = 4
+#: PROMPT.md: "the side panel needs to be resiziable to be much smaller" -- a flat floor (not
+#: fraction-of-screen -- "genuinely narrow" should mean the same thing on a laptop and a 4K
+#: monitor), just enough that the splitter/its children never fully degenerate.
+_SIDEBAR_MIN_DRAG_WIDTH = 200
+
+#: PROMPT.md: "the side panel needs to be resiziable to be ... wider" -- half the screen's own
+#: width (revised from 1/3, then 1/4, then 1/5 -- each of which, floored at the old shared
+#: _SIDEBAR_MIN_WIDTH, actually collapsed to zero drag range on most real screens, see
+#: _SIDEBAR_DEFAULT_WIDTH's own comment above). Floored at _SIDEBAR_MIN_DRAG_WIDTH purely so an
+#: extreme (sub-400px) screen can't still end up with max < min -- on any realistic screen this
+#: never actually triggers, unlike the old floor.
+_SIDEBAR_MAX_WIDTH_FRACTION = 2
 
 #: File/Edit top bar menu shortcuts (PROMPT.md) -- named here so the menu's own QAction shortcuts
 #: and the command palette's "detail" column (see build_command_palette_commands) can't drift
@@ -105,6 +139,14 @@ _SHORTCUT_REDO = "Ctrl+Y"
 _SHORTCUT_CUT = "Ctrl+X"
 _SHORTCUT_COPY = "Ctrl+C"
 _SHORTCUT_PASTE = "Ctrl+V"
+_SHORTCUT_FIND = "Ctrl+F"
+_SHORTCUT_REPLACE = "Ctrl+R"
+_SHORTCUT_SELECT_ALL = "Ctrl+A"
+_SHORTCUT_COMMAND_PALETTE = "Ctrl+Shift+P"
+#: PROMPT.md: "also in the top bar next to view please add Launch with options - Launch Halo MCC
+#: (greyed unless verified), Launch RVT (when available), both with shortcuts".
+_SHORTCUT_LAUNCH_MCC = "Ctrl+Shift+M"
+_SHORTCUT_LAUNCH_RVT = "Ctrl+Shift+L"
 
 #: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
 #: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
@@ -114,7 +156,7 @@ _SHORTCUT_PASTE = "Ctrl+V"
 #: :meth:`MainWindow._on_watched_bin_changed`.
 _RVT_SYNCED_JSON_FILENAMES = ("settings.json", "script_settings.json", "strings.json")
 
-#: The activity bar's own view-toggle buttons are keyed internally as "explorer"/"locations"/
+#: The activity bar's own view-toggle buttons are keyed internally as "explorer"/"git"/.../
 #: "search" (see activity_bar.py's own note on "explorer" being the Dashboard button's long-
 #: established internal name); this is the user-facing name each one's own
 #: :class:`_NoProjectSidebarPage` text should read instead.
@@ -122,7 +164,11 @@ _VIEW_DISPLAY_NAMES = {
     "explorer": "Dashboard",
     "git": "Git",
     "scripts": "Scripts",
-    "locations": "Locations",
+    "documentation": "Documentation",
+    "kanban": "Kanban",
+    "testing": "Testing",
+    "maps": "Map Files",
+    "llm": "LLM",
     "search": "Search",
 }
 
@@ -159,17 +205,6 @@ def _add_action(
     if shortcut:
         action.setShortcut(QKeySequence(shortcut))
     return menu
-
-
-class _DropdownButton(QToolButton):
-    """An empty topbar dropdown -- no items yet, to be filled in later (PROMPT.md)."""
-
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setText(label)
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.setAutoRaise(True)
-        self.setMenu(QMenu(self))
 
 
 class _FileMenuButton(QToolButton):
@@ -214,9 +249,8 @@ class _FileMenuButton(QToolButton):
 
 
 class _EditMenuButton(QToolButton):
-    """The top bar's "Edit" dropdown (PROMPT.md) -- Undo/Redo/Cut/Copy/Paste against whichever text
-    editor is active (see ``MainWindow._active_text_editor``). Searching is deliberately left for a
-    later pass (PROMPT.md: "we will implement/refine searching later")."""
+    """The top bar's "Edit" dropdown (PROMPT.md) -- Undo/Redo/Cut/Copy/Paste/Find/Replace against
+    whichever text editor is active (see ``MainWindow._active_text_editor``)."""
 
     def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -231,7 +265,131 @@ class _EditMenuButton(QToolButton):
         _add_action(menu, "Cut", window.edit_cut, _SHORTCUT_CUT)
         _add_action(menu, "Copy", window.edit_copy, _SHORTCUT_COPY)
         _add_action(menu, "Paste", window.edit_paste, _SHORTCUT_PASTE)
+        menu.addSeparator()
+        # PROMPT.md: "Under edit in the top bar, please add an option for Find with shortcut CTRL
+        # + F and Replace with shortcut CTRL + R" -- see find_replace.py's own module docstring for
+        # the bar these open.
+        _add_action(menu, "Find", window.edit_find, _SHORTCUT_FIND)
+        _add_action(menu, "Replace", window.edit_replace, _SHORTCUT_REPLACE)
         self.setMenu(menu)
+
+
+class _SelectionMenuButton(QToolButton):
+    """The top bar's "Selection" dropdown (PROMPT.md: "Under Selection, please add Select All
+    (ctrl A), should highlight all of the most recently opened tab")."""
+
+    def __init__(self, window: "MainWindow", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText("Selection")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        _add_action(menu, "Select All", window.select_all, _SHORTCUT_SELECT_ALL)
+        self.setMenu(menu)
+
+
+class _ViewMenuButton(QToolButton):
+    """The top bar's "View" dropdown (PROMPT.md: "Under View, please add Command Palette, a sub
+    menu for appearance, then options to switch to the appropriate side panel (which should be in
+    this order (please re-order default icon order too): compile, dashboard, git, scripts, maps,
+    docs, testing, ai, search ... we are removing locations, and rvt ... please add an entry for
+    view logs"). Each "switch to panel" entry clicks the matching activity-bar button directly
+    (rather than re-implementing view-switching here) -- the exact same code path a real click
+    takes, so the activity bar's own checked-button state and the sidebar both stay in sync."""
+
+    def __init__(
+        self, window: "MainWindow", quick_access: QuickAccessBar, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setText("View")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        # quick_access is the top bar's own instance, passed in directly rather than read off
+        # `window.quick_access` -- MainWindow doesn't set that alias until *after* the top bar
+        # (and so this button) finishes constructing, see _TopBar.__init__'s own comment.
+        _add_action(menu, "Command Palette", quick_access.open_command_palette, _SHORTCUT_COMMAND_PALETTE)
+        menu.addSeparator()
+
+        appearance_menu = menu.addMenu("Appearance")
+        theme_menu = appearance_menu.addMenu("Set Theme")
+        for name in theme_module.list_themes():
+            theme_menu.addAction(name, lambda _checked=False, n=name: window._set_theme(n))
+        scale_menu = appearance_menu.addMenu("Set UI Scale")
+        scale_menu.addAction("Increase", window._zoom_in)
+        scale_menu.addAction("Decrease", window._zoom_out)
+        menu.addSeparator()
+
+        # PROMPT.md's own re-ordering, keyed to activity_bar.py's own button attributes -- "docs"/
+        # "ai" there are the existing Documentation/LLM entries, not a rename (see activity_bar.py's
+        # own module docstring). A later pass ("please move search magnifying glass to come under
+        # dashboard ... and move in view topbar tap"; "under documentation please add an icon for
+        # Kanban ... and finally please move tests to come before llm (and re-arrange order in
+        # view)") moved Search up under Dashboard, added Kanban right after Documentation, and
+        # moved Testing to sit directly ahead of LLM -- kept in sync with activity_bar.py's own
+        # _DEFAULT_ORDER.
+        panel_buttons = (
+            ("Dashboard", "explorer_button"),
+            ("Search", "search_button"),
+            ("Git", "git_button"),
+            ("Scripts", "scripts_button"),
+            ("Map Files", "maps_button"),
+            ("Documentation", "documentation_button"),
+            ("Kanban", "kanban_button"),
+            ("Testing", "testing_button"),
+            ("LLM", "llm_button"),
+        )
+        for label, attr in panel_buttons:
+            menu.addAction(label, lambda _checked=False, a=attr: getattr(window.activity_bar, a).click())
+        menu.addSeparator()
+
+        menu.addAction("View Logs", window.view_logs)
+        self.setMenu(menu)
+
+
+class _LaunchMenuButton(QToolButton):
+    """Top bar, next to View (PROMPT.md: "also in the top bar next to view please add Launch with
+    options - Launch Halo MCC (greyed unless verified), Launch RVT (when available), both with
+    shortcuts").
+
+    Both actions' *keyboard* shortcuts stay genuinely live at all times, not just while this menu
+    happens to be open -- :meth:`MainWindow.launch_mcc_from_menu`/:meth:`~MainWindow.
+    launch_rvt_from_menu` (what the shortcuts and the menu entries alike actually trigger) each
+    carry their own "not actually available" no-op guard, the same rule the Dashboard's own
+    rvt_button already enforces by simply being disabled (PROMPT.md: "rvt should not be launchable
+    if no project is open"). The *visual* greyed-out state shown here, by contrast, is only ever
+    refreshed right as the menu is about to open (:meth:`_refresh_enabled`) -- cosmetic, and cheap
+    to recompute fresh every time, rather than a second copy of "is this available" tracked as
+    stored state that could quietly drift out of sync with a project open/close or a Verify System
+    Settings run elsewhere.
+    """
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__(window)
+        self.setText("Launch")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+
+        menu = QMenu(self)
+        self.mcc_action = menu.addAction("Launch Halo MCC", window.launch_mcc_from_menu)
+        self.mcc_action.setShortcut(QKeySequence(_SHORTCUT_LAUNCH_MCC))
+        self.rvt_action = menu.addAction("Launch RVT", window.launch_rvt_from_menu)
+        self.rvt_action.setShortcut(QKeySequence(_SHORTCUT_LAUNCH_RVT))
+        # Starts disabled (the safe "unavailable" default) rather than querying window.
+        # explorer_panel here -- MainWindow hasn't built it yet at this point in its own
+        # construction (_TopBar is built before it, same ordering constraint documented on
+        # QuickAccessBar's own construction just above). _refresh_enabled() gets the real answer
+        # the first time the menu is actually opened.
+        self.mcc_action.setEnabled(False)
+        self.rvt_action.setEnabled(False)
+        menu.aboutToShow.connect(lambda: self._refresh_enabled(window))
+        self.setMenu(menu)
+
+    def _refresh_enabled(self, window: "MainWindow") -> None:
+        self.mcc_action.setEnabled(window.halo_mcc_verified())
+        self.rvt_action.setEnabled(window.explorer_panel.current_folder is not None)
 
 
 class _TopBar(QWidget):
@@ -264,19 +422,9 @@ class _TopBar(QWidget):
         layout.addWidget(self.mark_label)
         layout.addSpacing(4)
 
-        self.file_menu_button = _FileMenuButton(window)
-        layout.addWidget(self.file_menu_button)
-        self.edit_menu_button = _EditMenuButton(window)
-        layout.addWidget(self.edit_menu_button)
-        # Empty placeholders (PROMPT.md) -- no items yet, to be filled in later.
-        layout.addWidget(_DropdownButton("Selection"))
-        layout.addWidget(_DropdownButton("View"))
-        layout.addStretch(1)
-
-        # Two equal stretches around the pill center it in the gap between the left content
-        # (mark/File/Edit/Selection/View) and the right-side toggle/window-control cluster, rather
-        # than in the dead center of the whole bar (which would drift off-center against those
-        # unequal-width neighbors) -- the standard QBoxLayout "center between two stretches" trick.
+        # Built (but not yet laid out -- see the addWidget() call further down, in its actual
+        # visual position) before the Selection/View menus, which both need it to already exist:
+        # View's own "Command Palette" entry opens straight through it.
         self.quick_access = QuickAccessBar(
             self,
             get_project_folder=lambda: self._window.explorer_panel.current_folder,
@@ -284,6 +432,23 @@ class _TopBar(QWidget):
             build_root_commands=self._window.build_command_palette_commands,
             label=self._window.root_dir.name,
         )
+
+        self.file_menu_button = _FileMenuButton(window)
+        layout.addWidget(self.file_menu_button)
+        self.edit_menu_button = _EditMenuButton(window)
+        layout.addWidget(self.edit_menu_button)
+        self.selection_menu_button = _SelectionMenuButton(window)
+        layout.addWidget(self.selection_menu_button)
+        self.view_menu_button = _ViewMenuButton(window, self.quick_access)
+        layout.addWidget(self.view_menu_button)
+        self.launch_menu_button = _LaunchMenuButton(window)
+        layout.addWidget(self.launch_menu_button)
+        layout.addStretch(1)
+
+        # Two equal stretches around the pill center it in the gap between the left content
+        # (mark/File/Edit/Selection/View) and the right-side toggle/window-control cluster, rather
+        # than in the dead center of the whole bar (which would drift off-center against those
+        # unequal-width neighbors) -- the standard QBoxLayout "center between two stretches" trick.
         layout.addWidget(self.quick_access)
         layout.addStretch(1)
 
@@ -410,7 +575,13 @@ class _ResizableBody(QWidget):
 
 
 class MainWindow(QWidget):
-    def __init__(self, root_dir: Path | None = None, *, initial_project: Path | None = None) -> None:
+    def __init__(
+        self,
+        root_dir: Path | None = None,
+        *,
+        initial_project: Path | None = None,
+        restore_last_project: bool = True,
+    ) -> None:
         """
         Args:
             root_dir: The repo root this window's own ``.in-reach`` project folder lives under.
@@ -419,6 +590,11 @@ class MainWindow(QWidget):
                 own "Open in New Window" choice (PROMPT.md: "1 per window"), so a project already
                 open in *this* window can be handed to a fresh one without disturbing what's
                 persisted for ordinary restarts.
+            restore_last_project: Whether to fall back to reopening whatever ``PROJECT_DIR_KEY``
+                last had open when ``initial_project`` isn't given. ``True`` for the app's own
+                normal launch; :meth:`open_new_window` passes ``False`` so "File > New Window"
+                starts blank (same working directory, no project auto-loaded) instead of just
+                reopening the project already open in the window it was spawned from.
         """
         super().__init__()
         self.root_dir = root_dir or Path.cwd()
@@ -472,6 +648,12 @@ class MainWindow(QWidget):
         self._side_splitter.setStyleSheet(style.GAP_SPLITTER_HANDLE_STYLE)
         self._side_splitter.setHandleWidth(style.SIDEBAR_CONTENT_GAP)
         self._side_splitter.setChildrenCollapsible(False)
+        # PROMPT.md: "the dragging behaviour is jerky. please fix" -- the default opaque resize
+        # relayouts the sidebar's own (potentially expensive -- a QFileSystemModel-backed tree,
+        # stats, ...) content on every single mouse-move event during the drag; Qt's own standard
+        # remedy is to resize just once, on release, showing a plain drag indicator line for the
+        # duration instead (drawn by Qt itself, independent of this handle's own QSS styling).
+        self._side_splitter.setOpaqueResize(False)
         body_layout.addWidget(self._side_splitter, 1)
 
         self.primary_sidebar = self._build_primary_sidebar()
@@ -484,13 +666,14 @@ class MainWindow(QWidget):
         self._side_splitter.addWidget(self._main_splitter)
         self._side_splitter.setStretchFactor(0, 0)
         self._side_splitter.setStretchFactor(1, 1)
-        self._side_splitter.setSizes([_SIDEBAR_MIN_WIDTH, 1000])
+        self._side_splitter.setSizes([_SIDEBAR_DEFAULT_WIDTH, 1000])
 
         self.main_panel = MainPanelArea(
             root_dir=self.root_dir,
             reveal_in_explorer=self._reveal_in_explorer_view,
             on_project_opened=self._on_project_opened,
             on_file_saved=self._on_file_saved,
+            project_title=self._active_project_title,
         )
         self._main_splitter.addWidget(self.main_panel)
 
@@ -509,27 +692,43 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self._sync_project_dependent_views)
         self.explorer_panel.active_project_changed.connect(self._persist_active_project)
         self.explorer_panel.project_closed.connect(self._close_rvt_for_project)
+        self.git_panel.commit_requested.connect(self.vcs_commit)
         self.git_panel.stamp_requested.connect(self.vcs_stamp)
         self.git_panel.new_branch_requested.connect(self.vcs_new_branch)
+        self.git_panel.new_branch_from_requested.connect(self.vcs_new_branch_from)
         self.git_panel.switch_branch_requested.connect(self.vcs_switch_branch)
         self.git_panel.delete_branch_requested.connect(self.vcs_delete_branch)
+        self.git_panel.merge_branch_requested.connect(self.vcs_merge_branch)
         self.git_panel.compare_requested.connect(self.vcs_compare)
         self.git_panel.restore_requested.connect(self.vcs_restore)
+        self.git_panel.diff_file_requested.connect(self.vcs_open_diff)
+        self.git_panel.open_file_requested.connect(self.vcs_open_file)
+        self.git_panel.open_file_head_requested.connect(self.vcs_open_file_head)
+        self.git_panel.discard_requested.connect(self.vcs_discard)
+        self.git_panel.reveal_requested.connect(self.vcs_reveal_in_explorer)
+        self.git_panel.stage_requested.connect(self.vcs_stage)
+        self.git_panel.unstage_requested.connect(self.vcs_unstage)
+        self.git_panel.commit_selected.connect(self.vcs_commit_selected)
+        self.git_panel.commit_diff_requested.connect(self.vcs_open_commit_diff)
+        self.git_panel.commit_open_file_requested.connect(self.vcs_open_commit_file)
         # PROMPT.md: "1 per window" -- initial_project (see __init__'s own docstring) wins over
         # whatever's persisted; otherwise restore the one project PROJECT_DIR_KEY last had open,
         # the same key every gametype-project creation already writes (see
         # in_reach.app.new_project.create_gametype_project).
         if self._initial_project is not None:
             to_open = self._initial_project if self._initial_project.is_dir() else None
-        else:
+        elif restore_last_project:
             already_open = env_file.get_env_values(env_project_dir / ".env").get(new_project.PROJECT_DIR_KEY)
             to_open = Path(already_open) if already_open and Path(already_open).is_dir() else None
+        else:
+            to_open = None
         if to_open is not None:
             self.explorer_panel.open_project(to_open)
         self.explorer_panel.file_activated.connect(self._on_explorer_file_activated)
         self.explorer_panel.export_requested.connect(self.export_rvt_file)
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
-        self.explorer_panel.notes_requested.connect(self.open_notes)
+        self.explorer_panel.launch_rvt_requested.connect(self.launch_rvt)
+        self.explorer_panel.open_builtin_folder_requested.connect(self._open_builtin_folder)
         self.search_panel.file_activated.connect(self._on_search_file_activated)
 
         self.bottom_panel = BottomPanel()
@@ -541,14 +740,12 @@ class MainWindow(QWidget):
 
         self.status_bar = StatusBar(self)
         outer.addWidget(self.status_bar)
-        # PROMPT.md: "please remove the dir location string (under the tabs section) and move
-        # that information into the bottom bar (in the centre)" -- connected here (after
-        # self.status_bar exists) rather than alongside the other explorer_panel.
-        # active_project_changed connections above, and primed once immediately since any restored
-        # tab from the last launch (the `for folder in restored` loop above) already fired that
-        # signal before this connection existed.
-        self.explorer_panel.active_project_changed.connect(self._update_status_project_label)
-        self._update_status_project_label(self.explorer_panel.current_folder)
+        # PROMPT.md: "where we presently have the name of the parent directory in the quick access
+        # bar, we want to replace with the game file name and in brackets its uuid" -- primed once
+        # immediately since any restored tab from the last launch (the `for folder in restored`
+        # loop above) already fired active_project_changed before this connection existed.
+        self.explorer_panel.active_project_changed.connect(self._update_quick_access_label)
+        self._update_quick_access_label(self.explorer_panel.current_folder)
         # Same priming reasoning as the status label just above -- a restored project (or the lack
         # of one) already fired active_project_changed before this method's own connection existed.
         self._sync_project_dependent_views(self.explorer_panel.current_folder)
@@ -556,17 +753,18 @@ class MainWindow(QWidget):
         self.explorer_panel.active_project_changed.connect(self._refresh_vcs_status)
         self._refresh_vcs_status(self.explorer_panel.current_folder)
 
-        # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- active_pane is
-        # always panes[0] for now (see MainPanelArea.active_pane's own docstring), so a single
-        # connection here (rather than threading this through every pane) is enough.
+        # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- connects to the
+        # panel's own re-broadcast signal (MainPanelArea.cursor_info_changed), not one specific
+        # pane's, since which pane is active_pane can change as the user moves between panes (see
+        # that property's own docstring); _update_status_cursor_info always re-reads active_pane
+        # fresh, so this one connection stays correct regardless of which pane fired it.
         indent_env_path = project.get_project_dir(self.root_dir) / ".env"
         indent_state.set_indent(*indent_settings.get_indent(indent_env_path))
-        self.main_panel.active_pane.cursor_info_changed.connect(self._update_status_cursor_info)
+        self.main_panel.cursor_info_changed.connect(self._update_status_cursor_info)
         self._update_status_cursor_info()
 
         self.activity_bar.view_selected.connect(self._on_sidebar_view_selected)
         self.activity_bar.view_collapsed.connect(self._on_sidebar_view_collapsed)
-        self.activity_bar.launch_rvt_requested.connect(self.launch_rvt)
         self.activity_bar.apply_requested.connect(self.apply_settings_changes)
         self.activity_bar.settings_requested.connect(self.open_settings_dialog)
         self.top_bar.sidebar_toggle.toggled.connect(self._on_sidebar_toggle_changed)
@@ -594,8 +792,13 @@ class MainWindow(QWidget):
         # Quick Access Bar (PROMPT.md): Ctrl+P search, Ctrl+Shift+P command palette.
         self._quick_open_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
         self._quick_open_shortcut.activated.connect(self.quick_access.open_search)
-        self._command_palette_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
-        self._command_palette_shortcut.activated.connect(self.quick_access.open_command_palette)
+        # No separate QShortcut for Ctrl+Shift+P -- the View menu's own "Command Palette" QAction
+        # (see _ViewMenuButton, built into self.top_bar just above) already carries that exact same
+        # key sequence via _add_action()'s own setShortcut() call. A QAction's shortcut and a plain
+        # QShortcut both default to Qt.ShortcutContext.WindowShortcut, so a second QShortcut here
+        # bound to the identical sequence made Qt treat every Ctrl+Shift+P press as *ambiguous*
+        # between the two (activatedAmbiguously, not activated) -- neither ever fired. Same root
+        # cause the Ctrl+- comment above already documents for a different pair of shortcuts.
 
         self.refresh_icon_colors()
         # The activity bar's own buttons are fixed pixel sizes, not derived from app.font() the
@@ -632,18 +835,20 @@ class MainWindow(QWidget):
 
     def _build_primary_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setMinimumWidth(_SIDEBAR_MIN_WIDTH)
         screen = QApplication.primaryScreen()
+        # PROMPT.md: "the side panel needs to be resiziable to be much smaller or wider" --
+        # QSplitter enforces a pane's own setMinimumWidth()/setMaximumWidth() as a hard floor/
+        # ceiling on how far the user can drag its handle. The floor is flat (see
+        # _SIDEBAR_MIN_DRAG_WIDTH's own comment); the ceiling floors at that same flat minimum
+        # purely so an extreme (sub-400px) screen can't leave a self-contradictory min > max for
+        # Qt's own constraint solver to pick one of arbitrarily -- on any real screen this never
+        # actually triggers, unlike the old shared-with-the-minimum floor it replaces.
+        min_width = _SIDEBAR_MIN_DRAG_WIDTH
         if screen is not None:
-            # PROMPT.md: "dont allow [the sidebar to be] extendable more than 1/3 of the screen
-            # width" -- QSplitter enforces a pane's own setMaximumWidth() as a hard ceiling on how
-            # far the user can drag its handle, same as setMinimumWidth() already is for the floor.
-            # Floored at _SIDEBAR_MIN_WIDTH itself -- a small enough screen (a CI box's own
-            # headless/offscreen virtual display, e.g.) can otherwise put the fraction-of-screen
-            # ceiling *below* the fixed floor above, a self-contradictory min > max that leaves
-            # Qt's own constraint solver to pick one arbitrarily rather than actually honoring both.
-            max_width = max(_SIDEBAR_MIN_WIDTH, screen.availableGeometry().width() // _SIDEBAR_MAX_WIDTH_FRACTION)
+            available = screen.availableGeometry().width()
+            max_width = max(_SIDEBAR_MIN_DRAG_WIDTH, available // _SIDEBAR_MAX_WIDTH_FRACTION)
             sidebar.setMaximumWidth(max_width)
+        sidebar.setMinimumWidth(min_width)
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setObjectName("primarySidebar")
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
@@ -652,14 +857,22 @@ class MainWindow(QWidget):
 
         self.explorer_panel = ExplorerPanel()
         self.search_panel = SearchPanel()
-        self.locations_panel = LocationsPanel()
         self.git_panel = GitPanel()
         self.scripts_panel = ScriptsPanel()
+        self.documentation_panel = DocumentationPanel()
+        self.kanban_panel = KanbanPanel()
+        self.testing_panel = TestingPanel()
+        self.maps_panel = MapsPanel()
+        self.llm_panel = LlmPanel()
         self._sidebar_pages = {
             "explorer": self.explorer_panel,
             "git": self.git_panel,
             "scripts": self.scripts_panel,
-            "locations": self.locations_panel,
+            "documentation": self.documentation_panel,
+            "kanban": self.kanban_panel,
+            "testing": self.testing_panel,
+            "maps": self.maps_panel,
+            "llm": self.llm_panel,
             "search": self.search_panel,
         }
         self._no_project_page = _NoProjectSidebarPage()
@@ -763,16 +976,19 @@ class MainWindow(QWidget):
             project.get_project_dir(self.root_dir) / ".env", new_project.PROJECT_DIR_KEY, str(folder) if folder else ""
         )
 
-    def _update_status_project_label(self, folder: Path | None) -> None:
-        """Shows the active project as "<title> (<folder id>)" centered in the bottom status bar
-        (PROMPT.md), or clears it once no project is open. Also called from
-        :meth:`_sync_project_title`, since a rename changes the title half of that text without
-        the active project (and so without :attr:`~in_reach.ide.explorer.ExplorerPanel.
-        active_project_changed`) actually changing."""
+    def _update_quick_access_label(self, folder: Path | None) -> None:
+        """Shows the active project as "<title> (<folder id>)" in the Quick Access pill (PROMPT.md:
+        "where we presently have the name of the parent directory in the quick access bar, we want
+        to replace with the game file name and in brackets its uuid" -- ``folder.name`` is that
+        uuid-named project folder, see :func:`~in_reach.app.new_project.create_gametype_project`),
+        or falls back to the workspace's own directory name once no project is open (its original,
+        pre-project-open text). Also called from :meth:`_sync_project_title`, since a rename changes
+        the title half of that text without the active project (and so without
+        :attr:`~in_reach.ide.explorer.ExplorerPanel.active_project_changed`) actually changing."""
         if folder is None:
-            self.status_bar.set_project_label("")
+            self.quick_access.set_label(self.root_dir.name)
             return
-        self.status_bar.set_project_label(f"{new_project.read_project_title(folder)} ({folder.name})")
+        self.quick_access.set_label(f"{new_project.read_project_title(folder)} ({folder.name})")
 
     def _on_explorer_file_activated(self, path: Path) -> None:
         """Opens a file clicked in any of the Explorer panel's three trees -- into the active
@@ -833,8 +1049,16 @@ class MainWindow(QWidget):
                     Command(label="Markdown (.md)", action=lambda: self._set_notes_format(notes_settings.FORMAT_MD)),
                 ],
             ),
+            Command(label="Commit", action=self._vcs_commit_via_dialog),
             Command(label="Stamp Release", action=self._vcs_stamp_via_dialog),
             Command(label="New Branch", action=self._vcs_new_branch_via_dialog),
+            Command(
+                label="New Branch From",
+                children=[
+                    Command(label=label, action=lambda ref=ref: self._vcs_new_branch_from_via_dialog(ref))
+                    for ref, label in self._vcs_compare_refs()
+                ],
+            ),
             Command(
                 label="Switch Branch",
                 children=[
@@ -847,6 +1071,13 @@ class MainWindow(QWidget):
                 children=[
                     Command(label=name, action=lambda n=name: self.vcs_delete_branch(n))
                     for name in self._vcs_branches()
+                ],
+            ),
+            Command(
+                label="Merge Branch",
+                children=[
+                    Command(label=name, action=lambda n=name: self.vcs_merge_branch(n))
+                    for name in self._vcs_other_branches()
                 ],
             ),
             Command(
@@ -883,6 +1114,17 @@ class MainWindow(QWidget):
 
         return vcs.list_branches(folder) if vcs.is_initialized(folder) else []
 
+    def _vcs_other_branches(self) -> list[str]:
+        """Every branch except whichever is currently checked out -- what the command palette's
+        own "Merge Branch" submenu offers (merging the current branch into itself is meaningless)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import vcs
+
+        current = vcs.current_branch(folder)
+        return [name for name in self._vcs_branches() if name != current]
+
     def _vcs_history(self) -> list:
         folder = self.explorer_panel.current_folder
         if folder is None:
@@ -905,12 +1147,21 @@ class MainWindow(QWidget):
             ]
         return refs
 
-    def _vcs_stamp_via_dialog(self) -> None:
+    def _vcs_commit_via_dialog(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
 
-        message, ok = QInputDialog.getText(self, "Stamp Release", "Commit message:")
+        message, ok = QInputDialog.getText(self, "Commit", "Commit message:")
         if ok and message.strip():
-            self.vcs_stamp(message.strip())
+            self.vcs_commit(message.strip())
+
+    def _vcs_stamp_via_dialog(self) -> None:
+        """"Stamp Release" (the command palette's own entry) -- reuses the Git panel's own
+        "Stamp Release" button wholesale (its click handler owns the version-bump dialog, the
+        duplicate-version warning, and -- being a real ``QPushButton.click()`` -- naturally becomes
+        a no-op if the button is currently disabled, i.e. the active gametype isn't compiled yet;
+        PROMPT.md: "it also should not be possible to stamp a non compiled gametype") rather than
+        re-implementing any of that here."""
+        self.git_panel.stamp_button.click()
 
     def _vcs_new_branch_via_dialog(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -918,6 +1169,18 @@ class MainWindow(QWidget):
         name, ok = QInputDialog.getText(self, "New Branch", "Branch name:")
         if ok and name.strip():
             self.vcs_new_branch(name.strip())
+
+    def _vcs_new_branch_from_via_dialog(self, source: str) -> None:
+        """"New Branch From" (the command palette's own entry, PROMPT.md: "also there is no command
+        palette entry for make new branch from") -- ``source`` is already picked (one of this
+        command's own children, built from :meth:`_vcs_compare_refs`, same branch-or-stamp ref set
+        the Git panel's own "New Branch From..." dropdown offers), so this only still needs to ask
+        for the new branch's own name."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "New Branch From", "Branch name:")
+        if ok and name.strip():
+            self.vcs_new_branch_from(name.strip(), source)
 
     def _set_theme(self, name: str) -> None:
         app = QApplication.instance()
@@ -1062,8 +1325,11 @@ class MainWindow(QWidget):
         self.main_panel.open_welcome_tab_in(self.main_panel.active_pane)
 
     def open_new_window(self) -> None:
-        """"New Window" -- another MainWindow on the same project, independent of this one."""
-        window = MainWindow(root_dir=self.root_dir)
+        """"New Window" -- a fresh, independent MainWindow in the same working directory, starting
+        blank (Welcome tab, no project loaded) rather than reopening whatever project is already
+        open in this one."""
+        _logger.info("opening a new window (root_dir=%s)", self.root_dir)
+        window = MainWindow(root_dir=self.root_dir, restore_last_project=False)
         window.showMaximized()
         self._child_windows.append(window)
 
@@ -1075,14 +1341,14 @@ class MainWindow(QWidget):
             self._adopt_project(Path(chosen))
 
     def ask_open_folder(self) -> str:
-        return QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root_dir))
+        return file_dialogs.get_existing_directory(self, "Open Folder", str(self.root_dir))
 
     def ask_export_path(self, default_path: Path) -> str:
         """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
-        "Export RVT File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's
-        own bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
-        chosen, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export RVT File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
+        "Export File"'s own standard Save As dialog, offering both a full ``.bin`` and RVT's own
+        bare ``.mglo`` as save formats (PROMPT.md: "allowing user to save as .bin or .mglo")."""
+        chosen, _selected_filter = file_dialogs.get_save_file_name(
+            self, "Export File", str(default_path), "Game Variant (*.bin);;Megalo Script (*.mglo)"
         )
         return chosen
 
@@ -1104,22 +1370,27 @@ class MainWindow(QWidget):
         self._adopt_project(folder)
 
     def _adopt_project(self, folder: Path) -> None:
+        _logger.info("opening project %s", folder)
         recent.add_recent(project.get_project_dir(self.root_dir), folder)
         self._on_project_opened(folder)
 
     def save_current(self) -> None:
+        _logger.info("saving the active tab")
         self.main_panel.active_pane.save_current()
 
     def save_all(self) -> None:
+        _logger.info("saving all open tabs")
         self.main_panel.save_all()
 
     def close_project(self) -> None:
         """"Close Project" -- closes the one project open in this window (PROMPT.md: "1 per
         window"). Doesn't touch any files, and doesn't close this window (that's the title bar's
         own close button)."""
+        _logger.info("closing project %s", self.explorer_panel.current_folder)
         self.explorer_panel.close_active_project()
 
     def close_editor(self) -> None:
+        _logger.info("closing the active tab")
         self.main_panel.active_pane.close_current()
 
     # -- Edit menu --------------------------------------------------------------------------------
@@ -1148,6 +1419,40 @@ class MainWindow(QWidget):
         editor = self._active_text_editor()
         if editor is not None:
             editor.paste()
+
+    def edit_find(self) -> None:
+        """PROMPT.md: "add an option for Find with shortcut CTRL + F ... it should show a find and
+        replace bar (cursored on find or replace depending on selection)" -- opens the active tab's
+        own Find/Replace bar (see :meth:`~in_reach.ide.editor.TextEditorWidget.open_find`) focused
+        on the Find field."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.open_find(replace=False)
+
+    def edit_replace(self) -> None:
+        """"Replace" (Ctrl+R) -- same bar as :meth:`edit_find`, just opened with the Replace row
+        shown and focused."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.open_find(replace=True)
+
+    # -- Selection menu -----------------------------------------------------------------------------
+
+    def select_all(self) -> None:
+        """"Select All" (Ctrl+A, PROMPT.md) -- highlights all of the active pane's own current tab,
+        same "whichever editor is active" targeting as the Edit menu's Undo/Redo/Cut/Copy/Paste."""
+        editor = self._active_text_editor()
+        if editor is not None:
+            editor.selectAll()
+
+    # -- View menu ------------------------------------------------------------------------------
+
+    def view_logs(self) -> None:
+        """"View Logs" (the View menu, PROMPT.md) -- opens the bottom panel onto its live Logs tab
+        (see :mod:`in_reach.ide.logs_panel`), showing the panel first if it was collapsed (same
+        toggle the top bar's own panel_toggle button drives)."""
+        self.top_bar.panel_toggle.setChecked(True)
+        self.bottom_panel.show_logs()
 
     def toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -1268,11 +1573,14 @@ class MainWindow(QWidget):
         """
         from in_reach.app import apply_settings
 
+        _logger.info("compiling %s", folder)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            return apply_settings.apply_settings_changes(project_dir, folder)
+            result = apply_settings.apply_settings_changes(project_dir, folder)
         finally:
             QApplication.restoreOverrideCursor()
+        _logger.info("compile %s for %s", "succeeded" if result.success else "failed", folder)
+        return result
 
     def launch_rvt(self) -> None:
         """Launches in-reach's own bundled ReachVariantTool -- no setup needed, it always resolves
@@ -1317,13 +1625,26 @@ class MainWindow(QWidget):
                 return
             # Disabled for the compile's own duration -- see _run_compile()'s own docstring
             # (PROMPT.md: "we are having to press compile twice").
-            self.activity_bar.rvt_button.setEnabled(False)
+            self.explorer_panel.rvt_button.setEnabled(False)
             try:
-                self._run_compile(project.get_project_dir(self.root_dir), folder)
+                compile_result = self._run_compile(project.get_project_dir(self.root_dir), folder)
             except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
-                pass
+                _logger.exception("best-effort compile before RVT launch failed for %s", folder)
+                compile_result = None
             finally:
-                self.activity_bar.set_rvt_enabled(True)  # folder is not None in this branch
+                self.explorer_panel.rvt_button.setEnabled(True)  # folder is not None in this branch
+            if compile_result is not None and not compile_result.success:
+                # Still best-effort/non-blocking by design (see this method's own docstring) --
+                # just logged, not a dialog on every launch -- but this needs at least a trace
+                # somewhere: a script that fails to recompile (a very real risk for anything but a
+                # trivial script -- the decompile->recompile round trip isn't guaranteed lossless)
+                # used to leave build/dist/*.bin silently unwritten with no record of why anywhere,
+                # not even in the log, since only a *raised* exception was ever logged above.
+                _logger.warning(
+                    "best-effort compile before RVT launch did not succeed for %s: %s",
+                    folder,
+                    compile_result.failure or "Megalo compile failed",
+                )
             self._refresh_apply_enabled(folder)
             # A compile above may have just created build/dist/*.bin for the very first time (or
             # overwritten it via a delete-then-recreate save, which silently drops an already-
@@ -1332,12 +1653,40 @@ class MainWindow(QWidget):
             # to be opened against, below) is actually noticed.
             self._rewatch_project_bin(folder)
         try:
-            process = rvt_launcher.launch_rvt(self._current_project_bin())
+            process = rvt_launcher.launch_rvt(self._rvt_launch_target(folder))
         except OSError as exc:
+            _logger.error("couldn't launch ReachVariantTool: %s", exc)
             QMessageBox.critical(self, "in-reach", f"Couldn't launch ReachVariantTool:\n{exc}")
             return
+        _logger.info("launched ReachVariantTool (pid=%s, folder=%s)", getattr(process, "pid", None), folder)
         if folder is not None:
             self._rvt_processes[folder] = process
+
+    def launch_rvt_from_menu(self) -> None:
+        """"Launch RVT" (the top bar's own Launch menu, PROMPT.md: "Launch RVT (when available)")
+        -- a no-op with no project open, the same rule the Dashboard's own rvt_button already
+        enforces by being disabled then (PROMPT.md: "rvt should not be launchable if no project is
+        open"). Kept as its own guard rather than trusting the menu action's own enabled state
+        alone, which only reflects reality right when the menu was last opened -- see
+        :class:`_LaunchMenuButton`'s own docstring for why that alone can't gate the matching
+        keyboard shortcut too."""
+        if self.explorer_panel.current_folder is None:
+            return
+        self.launch_rvt()
+
+    def halo_mcc_verified(self) -> bool:
+        """Whether the Welcome tab's own Verify System Settings checklist has resolved the "Halo
+        MCC Install" step for this window's project-root ``.env`` -- what :class:`_LaunchMenuButton`
+        greys "Launch Halo MCC" against (PROMPT.md: "Launch Halo MCC (greyed unless verified)")."""
+        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        return bool(env_file.get_env_values(env_path).get(system_verify.HALO_MCC_KEY, ""))
+
+    def launch_mcc_from_menu(self) -> None:
+        """"Launch Halo MCC" (the top bar's own Launch menu) -- a no-op unless
+        :meth:`halo_mcc_verified`, same reasoning as :meth:`launch_rvt_from_menu`'s own guard."""
+        if not self.halo_mcc_verified():
+            return
+        mcc_launcher.launch_mcc()
 
     def _rvt_synced_json_paths(self, folder: Path) -> list[Path]:
         """``folder``'s own settings.json/script_settings.json/strings.json paths -- the three
@@ -1382,6 +1731,18 @@ class MainWindow(QWidget):
         if process is not None and process.poll() is None:
             process.terminate()
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """PROMPT.md: "also when closing a window with an open rvt, any rvt windows should be
+        closed" -- extends :meth:`_close_rvt_for_project`'s own "closing a project closes its own
+        RVT" rule to the whole window: closing this window (File > Close Window, the OS close
+        button, or quitting the app) terminates *every* RVT process it ever launched (one per
+        project folder it had open, see :attr:`_rvt_processes`), not just the currently active
+        project's own. ``list(...)`` -- :meth:`_close_rvt_for_project` mutates
+        :attr:`_rvt_processes` as it goes, which would otherwise raise iterating the dict live."""
+        for folder in list(self._rvt_processes):
+            self._close_rvt_for_project(folder)
+        super().closeEvent(event)
+
     def _current_project_bin(self) -> Path | None:
         folder = self.explorer_panel.current_folder
         if folder is None:
@@ -1389,11 +1750,29 @@ class MainWindow(QWidget):
         bin_path = new_project.compiled_variant_path(folder)
         return bin_path if bin_path.is_file() else None
 
+    def _rvt_launch_target(self, folder: Path | None) -> Path | None:
+        """What :meth:`launch_rvt` actually hands RVT to open -- the freshly-*compiled* ``.bin``
+        (:func:`~in_reach.app.new_project.compiled_variant_path`) if the best-effort pre-launch
+        compile above produced one, same as :attr:`_current_project_bin`'s own result. Falls back
+        to :func:`~in_reach.app.new_project.source_variant_path` (the project's original,
+        never-recompiled starting point) when it hasn't -- a project created from a real personal/
+        built-in variant with a non-trivial script can genuinely fail to recompile (the decompile->
+        recompile round trip isn't guaranteed lossless), which used to leave ``launch_rvt`` opening
+        RVT against nothing at all rather than at least the gametype the user actually picked.
+        """
+        if folder is None:
+            return None
+        compiled = new_project.compiled_variant_path(folder)
+        if compiled.is_file():
+            return compiled
+        source = new_project.source_variant_path(project.get_project_dir(self.root_dir), folder)
+        return source if source.is_file() else None
+
     def _on_active_project_changed(self, folder: Path | None) -> None:
         """PROMPT.md: "rvt should not be launchable if no project is open" -- and the Apply
         button's own enabled state depends on the *active* project's own ``settings/`` too, so both
         need re-checking on every tab switch, not just when a project first opens/closes."""
-        self.activity_bar.set_rvt_enabled(folder is not None)
+        self.explorer_panel.rvt_button.setEnabled(folder is not None)
         self._refresh_apply_enabled(folder)
 
     def _sync_project_dependent_views(self, folder: Path | None) -> None:
@@ -1430,6 +1809,11 @@ class MainWindow(QWidget):
 
         enabled = folder is not None and apply_settings.settings_have_unapplied_changes(folder)
         self.activity_bar.set_apply_enabled(enabled)
+        # PROMPT.md: "it also should not be possible to stamp a non compiled gametype" -- "compiled"
+        # here means the same "settings/ has nothing Apply would still need to pick up" state the
+        # Apply button's own enabled-ness already tracks, just inverted (Apply is enabled exactly
+        # when there's still something *to* apply).
+        self.git_panel.set_stamp_enabled(not enabled)
 
     def _on_file_saved(self, path: Path) -> None:
         """Re-checks the Apply button's enabled state whenever a file is saved -- PROMPT.md: Apply
@@ -1437,29 +1821,44 @@ class MainWindow(QWidget):
         just always re-check on any save rather than filtering to paths under ``settings/`` first;
         the check itself is a handful of small-file reads.
 
-        Also takes a traceable VCS snapshot of the active project (PROMPT.md: "every change should
-        be traceable (but not stamped explicitly)") -- a no-op if nothing actually changed on disk
-        since the last snapshot, or if the project has no history yet (see :func:`in_reach.app.vcs.
-        record_change`)."""
+        Also refreshes the VCS status (branch/uncommitted-count badge, Git panel) -- a save now just
+        changes what :func:`~in_reach.app.vcs.uncommitted_changes` reports, it doesn't create a
+        commit on its own any more (PROMPT.md, a later VSCode-style pass: "we want to remove the
+        autosave entries in vcs history panel" -- superseding this method's own earlier
+        ``vcs.record_change()`` call, see :mod:`in_reach.app.vcs`'s own module docstring for the
+        full history)."""
         folder = self.explorer_panel.current_folder
         self._refresh_apply_enabled(folder)
         if folder is not None:
-            from in_reach.app import vcs
-
-            vcs.record_change(folder)
             self._refresh_vcs_status(folder)
 
     # -- VCS panel (PROMPT.md: "vcs panel and dulwich implementation") --------------------------
 
     def _refresh_vcs_status(self, folder: Path | None) -> None:
-        """Refreshes (or hides) the bottom-left "<branch> - <last stamped> - <last saved>" segment
-        to match ``folder``'s own VCS history -- called whenever the active project changes and
-        after any action that adds to that history (a save, a stamp, a new/switched branch)."""
+        """Refreshes (or hides) the bottom-left "<branch> - <last stamped> - <last saved>" segment,
+        the activity bar's own git-icon uncommitted-count badge, and the Git panel itself (its
+        "Changes" list/commit button/graph), to match ``folder``'s own VCS state -- called whenever
+        the active project changes and after any action that could change any of them (a save, a
+        commit, a stamp, a new/switched branch).
+
+        Folding the panel's own ``refresh()`` in here (rather than leaving every call site to
+        remember both) fixed a real, confirmed bug: :meth:`_on_file_saved`/the RVT-resync watcher
+        only ever called this method, never ``self.git_panel.refresh()`` directly -- so the
+        activity-bar badge and status-bar segment updated the instant a file was saved, but the
+        panel's own "Changes" list stayed empty/stale until some *other* action (a new branch, a
+        switch, ...) happened to call ``git_panel.refresh()`` for an unrelated reason. A save is by
+        far the most common way uncommitted changes appear at all, so this was the normal case, not
+        an edge case.
+        """
         from in_reach.app import vcs
 
         if folder is None or not vcs.is_initialized(folder):
             self.status_bar.clear_vcs_status()
+            self.activity_bar.set_git_badge_count(0)
+            self.git_panel.refresh()
             return
+        self.activity_bar.set_git_badge_count(len(vcs.uncommitted_changes(folder)))
+        self.git_panel.refresh()
         branch = vcs.current_branch(folder) or "?"
         last_stamp = vcs.last_stamp(folder)
         stamp_text = last_stamp.stamp_message if last_stamp is not None else None
@@ -1488,20 +1887,87 @@ class MainWindow(QWidget):
         days = hours // 24
         return f"{days} day{'s' if days != 1 else ''} ago"
 
-    def vcs_stamp(self, message: str) -> None:
+    def vcs_commit(self, message: str) -> None:
+        """"Commit" (the Git panel's own inline message box + button) -- PROMPT.md: "committing
+        changes should require a commit message" -- the everyday checkpoint action, distinct from
+        :meth:`vcs_stamp` below. A no-op with no project open.
+
+        PROMPT.md (a later pass): "please also give the user a warning if they are committing
+        changes that haven't yet been compiled (prompting them to compile)" -- checked via the same
+        :func:`~in_reach.app.apply_settings.settings_have_unapplied_changes` the Apply button's own
+        enabled state already uses, so this can never disagree with what that button is showing.
+        "Compile Now" reuses :meth:`apply_settings_changes` itself (which already reports its own
+        failure) rather than re-implementing that bookkeeping here -- re-checking the same
+        "unapplied changes" flag afterward is what tells this whether that compile actually
+        succeeded, without needing a return value from it.
+        """
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import apply_settings, vcs
+
+        if apply_settings.settings_have_unapplied_changes(folder):
+            choice = self._confirm_commit_uncompiled()
+            if choice == "cancel":
+                return
+            if choice == "compile":
+                self.apply_settings_changes()
+                if apply_settings.settings_have_unapplied_changes(folder):
+                    return  # compile failed, or still needed -- don't commit on top of that
+
+        try:
+            vcs.commit(folder, message)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("committed %r for %s", message, folder)
+        self.git_panel.clear_commit_message()
+        self._refresh_vcs_status(folder)
+
+    def _confirm_commit_uncompiled(self) -> str:
+        """Asks what to do about committing while ``settings/`` has changes the last compile never
+        picked up -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``"compile"`` (compile first, then commit if it succeeds), ``"commit"`` (commit anyway),
+            or ``"cancel"``.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "You have changes in settings/ that haven't been compiled yet (Apply is still "
+            "showing unapplied changes).\n\nCompile now, commit anyway, or cancel?"
+        )
+        compile_button = box.addButton("Compile Now", QMessageBox.ButtonRole.AcceptRole)
+        commit_button = box.addButton("Commit Anyway", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(compile_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is compile_button:
+            return "compile"
+        if clicked is commit_button:
+            return "commit"
+        return "cancel"
+
+    def vcs_stamp(self, message: str, version: str) -> None:
         """"Stamp Release" (the Git panel's own button) -- PROMPT.md: "ability for a user to stamp
-        a release (which takes a 'commit message')". A no-op with no project open."""
+        a release (which takes a 'commit message')"; a later pass added the ``version`` argument
+        ("we also want to add the functionality for version numbers using major, minor, patch with
+        stamped releases"). A no-op with no project open."""
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
         from in_reach.app import vcs
 
         try:
-            vcs.stamp(folder, message)
+            vcs.stamp(folder, message, version=version)
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
-        self.git_panel.refresh()
+        _logger.info("stamped release %r (v%s) for %s", message, version, folder)
         self._refresh_vcs_status(folder)
 
     def vcs_new_branch(self, name: str) -> None:
@@ -1513,22 +1979,20 @@ class MainWindow(QWidget):
         from in_reach.app import vcs
 
         try:
-            vcs.create_branch(folder, name)
+            created = vcs.create_branch(folder, name)
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
-        self.git_panel.refresh()
+        _logger.info("created branch %r for %s", created, folder)
         self._refresh_vcs_status(folder)
 
-    def vcs_switch_branch(self, name: str) -> None:
-        """Switching branches (the Git panel's own branch combo, PROMPT.md: "it should be possible
-        ... to change and switch versions/branches") overwrites/deletes real files on disk to match
-        the target branch's own last snapshot -- refuses outright if that would blow away an
-        open tab's own unsaved edits (same "warn, don't silently clobber" treatment as an RVT
-        resync, see :meth:`_confirm_overwrite_rvt_changes`), and snapshots the project's current
-        state first so anything already saved to disk is never actually lost from history even
-        though the working files themselves are about to change. Reloads every open tab under this
-        project afterward so nothing already open goes stale."""
+    def vcs_new_branch_from(self, name: str, source: str) -> None:
+        """"New Branch From..." (the Git panel's own New Branch dropdown, PROMPT.md: "please make
+        new branch trigger a drop down also providing a New Branch from option") -- branches off
+        ``source`` (a branch name or a stamp's own sha) instead of whatever's currently checked out.
+        Unlike the plain "New Branch" above, this checks out ``source``'s own tree, so it carries
+        the same overwrite risk as :meth:`vcs_switch_branch` -- same dirty-tab/uncommitted-changes
+        confirmation flow, reused wholesale rather than duplicated. A no-op with no project open."""
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
@@ -1537,19 +2001,86 @@ class MainWindow(QWidget):
             return
         from in_reach.app import vcs
 
-        vcs.record_change(folder)
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return
+                try:
+                    vcs.stage_all(folder)
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to create_branch() below, which checks out
+            # `source`'s own tree -- that overwrite *is* the discard.
+
+        try:
+            created = vcs.create_branch(folder, name, source=source)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("created branch %r from %r for %s", created, source, folder)
+        self.main_panel.reload_open_tabs_under(folder)
+        self._refresh_vcs_status(folder)
+
+    def vcs_switch_branch(self, name: str) -> None:
+        """Switching branches (the Git panel's own branch combo, PROMPT.md: "it should be possible
+        ... to change and switch versions/branches") overwrites/deletes real files on disk to match
+        the target branch's own last snapshot -- refuses outright if that would blow away an
+        open tab's own unsaved *editor* edits (same "warn, don't silently clobber" treatment as an
+        RVT resync, see :meth:`_confirm_overwrite_rvt_changes`), then separately -- PROMPT.md, the
+        VSCode-style VCS pass: removing the old silent ``vcs.record_change()`` safety-snapshot this
+        used to take here -- warns about any *uncommitted VCS* changes (files already saved to disk
+        but never committed) and lets the user cancel, commit them first, or explicitly discard them
+        and switch anyway (see :meth:`_confirm_uncommitted_before_switch`), rather than silently
+        folding them into an anonymous commit the way this method used to. Reloads every open tab
+        under this project afterward so nothing already open goes stale."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_switch_branch_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return  # backed out of the message prompt -- treat the whole switch as cancelled
+                try:
+                    # These uncommitted files were never explicitly staged by the user (they're just
+                    # live edits on disk) -- stage all of them ourselves, since commit() only ever
+                    # commits what's staged and this whole flow's point is "commit them for me".
+                    vcs.stage_all(folder)
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to switch_branch() below, which overwrites/deletes
+            # exactly these uncommitted files on disk -- that overwrite *is* the discard.
+
         try:
             vcs.switch_branch(folder, name)
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("switched to branch %r for %s", name, folder)
         self.main_panel.reload_open_tabs_under(folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def _confirm_switch_branch_overwrite(self, dirty_names: list[str]) -> bool:
-        """Asks whether to proceed with a branch switch that would overwrite unsaved edits in
-        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        """Asks whether to proceed with a branch switch that would overwrite unsaved *editor* edits
+        in ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
         :meth:`_confirm_overwrite_rvt_changes`.
 
         Returns:
@@ -1564,6 +2095,111 @@ class MainWindow(QWidget):
             f"{joined}\n\nSwitch anyway, or cancel?"
         )
         box.addButton("Switch Anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
+
+    def _confirm_uncommitted_before_switch(self, paths: list[str]) -> str:
+        """Asks what to do about ``paths`` (already saved to disk, but never committed) before a
+        branch switch would silently overwrite them -- kept as its own method purely as a test seam,
+        same reasoning as :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``"cancel"``, ``"commit"`` (commit them first, then switch), or ``"discard"`` (switch
+            anyway, letting :func:`~in_reach.app.vcs.switch_branch` overwrite them).
+        """
+        joined = "\n".join(paths)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "You have uncommitted changes in the following files:\n\n"
+            f"{joined}\n\nSwitching branches will overwrite them. Commit first, discard and switch, "
+            "or cancel?"
+        )
+        commit_button = box.addButton("Commit First", QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton("Discard && Switch", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(commit_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is commit_button:
+            return "commit"
+        if clicked is discard_button:
+            return "discard"
+        return "cancel"
+
+    def _ask_commit_message(self) -> str:
+        """Kept as its own method purely as a test seam, same reasoning as
+        :meth:`~in_reach.ide.git_panel.GitPanel._ask_text`."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        text, ok = QInputDialog.getText(self, "Commit", "Commit message:")
+        return text.strip() if ok else ""
+
+    def vcs_merge_branch(self, source: str) -> None:
+        """"Merge Branch" (the Git panel's own button, PROMPT.md, a later pass: "we also need
+        buttons/functionality to: ... merge branch (this will need History Graph update to show
+        merging of branches)") -- :func:`~in_reach.app.vcs.merge_branch` checks the merged tree out
+        onto disk exactly like a branch switch does, so this takes the same unsaved-edits and
+        uncommitted-changes guards as :meth:`vcs_switch_branch` before calling it. A real conflict
+        (:class:`~in_reach.app.vcs.MergeConflictError`, a :class:`ValueError` subclass) surfaces its
+        own exact list of conflicting paths through the same generic ``ValueError`` handling every
+        other vcs action here already uses. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        dirty_names = self.main_panel.dirty_tab_names_under(folder)
+        if dirty_names and not self._confirm_merge_branch_overwrite(dirty_names):
+            return
+        from in_reach.app import vcs
+
+        uncommitted = vcs.uncommitted_changes(folder)
+        if uncommitted:
+            choice = self._confirm_uncommitted_before_switch([c.path for c in uncommitted])
+            if choice == "cancel":
+                return
+            if choice == "commit":
+                message = self._ask_commit_message()
+                if not message:
+                    return  # backed out of the message prompt -- treat the whole merge as cancelled
+                try:
+                    # See the identical comment in vcs_switch_branch -- these were never explicitly
+                    # staged by the user, so stage all of them ourselves before committing.
+                    vcs.stage_all(folder)
+                    vcs.commit(folder, message)
+                except ValueError as exc:
+                    QMessageBox.critical(self, "in-reach", str(exc))
+                    return
+            # "discard" falls straight through to merge_branch() below, which overwrites exactly
+            # these uncommitted files on disk with the merged tree's own content.
+
+        try:
+            vcs.merge_branch(folder, source)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("merged branch %r for %s", source, folder)
+        self.main_panel.reload_open_tabs_under(folder)
+        self._refresh_vcs_status(folder)
+
+    def _confirm_merge_branch_overwrite(self, dirty_names: list[str]) -> bool:
+        """Asks whether to proceed with a merge that would overwrite unsaved *editor* edits in
+        ``dirty_names`` -- kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``True`` for "Merge Anyway", ``False`` for "Cancel".
+        """
+        joined = "\n".join(dirty_names)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            "Merging will overwrite unsaved changes in the following open files:\n\n"
+            f"{joined}\n\nMerge anyway, or cancel?"
+        )
+        box.addButton("Merge Anyway", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
@@ -1583,7 +2219,7 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
-        self.git_panel.refresh()
+        _logger.info("deleted branch %r for %s", name, folder)
         self._refresh_vcs_status(folder)
 
     def _vcs_ref_label(self, folder: Path, ref: str) -> str:
@@ -1615,8 +2251,166 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "in-reach", str(exc))
             return
         title = f"{self._vcs_ref_label(folder, ref_a)} vs. {self._vcs_ref_label(folder, ref_b)}"
-        dialog = DiffDialog(self, title=title, diffs=diffs)
+        dialog = DiffDialog(self, title=title, folder=folder, ref_a=ref_a, ref_b=ref_b, diffs=diffs)
         dialog.exec()
+
+    def vcs_open_diff(self, rel_path: str) -> None:
+        """A file clicked in the Git panel's own "Changes" list -- PROMPT.md: "when clicking on
+        changes to a file (in the changes tab) a tab should appear showing the original on the
+        left and highlighted changes on the right (like vscode git)". Opens (or refreshes/switches
+        to, if already open) a :class:`~in_reach.ide.diff_view.DiffViewWidget` tab for ``rel_path``'s
+        own uncommitted change, in the currently active pane. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        old_text, new_text = vcs.uncommitted_file_diff(folder, rel_path)
+        self.main_panel.active_pane.open_diff(rel_path, old_text=old_text, new_text=new_text)
+
+    def vcs_open_file(self, rel_path: str) -> None:
+        """"Open File" (the Git panel's own Changes context menu, PROMPT.md: "in the changes it
+        should be possible to right click the file and then see: Open changes, open files, ...") --
+        opens ``rel_path`` as a normal, editable tab (the file's own *current* on-disk content, not
+        a read-only snapshot). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        self.main_panel.active_pane.open_file(folder / rel_path)
+
+    def vcs_open_file_head(self, rel_path: str) -> None:
+        """"Open File (HEAD)" (the Git panel's own Changes context menu) -- opens a read-only tab
+        showing ``rel_path``'s own content at ``HEAD``, not its current (uncommitted) on-disk
+        content. A no-op with no project open; reports rather than crashing if ``rel_path`` has no
+        ``HEAD`` copy at all yet (a newly added, never-committed file)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        head_text, _new_text = vcs.uncommitted_file_diff(folder, rel_path)
+        if head_text is None:
+            QMessageBox.information(self, "in-reach", f"{rel_path} has no HEAD version yet.")
+            return
+        self.main_panel.active_pane.open_head_file(rel_path, head_text)
+
+    def vcs_discard(self, rel_path: str) -> None:
+        """"Discard Changes" (the Git panel's own Changes context menu) -- reverts ``rel_path`` on
+        disk back to its own ``HEAD`` content (a newly-added file is deleted instead), after
+        confirming -- this can't be undone, unlike everything else this panel does (which only ever
+        adds to history). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        if not self._confirm_discard(rel_path):
+            return
+        from in_reach.app import vcs
+
+        try:
+            vcs.discard_uncommitted_change(folder, rel_path)
+        except ValueError as exc:
+            QMessageBox.critical(self, "in-reach", str(exc))
+            return
+        _logger.info("discarded uncommitted change to %r for %s", rel_path, folder)
+        self.main_panel.reload_open_tabs([folder / rel_path])
+        self._refresh_vcs_status(folder)
+
+    def _confirm_discard(self, rel_path: str) -> bool:
+        """Kept as its own method purely as a test seam, same reasoning as
+        :meth:`_confirm_switch_branch_overwrite`.
+
+        Returns:
+            ``True`` for "Discard Changes", ``False`` for "Cancel".
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(f'Discard changes to "{rel_path}"?\n\nThis can\'t be undone.')
+        box.addButton("Discard Changes", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.DestructiveRole
+
+    def vcs_reveal_in_explorer(self, rel_path: str) -> None:
+        """"Reveal in File Explorer" (the Git panel's own Changes context menu) -- same OS
+        file-explorer reveal as :meth:`~in_reach.ide.tabs.TabPane._reveal_in_os_explorer`. A no-op
+        with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        import subprocess
+
+        try:
+            subprocess.run(["explorer", "/select,", str(folder / rel_path)], check=False)
+        except OSError:
+            pass
+
+    def vcs_stage(self, paths: list[str]) -> None:
+        """"Stage Changes"/"Stage All" (the Git panel's own Changes context menu/button) -- PROMPT.md:
+        "changes should be staged, and then committed". A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        vcs.stage(folder, paths)
+        self._refresh_vcs_status(folder)
+
+    def vcs_unstage(self, paths: list[str]) -> None:
+        """"Unstage Changes"/"Unstage All" (the Git panel's own Staged Changes context menu/
+        button). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        vcs.unstage(folder, paths)
+        self._refresh_vcs_status(folder)
+
+    def vcs_commit_selected(self, sha: str) -> None:
+        """A commit row selected in the Git panel's own History graph -- PROMPT.md, a later pass:
+        "please make it so that when clicking in history on commits - it extends to show a list of
+        files changed". Fetches that commit's own changed-file list and hands it back to the panel
+        (which never calls :mod:`in_reach.app.vcs` directly). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        try:
+            files = vcs.commit_files_changed(folder, sha)
+        except ValueError:
+            return  # the graph's own selection is always a real commit -- a stale/bad sha is unusual
+        self.git_panel.set_commit_files(sha, files)
+
+    def vcs_open_commit_diff(self, sha: str, rel_path: str) -> None:
+        """A file clicked in the Git panel's own "Files Changed" list (or "View Diff" from its
+        context menu) -- opens a single, unified (not split) diff tab for ``rel_path`` as changed by
+        commit ``sha`` (PROMPT.md: "(which can then be clicked on to view (please note this should
+        be a single (not split) view, see sample.png for styling))"). A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        old_text, new_text = vcs.commit_file_diff(folder, sha, rel_path)
+        self.main_panel.active_pane.open_commit_diff(rel_path, sha, old_text=old_text, new_text=new_text)
+
+    def vcs_open_commit_file(self, sha: str, rel_path: str) -> None:
+        """"Open File" (the Git panel's own "Files Changed" list context menu, PROMPT.md: "and
+        right click should have the option to open file") -- opens a read-only tab showing
+        ``rel_path``'s own content as of commit ``sha``. A no-op with no project open, or if
+        ``rel_path`` doesn't exist as of that commit (it was removed by it)."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import vcs
+
+        _old_text, new_text = vcs.commit_file_diff(folder, sha, rel_path)
+        if new_text is None:
+            QMessageBox.information(self, "in-reach", f"{rel_path} doesn't exist as of this commit.")
+            return
+        self.main_panel.active_pane.open_commit_file(rel_path, sha, new_text)
 
     def vcs_restore(self, sha: str) -> None:
         """"Restore Selected" (the Git panel's own history list, PROMPT.md: "add any other
@@ -1638,8 +2432,8 @@ class MainWindow(QWidget):
         except ValueError as exc:
             QMessageBox.critical(self, "in-reach", str(exc))
             return
+        _logger.info("restored snapshot %s for %s", sha, folder)
         self.main_panel.reload_open_tabs_under(folder)
-        self.git_panel.refresh()
         self._refresh_vcs_status(folder)
 
     def _confirm_restore_overwrite(self, dirty_names: list[str]) -> bool:
@@ -1716,11 +2510,12 @@ class MainWindow(QWidget):
             return
         from in_reach.app.output_view import write_output_view
 
+        _logger.info("viewing compiled output for %s", folder)
         path = write_output_view(folder)
         self.main_panel.active_pane.open_file(path, force_reload=True)
 
     def open_notes(self) -> None:
-        """"Notes" (the Dashboard's own Documentation section, PROMPT.md) -- opens the active
+        """"Open Notes" (the ``>`` command palette, PROMPT.md) -- opens the active
         project's own freeform scratch notes file, ``Notes.txt`` or ``Notes.md`` per the saved
         :mod:`in_reach.app.notes_settings` preference (see :func:`~in_reach.app.notes_settings.
         ensure_notes_file`, which creates the target file from the same template ``Notes.txt``
@@ -1740,6 +2535,7 @@ class MainWindow(QWidget):
 
         notes_format = notes_settings.get_notes_format(self._notes_format_env_path())
         path = notes_settings.ensure_notes_file(folder, notes_format)
+        _logger.info("opening notes for %s", folder)
         self.main_panel.active_pane.open_file(path, editable_markdown=notes_format == notes_settings.FORMAT_MD)
 
     def _notes_format_env_path(self) -> Path:
@@ -1816,6 +2612,8 @@ class MainWindow(QWidget):
             script_path = folder / new_project.SCRIPT_DIRNAME / SCRIPT_FILENAME
             if not write_mglo(compiled, script_path, dest):
                 QMessageBox.critical(self, "in-reach", f"Couldn't write {dest.name}.")
+                return
+            _logger.info("exported %s to %s", folder, dest)
             return
 
         import shutil
@@ -1824,6 +2622,38 @@ class MainWindow(QWidget):
             shutil.copyfile(compiled, dest)
         except OSError as exc:
             QMessageBox.critical(self, "in-reach", f"Couldn't export {dest.name}:\n{exc}")
+            return
+        _logger.info("exported %s to %s", folder, dest)
+
+    def _open_builtin_folder(self, env_key: str) -> None:
+        """Handles :attr:`~in_reach.ide.explorer.ExplorerPanel.open_builtin_folder_requested` --
+        PROMPT.md's Dashboard "Quick Launch" "Built-in"/"Hot Reload" buttons. Resolves ``env_key``
+        (one of :mod:`in_reach.app.system_verify`'s own checklist keys, e.g. ``STANDARD_VARIANTS_
+        KEY``) against this window's own project-root ``.env`` -- the same one the Welcome tab's
+        Verify System Settings flow itself writes to (:class:`~in_reach.ide.verify_dialog.
+        VerifyDialog`) -- rather than the active gametype project's own folder, since these are
+        install-wide locations (Steam's own game/map variant folders, MCC's hot-reload folder), not
+        anything scoped to a single project.
+
+        Tells the user to run Verify System Settings first rather than silently doing nothing if
+        the checklist was never run (or that particular step never resolved) for this key.
+        """
+        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        value = env_file.get_env_values(env_path).get(env_key, "")
+        if not value or not Path(value).is_dir():
+            QMessageBox.information(
+                self,
+                "in-reach",
+                "This folder hasn't been resolved yet -- run Verify System Settings from the "
+                "Welcome tab first.",
+            )
+            return
+        self.open_folder_in_os_explorer(Path(value))
+
+    def open_folder_in_os_explorer(self, path: Path) -> None:
+        """Kept as its own method purely as a test seam (same reasoning as ``ask_open_folder``) --
+        opens ``path`` in the OS's own file explorer."""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _sync_project_title(self, folder: Path) -> None:
         """Brings every cached display of ``folder``'s own title -- any already-open editor's
@@ -1845,7 +2675,18 @@ class MainWindow(QWidget):
         nothing actually changed.
         """
         self.main_panel.refresh_project_titles()
-        self._update_status_project_label(folder)
+        self._update_quick_access_label(folder)
+
+    def _active_project_title(self) -> str:
+        """The active gametype project's own title, or a plain fallback with none open -- what a
+        "Move to Window" popout's own title bar shows (PROMPT.md: "the top of the popout window
+        should be called the gametype name (so that if multiple projects with multiple popouts are
+        open it doesnt get confusing)"), same source :meth:`_sync_project_title` itself refreshes
+        every other cached display of a project's title from."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return "in-reach"
+        return new_project.read_project_title(folder)
 
     def _rewatch_project_bin(self, _folder: Path | None) -> None:
         """Re-points :attr:`_bin_watcher` at the newly-active project's own freshly-*compiled*
@@ -1905,6 +2746,7 @@ class MainWindow(QWidget):
             if not dirty_names or self._confirm_overwrite_rvt_changes(dirty_names):
                 settings_path = folder / new_project.SETTINGS_DIRNAME / "settings.json"
                 category, category_icon = settings_io.load_meta_category(settings_path)
+                created_at = settings_io.load_meta_generated_at(settings_path)
                 map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
                 try:
                     resync_from_bin(
@@ -1912,6 +2754,7 @@ class MainWindow(QWidget):
                         folder,
                         category=category,
                         category_icon=category_icon,
+                        created_at=created_at,
                         map_entries=map_entries,
                     )
                 except Exception:  # noqa: BLE001 -- native/pydantic code can raise almost anything
@@ -1922,12 +2765,10 @@ class MainWindow(QWidget):
                     # PROMPT.md: "please also add a stats view into the dashboard" -- this resync
                     # just regenerated build/stats.autogenerated.json too.
                     self.explorer_panel.refresh_stats()
-                    # PROMPT.md: "every change should be traceable" -- RVT overwriting settings/
-                    # directly (outside the normal in-app save path _on_file_saved already covers)
-                    # is still a real change to the project's own tracked files.
-                    from in_reach.app import vcs
-
-                    vcs.record_change(folder)
+                    # RVT overwriting settings/ directly (outside the normal in-app save path
+                    # _on_file_saved already covers) is still a real change to the project's own
+                    # tracked files -- refreshes the uncommitted-changes badge/status the same way a
+                    # save does, no longer auto-commits it (see _on_file_saved's own docstring).
                     self._refresh_vcs_status(folder)
         # Some writers (RVT included, potentially) save via delete-then-recreate rather than an
         # in-place write, which silently drops the path from a QFileSystemWatcher -- re-add it so
