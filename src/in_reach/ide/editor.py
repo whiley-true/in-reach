@@ -14,6 +14,8 @@ Adds, on top of the base ``QPlainTextEdit`` (PROMPT.md, across two passes):
 - A breadcrumb bar pinned above the text -- the open file's own path, plus (for a ``.json`` file
   specifically) the live JSON structural path to wherever the cursor currently sits (see
   :mod:`in_reach.ide.json_breadcrumb`).
+- Megalo syntax highlighting (see :mod:`in_reach.ide.megalo_highlighter`) for a project's ``.mgl`` files,
+  ``script/output.txt`` and ``build/Compiled.txt``.
 - JSON syntax highlighting (see :mod:`in_reach.ide.json_highlighter`), attached only when the
   file's own extension is ``.json``.
 - A minimap pinned along the right edge, next to the vertical scrollbar (PROMPT.md: "a live code
@@ -80,6 +82,7 @@ from in_reach.ide.find_replace import FindReplaceBar
 from in_reach.ide.json_breadcrumb import json_breadcrumb_path
 from in_reach.ide.json_highlighter import JsonSyntaxHighlighter
 from in_reach.ide.json_position import find_value_spans
+from in_reach.ide.megalo_highlighter import MegaloSyntaxHighlighter
 
 # Padding on each side of the line-number digits, so they don't sit flush against the text or the
 # panel's own edge.
@@ -165,6 +168,16 @@ def _find_project_title(path: Path) -> str | None:
         if (ancestor / new_project.NOTES_FILENAME).is_file():
             return new_project.read_project_title(ancestor)
     return None
+
+
+def is_megalo_path(path: Path | None) -> bool:
+    """Whether ``path`` is Megalo script text: any ``.mgl`` file, or the ``output.txt`` a project's script lives in and the
+    ``Compiled.txt`` built from it."""
+    if path is None:
+        return False
+    if path.suffix.lower() == ".mgl":
+        return True
+    return path.name in ("output.txt", "Compiled.txt") and path.parent.name in ("script", "build")
 
 
 class _LineNumberArea(QWidget):
@@ -419,7 +432,7 @@ class _PlainTextEditor(QPlainTextEdit):
             document.setDocumentLayout(QPlainTextDocumentLayout(document))
         self.setDocument(document)
         self.path: Path | None = None
-        self._highlighter: JsonSyntaxHighlighter | None = None
+        self._highlighter: JsonSyntaxHighlighter | MegaloSyntaxHighlighter | None = None
         self._fold_ranges: dict[int, int] = {}
         self._collapsed_folds: set[int] = set()
         #: Every current schema error's own ``(start, end, message)`` character span -- what
@@ -472,6 +485,9 @@ class _PlainTextEditor(QPlainTextEdit):
         if path is not None and path.suffix.lower() == ".json":
             base_color = self.palette().color(QPalette.ColorRole.Base)
             self._highlighter = JsonSyntaxHighlighter(self.document(), base_color=base_color)
+        elif is_megalo_path(path):
+            base_color = self.palette().color(QPalette.ColorRole.Base)
+            self._highlighter = MegaloSyntaxHighlighter(self.document(), base_color=base_color)
         self.refresh_font_scale()
         # Also re-derives fold ranges, not just the breadcrumb -- matters for the split-pane
         # duplicate path (TabPane._duplicate_current_tab), which calls this *after* swapping in

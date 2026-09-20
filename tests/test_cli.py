@@ -168,3 +168,106 @@ def test_bare_invocation_shows_help(runner: CliRunner) -> None:
     result = runner.invoke(main, [])
 
     assert "Usage:" in result.output
+
+
+# -- script projects ------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hill(tmp_path: Path) -> Path:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "app" / "script_project"))
+    from hill_project import hill_rush
+
+    return hill_rush(tmp_path / "proj")
+
+
+def test_lint_reports_a_clean_project(runner: CliRunner, hill: Path) -> None:
+    result = runner.invoke(main, ["lint", str(hill)])
+
+    assert result.exit_code == 0 and "0 errors, 0 warnings" in result.output
+    assert not (hill / "build").exists()  # lint writes nothing
+
+
+def test_lint_reports_each_problem_at_its_file_and_line_and_exits_nonzero(runner: CliRunner, tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "app" / "script_project"))
+    from hill_project import hill_rush
+
+    folder = hill_rush(tmp_path / "proj", blocks__setup_dot_mgl="-- @number a\n-- @number a\n")
+
+    result = runner.invoke(main, ["lint", str(folder)])
+
+    assert result.exit_code == 1
+    assert "blocks/setup.mgl:2" in result.output and "[IR006]" in result.output
+    assert "1 error, 0 warnings" in result.output
+
+
+def test_lint_defaults_to_the_current_directory(runner: CliRunner, hill: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(hill)
+
+    result = runner.invoke(main, ["lint"])
+
+    assert result.exit_code == 0 and "0 errors" in result.output
+
+
+def test_lint_of_a_folder_that_is_not_a_script_project_says_so(runner: CliRunner, tmp_path: Path) -> None:
+    result = runner.invoke(main, ["lint", str(tmp_path)])
+
+    assert result.exit_code != 0 and "not a script project" in result.output
+
+
+def test_link_writes_the_build_and_reports_what_it_did(runner: CliRunner, hill: Path) -> None:
+    result = runner.invoke(main, ["link", str(hill)])
+
+    assert result.exit_code == 0, result.output
+    assert "blocks   SETUP -> HILL_PASS -> WIN_CHECK" in result.output
+    assert "fused    HILL_PASS <- hill_score.score + hill_buff.buff" in result.output
+    assert "global.number 2/12" in result.output
+    assert "wrote    build/Compiled.txt" in result.output
+    assert (hill / "build" / "Compiled.txt").is_file()
+
+
+def test_link_dry_run_writes_nothing(runner: CliRunner, hill: Path) -> None:
+    result = runner.invoke(main, ["link", "--dry-run", str(hill)])
+
+    assert result.exit_code == 0 and "dry run: nothing written" in result.output
+    assert not (hill / "build").exists() and not (hill / "settings").exists()
+
+
+def test_link_of_a_broken_project_fails_and_writes_nothing(runner: CliRunner, tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "app" / "script_project"))
+    from hill_project import hill_rush
+
+    folder = hill_rush(tmp_path / "proj", project_dot_toml="[project\n")
+
+    result = runner.invoke(main, ["link", str(folder)])
+
+    assert result.exit_code != 0 and "nothing was written" in result.output
+    assert not (folder / "build").exists()
+
+
+def test_link_lists_a_merge_it_declined_with_the_reason(runner: CliRunner, tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "app" / "script_project"))
+    from hill_project import hill_rush
+
+    folder = hill_rush(
+        tmp_path / "proj",
+        modules__hill_score__hill_score_dot_mgl="-- @fragment HILL_PASS.score\n-- @loop player\n-- @fusion never\nx = 1\n",
+    )
+
+    result = runner.invoke(main, ["link", "--dry-run", str(folder)])
+
+    assert "kept     hill_score.score | hill_buff.buff: @fusion never" in result.output
+
+
+def test_help_lists_the_script_project_commands(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["help"])
+
+    assert "lint" in result.output and "link" in result.output

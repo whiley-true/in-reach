@@ -394,6 +394,8 @@ class _ViewMenuButton(QToolButton):
         menu.addSeparator()
 
         _add_action(menu, "View Logs", window.view_logs, _SHORTCUT_VIEW_LOGS)
+        # No shortcut: VSCode's own binding for this, Ctrl+Shift+M, is already Launch Halo MCC here.
+        _add_action(menu, "View Problems", window.view_problems)
         self.setMenu(menu)
 
 
@@ -794,6 +796,13 @@ class MainWindow(QWidget):
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
         self._main_splitter.addWidget(self._bottom_panel_card)
+        self.bottom_panel.problems_panel.open_requested.connect(self._on_problem_activated)
+        self.scripts_panel.profile_selected.connect(self._set_build_profile)
+        self.scripts_panel.check_requested.connect(self.check_script_project)
+        self.scripts_panel.link_requested.connect(self.link_script_project)
+        self.scripts_panel.create_project_requested.connect(self.create_script_project)
+        self.scripts_panel.new_module_requested.connect(self.new_script_module)
+        self.scripts_panel.open_file_requested.connect(self._on_explorer_file_activated)
         self._main_splitter.setStretchFactor(0, 1)
         self._main_splitter.setStretchFactor(1, 0)
         self._main_splitter.setSizes([700, 200])
@@ -1153,6 +1162,11 @@ class MainWindow(QWidget):
             Command(label="Playtest", action=lambda: self.activity_bar.playtest_button.click()),
             Command(label="LLM", action=lambda: self.activity_bar.llm_button.click()),
             Command(label="View Logs", action=self.view_logs, detail=_SHORTCUT_VIEW_LOGS),
+            Command(label="View Problems", action=self.view_problems),
+            Command(label="Check Script Project", action=self.check_script_project),
+            Command(label="Link Script Project", action=self.link_script_project),
+            Command(label="Create Script Project", action=self.create_script_project),
+            Command(label="New Script Module", action=self.new_script_module),
             Command(label="Launch Halo MCC", action=self.launch_mcc_from_menu, detail=_SHORTCUT_LAUNCH_MCC),
             Command(label="Launch RVT", action=self.launch_rvt_from_menu, detail=_SHORTCUT_LAUNCH_RVT),
             Command(label="New Kanban Board", action=self.new_kanban_board),
@@ -1923,6 +1937,7 @@ class MainWindow(QWidget):
         need re-checking on every tab switch, not just when a project first opens/closes."""
         self.explorer_panel.rvt_button.setEnabled(folder is not None)
         self._refresh_apply_enabled(folder)
+        self._refresh_script_views(folder)
 
     def _sync_project_dependent_views(self, folder: Path | None) -> None:
         """Collapses the primary sidebar whenever the active project closes (nothing left open in
@@ -1953,10 +1968,17 @@ class MainWindow(QWidget):
             self.activity_bar.set_active_view(DEFAULT_VIEW)
         self._had_project = has_project
 
-    def _refresh_apply_enabled(self, folder: Path | None) -> None:
+    @staticmethod
+    def _has_unapplied_changes(folder: Path) -> bool:
+        """Whether Apply still has something to build: a ``settings/`` file that differs from its last build, or (for a
+        linked script project) script changes nothing has built yet. What the Apply button's enabled state, the
+        commit warning and the export prompt all agree on."""
         from in_reach.app import apply_settings
 
-        enabled = folder is not None and apply_settings.settings_have_unapplied_changes(folder)
+        return apply_settings.settings_have_unapplied_changes(folder) or apply_settings.script_has_unapplied_changes(folder)
+
+    def _refresh_apply_enabled(self, folder: Path | None) -> None:
+        enabled = folder is not None and self._has_unapplied_changes(folder)
         self.activity_bar.set_apply_enabled(enabled)
         # PROMPT.md: "it also should not be possible to stamp a non compiled gametype" -- "compiled"
         # here means the same "settings/ has nothing Apply would still need to pick up" state the
@@ -1984,6 +2006,7 @@ class MainWindow(QWidget):
             self._refresh_vcs_status(folder)
             # A saved profile file (or the active-profile pointer) can change what the indicator says.
             self._refresh_profile_indicator(folder)
+            self._refresh_script_views(folder)
 
     def _on_notepad_saved(self, path: Path) -> None:
         """The Dashboard Notepad just autosaved ``path`` -- brings any open editor tab for the same
@@ -2067,15 +2090,15 @@ class MainWindow(QWidget):
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import apply_settings, vcs
+        from in_reach.app import vcs
 
-        if apply_settings.settings_have_unapplied_changes(folder):
+        if self._has_unapplied_changes(folder):
             choice = self._confirm_commit_uncompiled()
             if choice == "cancel":
                 return
             if choice == "compile":
                 self.apply_settings_changes()
-                if apply_settings.settings_have_unapplied_changes(folder):
+                if self._has_unapplied_changes(folder):
                     return  # compile failed, or still needed -- don't commit on top of that
 
         try:
@@ -2123,8 +2146,14 @@ class MainWindow(QWidget):
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import vcs
+        from in_reach.app import script_preprocess, vcs
 
+        # A release is normally stamped from the release profile. Nothing is switched for the user (the choice is a
+        # project file the stamp records), but a project that has a release profile and isn't on it gets asked.
+        active = script_preprocess.active_profile_name(folder)
+        if "release" in script_preprocess.list_profiles(folder) and active != "release":
+            if not self._confirm_stamp_off_release_profile(active):
+                return
         try:
             vcs.stamp(folder, message, version=version)
         except ValueError as exc:
@@ -2132,6 +2161,27 @@ class MainWindow(QWidget):
             return
         _logger.info("stamped release %r (v%s) for %s", message, version, folder)
         self._refresh_vcs_status(folder)
+
+    def _confirm_stamp_off_release_profile(self, active: str | None) -> bool:
+        """Asks whether to stamp a release while the build profile isn't ``release``. Kept as its own method purely as
+        a test seam, same convention as :meth:`_confirm_commit_uncompiled`. ``active`` is the profile in use (``None``:
+        none chosen)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("in-reach")
+        box.setText(
+            f"The active build profile is {active!r}, not 'release'." if active else "No build profile is active, not 'release'."
+        )
+        box.setInformativeText(
+            "This project has a 'release' profile. The stamp records the project as it is now, including which profile "
+            "is active, so a stamp taken here won't be a release build. Switch profile first (Select Build Profile in "
+            "the command palette), or stamp anyway?"
+        )
+        stamp_button = box.addButton("Stamp Anyway", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        return box.clickedButton() is stamp_button
 
     def vcs_new_branch(self, name: str) -> None:
         """"New Branch" (the Git panel's own button) -- PROMPT.md: "also ability to create a new
@@ -2644,6 +2694,7 @@ class MainWindow(QWidget):
         project_dir = project.get_project_dir(self.root_dir)
         self.activity_bar.apply_button.setEnabled(False)
         result = self._run_compile(project_dir, folder)
+        self._report_build_problems(folder, result)  # every message, at its file and line, on the Problems tab
         if not result.success:
             from in_reach.app.rvt.compile import format_build_result
 
@@ -2718,6 +2769,7 @@ class MainWindow(QWidget):
             return
         _logger.info("build profile for %s set to %s", folder, name or "none")
         self._refresh_profile_indicator(folder)
+        self._refresh_script_views(folder)  # the profile's flags and constants change what a script project builds
 
     def _refresh_profile_indicator(self, folder: Path | None) -> None:
         """The status bar's left-edge "Profile: <name>" segment for ``folder``: hidden with no project
@@ -2735,6 +2787,174 @@ class MainWindow(QWidget):
         commands = self._build_profile_commands()
         if commands:
             self.quick_access.open_action_list(commands, "Select Build Profile")
+
+    # -- script projects (script/project.toml) ------------------------------------------------------
+
+    def _refresh_script_views(self, folder: Path | None) -> None:
+        """Re-checks ``folder``'s script project (if it is one -- see :mod:`in_reach.app.script_project`) and updates
+        what shows the result: the bottom panel's Problems tab and the Scripts view. Nothing is written. A project that
+        is a single script (or no project) empties the Problems tab and shows the Scripts view's own explanation."""
+        from in_reach.app import script_preprocess
+        from in_reach.app.script_project import is_linked, link, read_link_map
+        from in_reach.ide.problems_panel import problems_from_diagnostics
+
+        bottom = getattr(self, "bottom_panel", None)  # a project can open while the window is still being built
+        if bottom is None:
+            return
+        if folder is None:
+            bottom.problems_panel.clear()
+            self.scripts_panel.show_not_a_project()
+            return
+        if not is_linked(folder):
+            bottom.problems_panel.clear()
+            self.scripts_panel.show_unlinked(folder)
+            return
+        result = link(folder, write=False)
+        if not result.ok:
+            result.link_map = read_link_map(folder)  # a broken project still shows what it last built
+        bottom.problems_panel.set_problems(problems_from_diagnostics(folder, result.diagnostics))
+        self.scripts_panel.show_link(
+            folder, result, script_preprocess.list_profiles(folder), script_preprocess.active_profile_name(folder)
+        )
+
+    def view_problems(self) -> None:
+        """"View Problems" -- opens the bottom panel onto its Problems tab, showing the panel first if it was collapsed."""
+        self.top_bar.panel_toggle.setChecked(True)
+        self.bottom_panel.show_problems()
+
+    def _on_problem_activated(self, path: Path, line_number: int) -> None:
+        """A row of the Problems tab: opens its file, at its line when it has one."""
+        if line_number > 0:
+            self.main_panel.active_pane.open_file_at_line(path, line_number)
+        else:
+            self.main_panel.active_pane.open_file(path)
+
+    def _report_build_problems(self, folder: Path, result) -> None:
+        """Shows an Apply's compiler messages on the Problems tab. A failed build replaces what was there and brings the
+        tab forward; a successful one only adds the warnings the project's own check didn't already list."""
+        from in_reach.app.script_project import is_linked
+        from in_reach.ide.problems_panel import problems_from_build
+
+        panel = self.bottom_panel.problems_panel
+        linked = is_linked(folder)
+        build = problems_from_build(folder, result, linked=linked)
+        if not result.success:
+            panel.set_problems(build)
+            self.view_problems()
+            return
+        self._refresh_script_views(folder)
+        shown = {(p.code, p.path, p.line) for p in panel.problems() if p.code}
+        extra = [p for p in build if p.severity != "notice" and not (p.code and (p.code, p.path, p.line) in shown)]
+        if extra:
+            panel.set_problems(panel.problems() + extra)
+
+    def check_script_project(self) -> None:
+        """"Check Script Project" -- runs the active script project's checks (project model, lint, allocation, fusion)
+        and shows the result on the Problems tab, without writing anything. A project that isn't a script project says
+        so. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app.script_project import is_linked
+
+        if not is_linked(folder):
+            QMessageBox.information(
+                self, "in-reach",
+                "This project's script is a single file, script/output.txt, so there is nothing to check here.\n\n"
+                "Use \"Create Script Project\" to split it into blocks and modules.",
+            )
+            return
+        self._refresh_script_views(folder)
+        errors, warnings = self.bottom_panel.problems_panel.counts()
+        _logger.info("checked the script project of %s: %d error(s), %d warning(s)", folder, errors, warnings)
+        if errors or warnings:
+            self.view_problems()
+
+    def link_script_project(self) -> None:
+        """"Link Script Project" -- assembles the active script project into ``build/Compiled.txt`` and its link map
+        (and adds any trait sets, options and widgets it declares to ``settings/script_settings.json``) without
+        compiling. Problems go to the Problems tab. A no-op with no project open or for a single-file project."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app.script_project import is_linked, link
+
+        if not is_linked(folder):
+            self.check_script_project()  # says why there is nothing to link
+            return
+        result = link(folder, write=True)
+        _logger.info(
+            "linked %s: %s (%d file(s) written)", folder, "ok" if result.ok else "failed", len(result.written)
+        )
+        self._refresh_script_views(folder)
+        self._refresh_apply_enabled(folder)
+        if not result.ok:
+            self.view_problems()
+
+    def create_script_project(self) -> None:
+        """"Create Script Project" -- turns the active project's single script into a script project: adds
+        ``script/project.toml`` and moves the script into ``script/blocks/main.mgl`` (asks first). A no-op with no
+        project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import script_project
+
+        if script_project.is_linked(folder):
+            QMessageBox.information(self, "in-reach", "This project is already a script project.")
+            return
+        if not self._confirm_create_script_project():
+            return
+        try:
+            written = script_project.create_project(folder)
+        except (ValueError, OSError) as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't create a script project:\n{exc}")
+            return
+        _logger.info("created a script project for %s", folder)
+        self._refresh_script_views(folder)
+        self._refresh_apply_enabled(folder)
+        self.main_panel.active_pane.open_file(written[-1])
+
+    def _confirm_create_script_project(self) -> bool:
+        """Kept as its own method purely as a test seam, same convention as :meth:`_confirm_overwrite_rvt_changes`."""
+        answer = QMessageBox.question(
+            self,
+            "in-reach",
+            "Turn this project's script into a script project?\n\n"
+            "script/output.txt is copied to script/blocks/main.mgl and script/project.toml is added. From then on the "
+            "project is built from its blocks and modules, and script/output.txt is no longer compiled.",
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def new_script_module(self) -> None:
+        """"New Script Module" -- asks for a name and adds a module to the active script project (a folder under
+        ``script/modules/`` and an entry in ``project.toml``), opening its first file. A no-op with no project open."""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return
+        from in_reach.app import script_project
+
+        if not script_project.is_linked(folder):
+            self.check_script_project()  # says why, and how to make it a script project
+            return
+        name = self._ask_module_name()
+        if not name:
+            return
+        try:
+            written = script_project.create_module(folder, name)
+        except (ValueError, OSError) as exc:
+            QMessageBox.critical(self, "in-reach", f"Couldn't create the module:\n{exc}")
+            return
+        _logger.info("created module %s in %s", name, folder)
+        self._refresh_script_views(folder)
+        self.main_panel.active_pane.open_file(written[1])
+
+    def _ask_module_name(self) -> str:
+        """The new module's name, or ``""`` if cancelled. A test seam, like :meth:`_confirm_create_script_project`."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, accepted = QInputDialog.getText(self, "New Script Module", "Module name:")
+        return name.strip() if accepted else ""
 
     # -- Kanban (PROMPT.md: "the first pass of Kanban functionality") -----------------------------
 
@@ -2844,9 +3064,7 @@ class MainWindow(QWidget):
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import apply_settings
-
-        if apply_settings.settings_have_unapplied_changes(folder) and not self._confirm_compile_before_export():
+        if self._has_unapplied_changes(folder) and not self._confirm_compile_before_export():
             return
 
         project_dir = project.get_project_dir(self.root_dir)

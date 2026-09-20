@@ -55,6 +55,8 @@ _PERCENT = re.compile(r"-?\d+%")
 _QUOTED = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 _DIRECTIVE = re.compile(r"^\s*--\s*@(if|else|end)(?=\s|$)(.*)$")
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
+# An `-- @name ...` annotation line (see megalo_ast.annotations), up to where its arguments start. @doc is prose.
+_ANNOTATION = re.compile(r"^(\s*--\s*@(?!doc\b)[A-Za-z][A-Za-z0-9_-]*)(.*)$")
 
 
 class PreprocessError(ValueError):
@@ -268,7 +270,7 @@ def preprocess(source: str, profile: Profile | None = None) -> str:
             _apply_directive(keyword, argument, number, flags, stack, active)
             out.append(raw if visible else eol)
             continue
-        out.append(_substitute(body, number, profile) + eol if active else eol)
+        out.append(_substitute_line(body, number, profile) + eol if active else eol)
     if stack:
         raise PreprocessError("'-- @if' is never closed with '-- @end'", stack[-1].line)
     return "".join(out)
@@ -294,8 +296,22 @@ def _apply_directive(keyword: str, argument: str, number: int, flags: frozenset[
         stack[-1].seen_else = True
 
 
+def _substitute_line(line: str, number: int, profile: Profile | None) -> str:
+    """:func:`_substitute` for one line, which also fills an annotation's arguments: ``-- @ptimer t
+    default=${interval}`` is how a module's parameter reaches a declaration, so it has to be substituted even
+    though it is a comment. Only the arguments -- not the ``-- @`` prefix, a ``-- note`` after them, or an
+    ``@doc`` line's prose."""
+    annotation = _ANNOTATION.match(line)
+    if annotation is None:
+        return _substitute(line, number, profile)
+    prefix = annotation.group(1)
+    # Blank the prefix instead of cutting it off, so a column in an error is still a column in the real line.
+    return prefix + _substitute(" " * len(prefix) + annotation.group(2), number, profile)[len(prefix):]
+
+
 def _substitute(line: str, number: int, profile: Profile | None) -> str:
-    """Replaces ``${NAME}`` in one line of code -- never inside a ``--`` comment."""
+    """Replaces ``${NAME}`` in one line of code -- never inside a ``--`` comment (but see
+    :func:`_substitute_line`, for annotations)."""
     if "${" not in line:
         return line
     out: list[str] = []

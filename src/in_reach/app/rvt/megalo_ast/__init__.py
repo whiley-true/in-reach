@@ -27,12 +27,16 @@ from .nodes import (
     IntLiteral, Member, PercentLiteral, Script, SourceSpan, Statement, StringLiteral, UnaryOp,
     VariableDeclaration,
 )
-from .parser import MegaloParseError, parse
+from .annotations import (
+    Annotation, AnnotationDiagnostic, Annotations, parse_annotations,
+)
+from .parser import MegaloParseError, parse, parse_expression
 from .unparse import render_expr, unparse
 from .visit import find_at, iter_children, walk
 
 __all__ = [
-    "parse", "unparse", "render_expr", "walk", "iter_children", "find_at",
+    "parse", "parse_expression", "unparse", "render_expr", "walk", "iter_children", "find_at",
+    "parse_annotations", "Annotations", "Annotation", "AnnotationDiagnostic",
     "resolve_aliases", "MegaloAliasError", "RESERVED_NAMES",
     "MegaloLexError", "MegaloParseError",
     "Script", "SourceSpan", "Expression", "Statement",

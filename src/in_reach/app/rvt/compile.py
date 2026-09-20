@@ -63,6 +63,8 @@ from pydantic import BaseModel
 from in_reach.app import logging_setup, new_project, script_preprocess
 from in_reach.app.blank_variant import resolve_blank_variant
 
+from in_reach.app.script_project import ProjectDiagnostic, is_linked, link, record_counters
+
 from . import decompile, megalo_compiler, settings_io, settings_writer, strings_io, strings_writer, template_source
 from .decompile import write_build_snapshot
 from .rvt_bridge import get_rvt
@@ -78,6 +80,8 @@ class BuildMessage(BaseModel):
     line: int
     col: int
     text: str
+    file: str = ""  # relative to script/ -- set for a linked project, where a message belongs to one of many files
+    code: str = ""  # the project check's own code (IR006, ...), for a message that came from the linker
 
 
 class BuildResult(BaseModel):
@@ -117,7 +121,8 @@ def format_build_result(result: BuildResult) -> str:
         ("notice", result.notices),
     ):
         for message in messages:
-            lines.append(f"{label} ({message.line}:{message.col}): {message.text}")
+            where = f"{message.file}:" if message.file else ""
+            lines.append(f"{label} ({where}{message.line}:{message.col}): {message.text}")
     return "\n".join(lines)
 
 
@@ -226,6 +231,41 @@ def _preprocess_failure(exc: script_preprocess.PreprocessError) -> BuildResult:
     return BuildResult(success=False, failure=f"{exc.path.name}, line {exc.line}: {exc.message}")
 
 
+def _diagnostic_message(diagnostic: ProjectDiagnostic) -> BuildMessage:
+    hint = f" ({diagnostic.hint})" if diagnostic.hint else ""
+    return BuildMessage(
+        line=diagnostic.line, col=diagnostic.col + 1 if diagnostic.line else 0,
+        text=f"{diagnostic.message} [{diagnostic.code}]{hint}", file=diagnostic.file, code=diagnostic.code,
+    )
+
+
+def _link_failure(linked) -> BuildResult:
+    """A :class:`BuildResult` for a linked project that couldn't be linked: every problem, located in its file."""
+    return BuildResult(
+        success=False,
+        errors=[_diagnostic_message(d) for d in linked.diagnostics if d.severity == "error"],
+        warnings=[_diagnostic_message(d) for d in linked.diagnostics if d.severity == "warning"],
+        failure="The project couldn't be linked -- see the errors.",
+    )
+
+
+def _relocate(messages: list[BuildMessage], link_map: dict | None) -> list[BuildMessage]:
+    """Compiler messages about ``build/Compiled.txt`` as messages about the source line that produced it, using the
+    link map's ``source_lines``. A line the linker wrote itself (a ``declare``, an ``alias``, a trigger's ``for
+    each``) stays a message about ``build/Compiled.txt``. Without a link map (an ordinary project) nothing moves."""
+    if link_map is None:
+        return messages
+    runs = link_map.get("source_lines", [])
+    moved: list[BuildMessage] = []
+    for message in messages:
+        run = next((r for r in runs if r["compiled"] <= message.line < r["compiled"] + r["count"]), None)
+        if run is None:
+            moved.append(message.model_copy(update={"file": "../build/Compiled.txt"}))
+        else:
+            moved.append(message.model_copy(update={"file": run["file"], "line": run["source"] + message.line - run["compiled"]}))
+    return moved
+
+
 def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
     """The real compile work -- only ever called from :mod:`in_reach.app.rvt.compile_subprocess`,
     inside the isolated child process :func:`_run_compile_isolated` spawns. Never call this
@@ -234,6 +274,15 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     settings_dir = folder / new_project.SETTINGS_DIRNAME
     script_dir = folder / new_project.SCRIPT_DIRNAME
     settings_path = settings_dir / "settings.json"
+
+    # A linked project (script/project.toml) is built from its blocks and modules: link them first -- the linker
+    # may add trait sets, options and widgets to settings/script_settings.json, which must be there before the
+    # settings are read and applied below.
+    linked = link(folder, write=True) if is_linked(folder) else None
+    if linked is not None and not linked.ok:
+        return _link_failure(linked)
+    link_map = linked.link_map if linked is not None else None
+
     try:
         settings = load_game_settings(settings_path)
     except (OSError, ValueError) as exc:
@@ -252,6 +301,8 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     mp = variant.multiplayer
     content_header = variant.content_header
     result = BuildResult(success=True)
+    if linked is not None:
+        result.warnings = [_diagnostic_message(d) for d in linked.diagnostics if d.severity == "warning"]
 
     if mp is not None:
         script_path = script_dir / decompile.SCRIPT_FILENAME
@@ -259,10 +310,13 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         # Apply the active environment profile (its ${CONSTANTS} and -- @if blocks) *first*: everything
         # below -- the unchanged-since-decompile check, the in-house compiler, the native fallback -- must
         # see the text that's actually being built, not the source with its directives still in.
-        try:
-            source = script_preprocess.preprocess_project(folder, raw_source)
-        except script_preprocess.PreprocessError as exc:
-            return _preprocess_failure(exc)
+        if linked is not None:
+            source = linked.compiled  # the linker has already applied the profile to every file
+        else:
+            try:
+                source = script_preprocess.preprocess_project(folder, raw_source)
+            except script_preprocess.PreprocessError as exc:
+                return _preprocess_failure(exc)
         # PROMPT.md: "we want to make sure when we compile or decompile a script it processes the
         # code correctly ... i want a working compiler/decompiler we can rely on" -- confirmed by
         # direct testing that mp.compile_script() is not a stable fixed point over its own
@@ -345,11 +399,20 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 variant = rvt.load(str(variant_source_path))
                 mp = variant.multiplayer
                 content_header = variant.content_header
+                if linked is not None:
+                    # The native compiler can't create a trait set, option or widget, only refer to one that's there
+                    # -- and the linker has just written the ones the project declares. Grow the fresh variant to
+                    # match first, or a mistake elsewhere in the script is reported next to a spurious "the maximum
+                    # defined index is 1".
+                    try:
+                        settings_writer.reconcile_script_tables(rvt, mp, settings.multiplayer.script_settings)
+                    except ValueError:
+                        pass  # the same problem is reported, properly, once the compile has succeeded
                 compile_result = mp.compile_script(source)
-                result.fatal_errors = _messages(compile_result.fatal_errors)
-                result.errors = _messages(compile_result.errors)
-                result.warnings = _messages(compile_result.warnings)
-                result.notices = _messages(compile_result.notices)
+                result.fatal_errors = _relocate(_messages(compile_result.fatal_errors), link_map)
+                result.errors = _relocate(_messages(compile_result.errors), link_map)
+                result.warnings = result.warnings + _relocate(_messages(compile_result.warnings), link_map)
+                result.notices = _relocate(_messages(compile_result.notices), link_map)
                 if not compile_result.success:
                     result.success = False
                     result.failure = "Megalo compile failed -- see .errors/.fatal_errors for details."
@@ -420,6 +483,13 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 settings_writer.apply_firefight_settings(ff, settings.firefight)
             except ValueError as exc:
                 return BuildResult(success=False, failure=f"Failed to apply settings: {exc}")
+
+    if linked is not None and mp is not None:
+        # The engine's caps on triggers/conditions/actions are only measurable on the built variant. A dry run
+        # reports how close the script is; a real build records the counts in the link map for the budget panel.
+        counts = mp.get_full_size_data().counts
+        near_cap = record_counters(folder, counts) if save else []
+        result.warnings += [_diagnostic_message(d) for d in near_cap]
 
     if save:
         out_path = new_project.compiled_variant_path(folder)

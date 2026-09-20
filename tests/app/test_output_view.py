@@ -107,3 +107,32 @@ def test_with_no_profile_and_no_directives_the_view_is_exactly_what_it_always_wa
     (tmp_path / "script" / "output.txt").write_text("do stuff\n", encoding="utf-8")
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
     assert text.endswith("do stuff\n") and "NOT PREPROCESSED" not in text
+
+
+def test_a_linked_projects_view_is_the_linkers_script_and_writes_nothing_else(tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "script_project"))
+    from hill_project import hill_rush
+
+    hill_rush(tmp_path)
+
+    path = output_view.write_output_view(tmp_path)
+
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("-- in-reach build: hill_rush") and "alias g_phase = global.number[1]" in text
+    assert sorted(p.name for p in (tmp_path / "build").iterdir()) == ["Compiled.txt"]  # no link map, no settings
+    assert not (tmp_path / "settings").exists()
+
+
+def test_a_linked_project_that_does_not_link_says_why_in_its_view(tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent / "script_project"))
+    from hill_project import hill_rush
+
+    hill_rush(tmp_path, blocks__setup_dot_mgl="-- @number a\n-- @number a\n")
+
+    text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
+
+    assert "-- NOT LINKED: blocks/setup.mgl:2:" in text and "[IR006]" in text

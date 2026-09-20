@@ -505,9 +505,9 @@ def test_bottom_panel_has_cyclable_stub_tabs(window: MainWindow) -> None:
     # PROMPT.md: "in the bottom panel please make the first tab logs".
     bottom = window.bottom_panel
     labels = [bottom.tabText(i) for i in range(bottom.count())]
-    assert labels == ["Logs", "text2", "text3"]
+    assert labels == ["Logs", "Problems", "text3"]
     bottom.setCurrentIndex(1)
-    assert bottom.tabText(bottom.currentIndex()) == "text2"
+    assert bottom.tabText(bottom.currentIndex()) == "Problems"
 
 
 def test_show_logs_switches_the_bottom_panel_to_the_logs_tab(window: MainWindow) -> None:
@@ -5199,6 +5199,7 @@ def test_view_menu_has_command_palette_appearance_panel_switches_and_view_logs_i
         "Playtest",
         "LLM",
         "View Logs",
+        "View Problems",
     ]
     command_palette_action = next(a for a in menu.actions() if a.text() == "Command Palette")
     assert command_palette_action.shortcut().toString() == "Ctrl+Shift+P"

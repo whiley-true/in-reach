@@ -226,7 +226,7 @@ def test_a_json_path_attaches_a_highlighter(qtbot) -> None:
 
 
 def test_a_non_json_path_does_not_attach_a_highlighter(qtbot) -> None:
-    editor = TextEditorWidget(path=Path("/project/script/output.txt"))
+    editor = TextEditorWidget(path=Path("/project/notes.txt"))
     qtbot.addWidget(editor)
 
     assert editor._highlighter is None
@@ -244,7 +244,7 @@ def test_set_path_attaches_and_detaches_the_highlighter(qtbot) -> None:
     qtbot.addWidget(editor)
     assert editor._highlighter is not None
 
-    editor.set_path(Path("/project/script/output.txt"))
+    editor.set_path(Path("/project/notes.txt"))
 
     assert editor._highlighter is None
 

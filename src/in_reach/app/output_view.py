@@ -21,6 +21,7 @@ from pathlib import Path
 from in_reach.app import script_preprocess
 from in_reach.app.new_project import BUILD_DIRNAME, SCRIPT_DIRNAME
 from in_reach.app.rvt.decompile import SCRIPT_FILENAME
+from in_reach.app.script_project import is_linked, link
 
 #: The generated view's own filename -- deliberately distinct from :data:`SCRIPT_FILENAME`
 #: (``script/output.txt``, the hand-edited source this view is generated *from*), so the two never
@@ -54,6 +55,8 @@ def write_output_view(folder: Path) -> Path:
         ``script/output.txt`` existed yet (an empty/missing script still gets a banner-only view
         rather than this raising).
     """
+    if is_linked(folder):
+        return _write_linked_view(folder)
     script_path = folder / SCRIPT_DIRNAME / SCRIPT_FILENAME
     try:
         script_text = script_path.read_text(encoding="utf-8")
@@ -73,4 +76,20 @@ def write_output_view(folder: Path) -> Path:
     view_path = output_view_path(folder)
     view_path.parent.mkdir(parents=True, exist_ok=True)
     view_path.write_text(banner + script_text, encoding="utf-8")
+    return view_path
+
+
+def _write_linked_view(folder: Path) -> Path:
+    """The view of a linked project (``script/project.toml``): the linker's own assembled script -- what the
+    compiler is given -- without writing anything but that one file (no settings, no link map). A project that
+    doesn't link shows why, as comments, in place of a script."""
+    linked = link(folder, write=False)
+    if linked.ok:
+        text = linked.compiled
+    else:
+        reasons = [f"-- NOT LINKED: {d.file}:{d.line}: {d.message} [{d.code}]" for d in linked.errors]
+        text = _BANNER + "\n".join(reasons) + "\n"
+    view_path = output_view_path(folder)
+    view_path.parent.mkdir(parents=True, exist_ok=True)
+    view_path.write_text(text, encoding="utf-8")
     return view_path

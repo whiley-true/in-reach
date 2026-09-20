@@ -202,3 +202,72 @@ def test_clicking_the_indicator_for_a_project_that_lost_its_profiles_opens_nothi
     _indicator(project_window)._on_click()
 
     assert opened == []
+
+
+# -- stamping a release from a profile that isn't the release one --------------------------------------------
+
+
+def _stampable(project_window, tmp_path: Path, *profiles: str) -> Path:
+    folder = _project(tmp_path, *profiles)
+    project_window._on_project_opened(folder)
+    return folder
+
+
+def test_stamping_off_the_release_profile_asks_first_and_cancelling_stamps_nothing(project_window, tmp_path: Path, monkeypatch) -> None:
+    folder = _stampable(project_window, tmp_path, "dev", "release")
+    script_preprocess.set_active_profile(folder, "dev")
+    asked, stamped = [], []
+    monkeypatch.setattr(project_window, "_confirm_stamp_off_release_profile", lambda active: asked.append(active) or False)
+    monkeypatch.setattr("in_reach.app.vcs.stamp", lambda *a, **k: stamped.append(a))
+
+    project_window.vcs_stamp("first", "0.1.0")
+
+    assert asked == ["dev"] and stamped == []
+
+
+def test_stamping_anyway_stamps(project_window, tmp_path: Path, monkeypatch) -> None:
+    folder = _stampable(project_window, tmp_path, "dev", "release")
+    stamped = []
+    monkeypatch.setattr(project_window, "_confirm_stamp_off_release_profile", lambda active: True)
+    monkeypatch.setattr("in_reach.app.vcs.stamp", lambda *a, **k: stamped.append((a, k)))
+
+    project_window.vcs_stamp("first", "0.1.0")
+
+    assert stamped == [((folder, "first"), {"version": "0.1.0"})]
+    assert script_preprocess.active_profile_name(folder) is None  # nothing was switched behind the user's back
+
+
+def test_stamping_on_the_release_profile_does_not_ask(project_window, tmp_path: Path, monkeypatch) -> None:
+    folder = _stampable(project_window, tmp_path, "dev", "release")
+    script_preprocess.set_active_profile(folder, "release")
+    stamped = []
+    monkeypatch.setattr(project_window, "_confirm_stamp_off_release_profile", lambda active: pytest.fail("asked"))
+    monkeypatch.setattr("in_reach.app.vcs.stamp", lambda *a, **k: stamped.append(a))
+
+    project_window.vcs_stamp("first", "0.1.0")
+
+    assert len(stamped) == 1
+
+
+@pytest.mark.parametrize("profiles", [(), ("dev",), ("dev", "staging")])
+def test_a_project_with_no_release_profile_is_never_asked(project_window, tmp_path: Path, monkeypatch, profiles) -> None:
+    _stampable(project_window, tmp_path, *profiles)
+    stamped = []
+    monkeypatch.setattr(project_window, "_confirm_stamp_off_release_profile", lambda active: pytest.fail("asked"))
+    monkeypatch.setattr("in_reach.app.vcs.stamp", lambda *a, **k: stamped.append(a))
+
+    project_window.vcs_stamp("first", "0.1.0")
+
+    assert len(stamped) == 1
+
+
+def test_the_warning_names_the_profile_in_use_or_says_none(project_window, monkeypatch) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    texts = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: texts.append(self.text()) or 0)
+
+    project_window._confirm_stamp_off_release_profile("dev")
+    project_window._confirm_stamp_off_release_profile(None)
+
+    assert texts == ["The active build profile is 'dev', not 'release'.", "No build profile is active, not 'release'."]

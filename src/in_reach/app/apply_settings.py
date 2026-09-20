@@ -25,6 +25,7 @@ from in_reach.app import logging_setup, new_project
 from in_reach.app.rvt import decompile
 from in_reach.app.rvt.compile import BuildResult, run_compile
 from in_reach.app.rvt.strings_io import LANGUAGES as _LANGUAGE_CODES
+from in_reach.app.script_project import is_linked, link
 
 _logger = logging_setup.get_logger(__name__)
 
@@ -326,6 +327,29 @@ def settings_have_unapplied_changes(folder: Path) -> bool:
         if _values_changed(_load_stripped_json(settings_path), _load_stripped_json(generated_path)):
             return True
     return False
+
+
+def script_has_unapplied_changes(folder: Path) -> bool:
+    """Whether a *linked* project (``script/project.toml``) has script changes Apply hasn't built yet: nothing built at
+    all, the link no longer matches the ``build/Compiled.txt`` the last build started from, the link would add settings,
+    a link that fails (Apply reports why), or a link the last build never finished (``Compiled.txt`` newer than the
+    ``.bin``). ``False`` for any other project -- a single-file script's edits are picked up by the next Apply or launch
+    regardless, and were never what enabled the button."""
+    if not is_linked(folder):
+        return False
+    built = new_project.compiled_variant_path(folder)
+    compiled_path = folder / new_project.BUILD_DIRNAME / "Compiled.txt"
+    if not built.is_file() or not compiled_path.is_file():
+        return True
+    linked = link(folder, write=False)
+    if not linked.ok or linked.settings_changed:
+        return True
+    try:
+        if compiled_path.read_text(encoding="utf-8") != linked.compiled:
+            return True
+        return compiled_path.stat().st_mtime_ns > built.stat().st_mtime_ns
+    except OSError:
+        return True
 
 
 def apply_settings_changes(project_dir: Path, folder: Path) -> BuildResult:
