@@ -154,11 +154,20 @@ Right now a script is edited as plain text and errors come back in Apply's failu
   loads from the installed package. `setup.py` makes wheels `cp3XX-win_amd64` rather than `py3-none-any`,
   and the sdist carries the C++. `.github/workflows/native.yml` builds on Windows for 3.12-3.14, runs the whole
   suite against it (the first CI run of any native test) and uploads the wheels.
-  **Not yet done, and not verifiable from here:** that workflow has never run on GitHub (first run builds Qt5
-  from source through vcpkg, well over half an hour, then caches it), and `publish.yml` still builds an
-  untagged wheel from the *committed* module. Once the native job has passed on a real PR, switch publish to
-  those wheels (build on Windows, one wheel per Python, `pypa/gh-action-pypi-publish` over the lot) and stop
-  committing the `.pyd`/DLLs -- until then a checkout works without a toolchain because they're committed.
+  **First GitHub runs found three real problems, all fixed but not yet re-run:** (1) the workflow installed the
+  package non-editable, so on 3.12/3.13 the tests imported a site-packages copy without the built module and
+  650 tests silently skipped, and on 3.14 they would have tested the *committed* module -- now editable, with a
+  step that fails if the module just built doesn't load; (2) `build.py` finished and installed the build, then
+  crashed deleting its temporary build directory because MSBuild still held a handle on it -- the default build
+  directory is now the persistent, git-ignored `native/build/`; (3) four IDE tests had never run on Windows
+  under Qt's `offscreen` platform, which has no emoji font (icons all render as one box) -- the Windows job now
+  uses the real platform, the maps-panel test reads `full_text` instead of the width-dependent elided text, and
+  the emoji-rendering comparisons skip with a stated reason where a platform can't draw emoji. **Still to
+  confirm on a real run:** that the 3.12-3.14 jobs go green with the native tests actually running (not
+  skipped), and that vcpkg's Qt5 caches. `publish.yml` still builds an untagged wheel from the *committed*
+  module; once the native job is green, switch publish to its wheels (build on Windows, one wheel per Python,
+  `pypa/gh-action-pypi-publish` over the lot) and stop committing the `.pyd`/DLLs -- until then a checkout works
+  without a toolchain because they're committed.
   Still Windows-only and per-CPython-version (the engine uses MSVC-specific constructs); Linux/macOS wheels
   would need a portability pass first.
 - **Multi-platform / multi-Python**: solved for Python (CI builds 3.12-3.14 wheels, see above), not for

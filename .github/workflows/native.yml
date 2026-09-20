@@ -32,7 +32,8 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
-      QT_QPA_PLATFORM: offscreen
+      # No QT_QPA_PLATFORM=offscreen here (the Linux jobs need it): this is the platform the IDE ships on, and
+      # offscreen on Windows has no emoji font, so the Explorer's icons all render as the same missing-glyph box.
     steps:
       - uses: actions/checkout@v4
 
@@ -53,14 +54,23 @@ jobs:
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install qt5-base:x64-windows
 
+      # Editable, so `import in_reach` is this checkout -- the one native/build.py installs the module into. A
+      # regular install would put a copy in site-packages (with the committed cp314 module, and no other
+      # version's), and the tests would skip or run against that instead of the module just built.
       - name: Install build and test dependencies
-        run: python -m pip install pybind11 build ".[dev]"
+        run: python -m pip install pybind11 build -e ".[dev]"
 
       - name: Build _reachvarianttool
         run: python native/build.py --vcpkg-root "$env:VCPKG_INSTALLATION_ROOT"
 
+      - name: Check the module just built is the one being tested
+        run: >
+          python -c "from in_reach.app.rvt import rvt_bridge; import _reachvarianttool as m;
+          assert rvt_bridge.is_available(), 'the built module did not load';
+          print(m.__file__)"
+
       - name: Run the whole test suite against it
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
 
       - name: Build the wheel
         run: python -m build --wheel --outdir dist

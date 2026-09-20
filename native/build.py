@@ -1,7 +1,7 @@
 """Builds ``_reachvarianttool`` from this folder and installs it into the package.
 
     python native/build.py                      # uses this interpreter, C:/vcpkg (or $VCPKG_ROOT)
-    python native/build.py --build-dir out/nb   # keep the build tree somewhere specific
+    python native/build.py --build-dir out/nb   # keep the build tree somewhere else (default: native/build)
 
 It configures and builds with CMake, then copies the built module and the Qt runtime DLLs it needs into
 ``src/in_reach/app/rvt/native/`` -- where :mod:`in_reach.app.rvt.rvt_bridge` looks for them. The module is
@@ -20,11 +20,14 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 NATIVE_DIR = Path(__file__).resolve().parent
 DEFAULT_DEST = NATIVE_DIR.parent / "src" / "in_reach" / "app" / "rvt" / "native"
+#: Kept between runs (git-ignored), so a second build is incremental. Deliberately not a temporary directory:
+#: MSBuild leaves helper processes holding handles on its build tree for a while after the build, so deleting
+#: one straight afterwards fails on Windows -- which failed CI with a finished, installed build.
+DEFAULT_BUILD_DIR = NATIVE_DIR / "build"
 #: What's next to the built module that it needs at runtime -- vcpkg copies these beside it.
 _RUNTIME_DLL_PATTERNS = ("*.dll",)
 #: Qt reads this next to Qt5Core.dll; an empty [Paths] section stops it searching for a Qt install.
@@ -80,7 +83,7 @@ def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, python: s
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--vcpkg-root", type=Path, default=Path(os.environ.get("VCPKG_ROOT", "C:/vcpkg")))
-    parser.add_argument("--build-dir", type=Path, default=None, help="default: a temporary directory")
+    parser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR, help=f"default: {DEFAULT_BUILD_DIR}")
     parser.add_argument("--dest", type=Path, default=DEFAULT_DEST, help=f"default: {DEFAULT_DEST}")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     args = parser.parse_args(argv)
@@ -89,11 +92,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit("_reachvarianttool only builds on Windows (MSVC, and in-reach itself targets Windows)")
     _require_pybind11()
 
-    if args.build_dir is not None:
-        installed = build(args.vcpkg_root, args.build_dir, args.dest, jobs=args.jobs)
-    else:
-        with tempfile.TemporaryDirectory(prefix="rvt-native-") as tmp:
-            installed = build(args.vcpkg_root, Path(tmp), args.dest, jobs=args.jobs)
+    installed = build(args.vcpkg_root, args.build_dir, args.dest, jobs=args.jobs)
     print(f"installed {installed}")
 
 

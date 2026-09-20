@@ -64,8 +64,9 @@ python native/build.py                       # --vcpkg-root C:/vcpkg (or $VCPKG_
 
 That configures and builds with CMake and copies `_reachvarianttool.cp3XX-win_amd64.pyd`, `Qt5Core.dll`,
 `z.dll`, `pcre2-16.dll`, `double-conversion.dll` and `qt.conf` into `src/in_reach/app/rvt/native/`. A build
-directory you keep (`--build-dir`) makes later builds incremental: touching only `bindings.cpp` recompiles
-that one file and relinks (a couple of minutes); a from-scratch build compiles the whole engine (several).
+build tree is kept in `native/build/` (git-ignored; `--build-dir` puts it elsewhere), so later builds are
+incremental: touching only `bindings.cpp` recompiles that one file and relinks (a couple of minutes); the
+first build compiles the whole engine (several).
 A zero exit code is not proof of a good build if you drive CMake yourself -- grep the log for `error C` /
 `error LNK`; `build.py` stops on a failed build and on a missing or ambiguous module.
 

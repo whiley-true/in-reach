@@ -36,7 +36,9 @@ def test_has_a_slug_for_each_of_the_three_map_folders(panel: MapsPanel) -> None:
 def test_slugs_start_unresolved_and_disabled(panel: MapsPanel) -> None:
     for slug in panel.slug_buttons.values():
         assert slug.isEnabled() is False
-        assert "Verify System Settings" in slug.text()
+        # full_text, not text(): the displayed text is middle-elided to the button's width, so how much of it
+        # survives depends on the platform's font ("Not set --  em Settings" under Windows' offscreen plugin).
+        assert "Verify System Settings" in slug.full_text
 
 
 def test_set_paths_shows_each_path_as_a_clickable_slug(panel: MapsPanel) -> None:
