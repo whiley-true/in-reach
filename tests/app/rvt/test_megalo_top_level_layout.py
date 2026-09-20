@@ -208,3 +208,20 @@ def test_a_script_of_only_an_event_gets_just_the_event_trigger(rvt) -> None:
 def test_an_unsupported_loop_form_is_still_unsupported_at_the_top_level(rvt, source: str) -> None:
     with pytest.raises(megalo_compiler.UnsupportedConstruct):
         _compile_in_house(rvt, source)
+
+
+def test_declare_lines_do_not_cost_a_trigger(rvt) -> None:
+    """A ``declare`` emits no opcode, so the run of them at the top of a real script must not be packed
+    into a trigger of its own -- it used to leave an empty one ahead of the first loop."""
+    source = "declare global.number[0] with network priority low\nfor each player do\n   global.number[0] += 1\nend\n"
+
+    shape = _shape(_compile_in_house(rvt, source))
+
+    assert shape == [("TriggerBlockType.for_each_player", None, 1)]
+    assert _shape(_compile_native(rvt, source)) == shape
+
+
+def test_a_script_of_only_declares_builds_no_trigger_at_all(rvt) -> None:
+    variant = _compile_in_house(rvt, "declare global.number[0] with network priority high = 7\n")
+
+    assert variant.multiplayer.trigger_count == 0

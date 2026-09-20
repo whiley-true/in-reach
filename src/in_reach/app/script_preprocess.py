@@ -224,6 +224,18 @@ class _Block:
         return self.parent_active and (not self.cond if self.seen_else else self.cond)
 
 
+def uses_directives(source: str) -> bool:
+    """Whether ``source`` uses a ``-- @if`` / ``@else`` / ``@end`` directive or a ``${NAME}`` constant --
+    that is, whether :func:`preprocess` could change it."""
+    return any(_DIRECTIVE.match(line) or _PLACEHOLDER.search(line) for line in source.splitlines())
+
+
+def has_comments(source: str) -> bool:
+    """Whether ``source`` has a ``--`` comment that isn't one of the directives (those are
+    :func:`uses_directives`'s). A ``--`` inside a quoted string isn't a comment."""
+    return any("--" in _QUOTED.sub('""', line) for line in source.splitlines() if not _DIRECTIVE.match(line))
+
+
 def preprocess(source: str, profile: Profile | None = None) -> str:
     """``source`` with ``profile``'s ``@if`` blocks resolved and its ``${NAME}`` constants substituted.
 

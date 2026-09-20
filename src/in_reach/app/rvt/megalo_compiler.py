@@ -557,14 +557,17 @@ _CALL_ARGUMENT_ORDER_OVERRIDES: dict[str, list[int]] = {
 }
 
 # ShapeArgument's own field names (ShapeArgument.radius doubles as "width" for box -- see its own
-# native docstring) in call-syntax order, per shape type -- confirmed against the official
-# reference's "set_boundary" syntax (the same underlying Shape argument type) and real
-# set_shape(...) calls in RCC Onslaught v13.bin. See _Compiler._build_shape_argument.
+# native docstring) in call-syntax order, per shape type: the order the engine's own decompiler prints
+# them in (OpcodeArgValueShape::axis()), so ``top`` comes before ``bottom`` -- the Editing Kit's
+# "set_boundary" syntax lists them the other way round under different names, and an earlier version of
+# this table followed that, swapping the two heights of every cylinder and box (found by recompiling
+# every shipped script and comparing; the tests only ever used equal heights).
+# See _Compiler._build_shape_argument.
 _SHAPE_TYPE_FIELDS = {
     "none": [],
     "sphere": ["radius"],
-    "cylinder": ["radius", "bottom", "top"],
-    "box": ["radius", "length", "bottom", "top"],
+    "cylinder": ["radius", "top", "bottom"],
+    "box": ["radius", "length", "top", "bottom"],
 }
 
 # "%x" placeholder -> OpcodeStringTokenType member name -- confirmed real cases in RCC Onslaught
@@ -2230,8 +2233,8 @@ class _Compiler:
         that type (confirmed against the official reference's own "set_boundary" syntax --
         RVT's "Set Object Shape" is the same underlying Shape argument type -- and against real
         ``set_shape(...)`` calls in RCC Onslaught v13.bin): ``none`` takes no more, ``sphere`` takes
-        1 (radius), ``cylinder`` takes 3 (radius, bottom, top), ``box`` takes 4 (width [=radius],
-        length, bottom, top). A dimension accepts any ordinary variable/literal expression, not just
+        1 (radius), ``cylinder`` takes 3 (radius, top, bottom), ``box`` takes 4 (width [=radius],
+        length, top, bottom). A dimension accepts any ordinary variable/literal expression, not just
         a bare int literal -- confirmed a real case found via a full sweep of every real MCC-shipped
         built-in game/hopper variant: ``ctf_054.bin``'s own ``set_shape(cylinder, script_option[6],
         10, 10)`` uses a scripted-option reference for its radius. Built the same way as
@@ -2544,7 +2547,10 @@ class _Compiler:
         then resume ungated execution afterward within one trigger. That's why an "if" ordinarily
         needs its own wrapper (a real nested Trigger, or an inline "Run Inline Nested Trigger" scope
         -- see _compile_nested_body's own docstring) to isolate its body's conditional execution from
-        whatever comes after it.
+        whatever comes after it. The wrapper has to hold the *conditions* as well as the body: a
+        condition left in the enclosing trigger gates everything after the wrapper too (a statement
+        following the ``if`` would only run when it held, and an ``altif``/``alt`` branch would need the
+        branch before it to be true), which is exactly what this compiler used to build.
 
         ``tail`` (propagated from _compile_statements, true only for the last statement of a
         statement list that is itself already known to be in tail position all the way up to its own
@@ -2564,14 +2570,14 @@ class _Compiler:
         ``elseif``/``else``) are compiled as a sequence of *independent, self-contained* synthetic
         ``if``s, each gated by its own condition AND'd with the negation of every earlier branch's
         own condition (``if A ... altif B ... alt ... end`` becomes, in effect, ``if A``, ``if NOT(A)
-        and B``, ``if NOT(A) and NOT(B)``) -- exactly the same "condition into this trigger, body
-        isolated in its own nested scope unless in tail position" shape :meth:`_if_branches`'s own
+        and B``, ``if NOT(A) and NOT(B)``) -- exactly the same "gate and body together in their own
+        nested scope unless in tail position" shape :meth:`_if_branches`'s own
         1-element case already uses for a plain ``if``, just applied once per branch. This is safe
-        for exactly the same reason two independent sibling ``if`` statements already are (an
-        already-tested, already-working case): each non-tail branch's own body lives entirely inside
-        its own isolated ``scope_arg.data`` (see :meth:`_compile_nested_body`), never touching
-        ``trigger``'s own flat opcode list at all, so chaining any number of them back-to-back in one
-        trigger can never let one branch's gate bleed into another's. Only the structurally *last*
+        for the same reason two independent sibling ``if`` statements are: each non-tail branch's own
+        gate *and* body live entirely inside its own isolated ``scope_arg.data`` (see
+        :meth:`_compile_nested_body`), never touching ``trigger``'s own flat opcode list at all, so
+        chaining any number of them back-to-back in one trigger can never let one branch's gate bleed
+        into another's (``test_megalo_if_gating.py`` checks this against the decompiled structure). Only the structurally *last*
         branch can ever use the no-wrapper tail optimization, and only when this whole ``if`` is
         itself in tail position -- every earlier branch is always wrapped, regardless of ``tail``,
         since something (at minimum the next branch's own condition opcodes) always follows it in
@@ -2603,11 +2609,15 @@ class _Compiler:
                 # actionCount/conditionCount is 0). Not a workaround for that crash specifically --
                 # this is the correct compilation regardless, the crash is just further,
                 # independent confirmation it's safe to skip.
-                self._compile_condition(gate, trigger)
                 if tail and i == last_index:
+                    self._compile_condition(gate, trigger)
                     self._compile_statements(body, trigger, tail=True)
                 else:
-                    self._compile_nested_body(body, trigger)
+                    # The gate goes *inside* the wrapper, not before it: a condition gates everything
+                    # after it in its own block, so one left in `trigger` would gate whatever follows
+                    # this `if` as well (and, for an `altif`/`alt` chain, every later branch -- whose
+                    # own gate is the negation of this one).
+                    self._compile_nested_body(body, trigger, gate=gate)
 
             if condition is not None and i != last_index:
                 negated = _negate_expr(condition)
@@ -2686,6 +2696,8 @@ class _Compiler:
                 pending.clear()
 
         for stmt in statements:
+            if stmt.kind == "declare":
+                continue  # emits no opcode (see _write_declarations), so it must not cost a trigger of its own
             if stmt.kind == "for_each":
                 flush()
                 block_type, forge_label_index = self._for_each_trigger_fields(stmt)
@@ -2700,7 +2712,7 @@ class _Compiler:
                 pending.append(stmt)
         flush()
 
-    def _compile_nested_body(self, body, trigger, *, block_type=None, forge_label_index=None) -> None:
+    def _compile_nested_body(self, body, trigger, *, block_type=None, forge_label_index=None, gate=None) -> None:
         """Builds ``body`` and wires it to run from ``trigger`` -- inline (embedded directly in
         ``trigger``'s own opcode list via "Run Inline Nested Trigger", zero extra trigger slots) for
         a plain ``if``/``do`` body, or as a real, separate subroutine ``Trigger`` (called via "Run
@@ -2724,15 +2736,23 @@ class _Compiler:
         # Either way, `body` becomes a brand-new scope/trigger's *entire* content -- nothing else is
         # ever appended afterward -- so it's in tail position from the start (see _compile_if's own
         # docstring), same as the top-level trigger/function bodies compile() itself builds.
+        #
+        # ``gate``, for an ``if`` body, is the condition to run it under: it becomes the scope's own
+        # first opcodes, ahead of the body (``inline: if <gate> then <body> end``, which is exactly
+        # what the native compiler builds), so that it gates the body and nothing after the wrapper.
         if block_type is None and forge_label_index is None:
             outer = self._rvt.Action()
             outer.function = self._run_inline_nested_trigger
             scope_arg = self._run_inline_nested_trigger.arguments[0].typeinfo.create()
+            if gate is not None:
+                self._compile_condition(gate, scope_arg.data)
             self._compile_statements(body, scope_arg.data, tail=True)
             outer.add_argument(scope_arg)
             trigger.add_opcode(outer)
             return
 
+        if gate is not None:
+            raise UnsupportedConstruct("a gated body can only be built inline")
         child = self._add_trigger()
         child_index = self._mp.trigger_count - 1
         self._mp.mark_trigger_as_subroutine(child_index)

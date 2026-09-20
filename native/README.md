@@ -1,21 +1,32 @@
 # Native extension (`_reachvarianttool`)
 
-`src/in_reach/app/rvt/native/_reachvarianttool.cp314-win_amd64.pyd` is a prebuilt pybind11 module.
-Its C++ source is **not in this repo**: it's built from the `mega-ide` prototype's own tree,
-`mide/ReachVariantTool-src/native/` (ReachVariantTool's engine sources, GPLv3, plus
-`python-bindings/bindings.cpp` and `CMakeLists.txt`). This folder records what this repo changed in that
-source, so the binary can be reproduced and reviewed.
+`_reachvarianttool` is a pybind11 module: ReachVariantTool's game-variant engine (read/write `.bin` files, the
+Megalo compiler and decompiler) plus Python bindings for it. `in_reach.app.rvt.rvt_bridge` loads it from
+`src/in_reach/app/rvt/native/`.
+
+Everything needed to build it is in this folder:
+
+| Path | What it is |
+|---|---|
+| `engine/` | the vendored, non-UI half of ReachVariantTool (GPLv3, like this repo) -- see `engine/README.md` |
+| `bindings.cpp`, `type_casters.h` | the pybind11 bindings written for in-reach |
+| `CMakeLists.txt` | compiles the two into `_reachvarianttool` |
+| `build.py` | builds it and installs the module and its Qt runtime DLLs into the package |
+
+Wheels from PyPI contain a built module, so nobody installing in-reach needs any of this; it's for changing
+the bindings, or for building on a Python version a wheel wasn't published for. CI builds it too
+(`.github/workflows/native.yml`), on Windows, for Python 3.12-3.14, and runs the whole test suite against
+the result. The module is ABI-locked to the CPython version it was built with (`cp314` for 3.14) and only
+builds on 64-bit Windows.
 
 ## What was added to the bindings
 
-Two groups. The first is committed in `mega-ide` as `5d0fe97` ("feat(native): bindings for building
-scripts from scratch, and script-defined tables"), which also commits the earlier construction bindings
-the compiler relies on (`clear_triggers`, `mark_trigger_*`, `set_scope_by_format`, `AnyVariable.wrap`,
-...) that had only ever existed in that repo's working tree. The second, variable declarations, is **not
-yet committed in `mega-ide`** -- it is an uncommitted change to `python-bindings/bindings.cpp` there
-(about 85 lines, inserted just above the `MultiplayerData` class). This repo's `.pyd` was built from
-`5d0fe97` plus that change (SHA-256 begins `987fff7304a4e898`; the build before it began
-`f4355fdd5f762dc2`, and the one before that `be515cc6dd04aa83`).
+The bindings came over from the `mega-ide` prototype (its commit `5d0fe97`, "feat(native): bindings for
+building scripts from scratch, and script-defined tables", plus the construction bindings the compiler relies
+on -- `clear_triggers`, `mark_trigger_*`, `set_scope_by_format`, `AnyVariable.wrap`, ... -- that had only ever
+existed in that repo's working tree) and have been changed here since; git history from the commit that
+vendored them is the record of what is ours. Two groups are worth describing, because the compiler depends on
+them and they aren't obvious from the names:
 
 ### Variable declarations
 
@@ -41,17 +52,22 @@ rebuild all four sets from the script text -- without calling it; see
 `Variable.which` was already writable, so `current_player.script_stat[N]` needed no change to
 `set_scope_by_format()`; the compiler copies `which` from a `current_player.number[N]` example.
 
-## Rebuilding
+## Building
 
-From `python-bindings/` in the source tree (toolchain: CMake, vcpkg with Qt5 at `C:\vcpkg`, MSVC Build
-Tools 2022 -- see that repo's `.claude/rules/native-bindings.md` for the full procedure and gotchas):
+Needs Windows, CMake, Visual Studio 2022's C++ build tools, and [vcpkg](https://vcpkg.io) with Qt5
+(`vcpkg install qt5-base:x64-windows`). Then, with the interpreter you run in-reach with:
 
 ```
-cmake --build build --config Release --parallel 8
+python -m pip install pybind11
+python native/build.py                       # --vcpkg-root C:/vcpkg (or $VCPKG_ROOT), --build-dir, --jobs
 ```
 
-then copy `build/Release/_reachvarianttool.cp314-win_amd64.pyd` over the one in
-`src/in_reach/app/rvt/native/`. An incremental build after touching only `bindings.cpp` recompiles that
-one file and relinks. Grep the log for `error C`/`error LNK` -- a zero exit code alone isn't proof.
+That configures and builds with CMake and copies `_reachvarianttool.cp3XX-win_amd64.pyd`, `Qt5Core.dll`,
+`z.dll`, `pcre2-16.dll`, `double-conversion.dll` and `qt.conf` into `src/in_reach/app/rvt/native/`. A build
+directory you keep (`--build-dir`) makes later builds incremental: touching only `bindings.cpp` recompiles
+that one file and relinks (a couple of minutes); a from-scratch build compiles the whole engine (several).
+A zero exit code is not proof of a good build if you drive CMake yourself -- grep the log for `error C` /
+`error LNK`; `build.py` stops on a failed build and on a missing or ambiguous module.
 
-The `.pyd` is ABI-locked to CPython 3.14 on 64-bit Windows.
+The `.pyd` and DLLs currently in the repo are committed build output, so a checkout works without building.
+Rebuilding replaces them; commit the result only when the bindings changed.

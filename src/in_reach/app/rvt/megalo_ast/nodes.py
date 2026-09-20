@@ -194,11 +194,19 @@ class IfStatement(ASTNode):
     body: list[Statement] = Field(default_factory=list)
     altif_clauses: list[ElseIfClause] = Field(default_factory=list)
     alt_body: list[Statement] | None = None
+    inline: bool = False  # written ``inline: if ...`` -- see :class:`DoBlock`
 
 
 class DoBlock(ASTNode):
+    """``do <body> end``. ``inline`` is set for ``inline: do ... end`` (also ``inline: if ...``, see
+    :class:`IfStatement`): the block was compiled as an inline nested trigger -- what
+    ``decompile_script()`` prints for the opcode "Run Inline Nested Trigger". It only records *how* a
+    block was laid out, never what it does, so nothing downstream of the parser needs to act on it;
+    it's kept so the text unparses back to what it was."""
+
     kind: Literal["do"] = "do"
     body: list[Statement] = Field(default_factory=list)
+    inline: bool = False
 
 
 class ForEach(ASTNode):

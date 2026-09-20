@@ -122,9 +122,9 @@ def test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_trigger(juggern
 
 def test_a_non_tail_if_body_is_still_built_inline_using_a_wrapper_trigger(juggernaut) -> None:
     """When something follows the "if" within the same body, its conditions can't be allowed to gate
-    that trailing code too -- so it still needs the "Run Inline Nested Trigger" wrapper (embedded
-    directly in the parent's own opcode list, zero extra trigger slots) to isolate it, same as before
-    tail-position flattening (see test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_
+    that trailing code too -- so the conditions *and* the body go in a "Run Inline Nested Trigger"
+    wrapper (embedded directly in the parent's own opcode list, zero extra trigger slots), same as
+    before tail-position flattening (see test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_
     trigger) was added."""
     rvt, variant = juggernaut
     mp = variant.multiplayer
@@ -142,7 +142,13 @@ def test_a_non_tail_if_body_is_still_built_inline_using_a_wrapper_trigger(jugger
         and isinstance(top.opcode(i).argument(0), rvt.MegaloScopeArgument)
     ]
     assert len(wrapper_actions) == 1
-    assert wrapper_actions[0].argument(0).data.opcode(0).decompile(variant) == "game.end_round()"
+    # The condition is the wrapper's own first opcode, not the enclosing trigger's: a condition gates
+    # everything after it in its block, so one left outside would gate `global.number[1] = 2` as well
+    # (see test_megalo_if_gating.py).
+    scope = wrapper_actions[0].argument(0).data
+    assert isinstance(scope.opcode(0), rvt.Condition)
+    assert scope.opcode(1).decompile(variant) == "game.end_round()"
+    assert not any(isinstance(top.opcode(i), rvt.Condition) for i in range(top.opcode_count))
     reloaded = _save_and_reload(rvt, variant)
     text = reloaded.decompile_script()
     assert "if global.number[0] == 1 then" in text
@@ -1763,3 +1769,34 @@ def test_run_compile_falls_back_to_native_for_an_unsupported_edited_script(tmp_p
     rvt = rvt_bridge.get_rvt()
     compiled = rvt.load(str(result.output_path))
     assert "current_player.number[0] = 1" in compiled.decompile_script()
+
+
+# -- shape dimension order ---------------------------------------------------------------------------
+# The existing shape tests use equal top/bottom heights, which is how the two being swapped went unseen:
+# a cylinder is (radius, top, bottom) and a box (radius, length, top, bottom), the order the engine's own
+# decompiler prints them in.
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["cylinder, 50, 20, 30", "cylinder, 360, 1000, 10", "box, 40, 50, 20, 30"],
+    ids=["cylinder", "cylinder wide", "box"],
+)
+def test_a_shapes_dimensions_keep_their_order(juggernaut, shape: str) -> None:
+    rvt, variant = juggernaut
+    source = f"current_object.set_shape({shape})\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    assert f"current_object.set_shape({shape})" in _save_and_reload(rvt, variant).decompile_script()
+
+
+def test_a_shape_compiles_to_what_the_native_compiler_produces(juggernaut) -> None:
+    rvt, variant = juggernaut
+    source = "current_object.set_shape(cylinder, 50, 20, 30)\r\ncurrent_object.set_shape(box, 40, 50, 20, 30)\r\n"
+    native = rvt.load(str(_JUGGERNAUT_BIN))
+    assert native.multiplayer.compile_script(source).success
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    assert variant.decompile_script() == native.decompile_script()

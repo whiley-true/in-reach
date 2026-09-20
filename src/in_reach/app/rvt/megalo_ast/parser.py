@@ -171,6 +171,8 @@ class _Parser:
     def _parse_statement(self) -> Statement:
         if self._at_ident("for"):
             return self._parse_for_each()
+        if self._at_ident("inline"):
+            return self._parse_inline()
         if self._at_ident("do"):
             return self._parse_do_block()
         if self._at_ident("if"):
@@ -182,6 +184,17 @@ class _Parser:
         if self._at_ident("alias"):
             return self._parse_alias()
         return self._parse_simple_statement()
+
+    def _parse_inline(self) -> DoBlock | IfStatement:
+        start = self._expect_ident("inline")
+        self._expect_punct(":")
+        if self._at_ident("do"):
+            block = self._parse_do_block()
+        elif self._at_ident("if"):
+            block = self._parse_if()
+        else:
+            raise MegaloParseError("expected 'do' or 'if' after 'inline:'", self._peek())
+        return block.model_copy(update={"inline": True, "span": _span(start, self._tokens[self._pos - 1])})
 
     def _parse_alias(self) -> AliasDeclaration:
         start = self._expect_ident("alias")

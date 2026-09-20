@@ -17,7 +17,9 @@ folder), since those aren't redistributable and so can't live in this repo::
     IN_REACH_CORPUS_DIRS="C:\\...\\haloreach\\game_variants;C:\\...\\haloreach\\hopper_game_variants" \\
         python -m pytest tests/app/rvt/test_megalo_compiler_corpus.py -q -s
 """
+import collections
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -244,3 +246,92 @@ def test_a_real_script_compiled_onto_a_blank_base_gets_the_declarations_it_had()
         print(f"  differs: {name}")
     assert compared >= _MIN_BLANK_BASE_COMPARISONS
     assert not differing
+
+
+@pytest.mark.skipif(not _corpus_bins(), reason="IN_REACH_CORPUS_DIRS not set (or names no .bin files)")
+def test_a_built_variants_own_decompiled_text_recompiles_in_house_to_the_same_thing() -> None:
+    """The RVT round trip: pull the script back out of a variant this compiler built (its text is full
+    of ``inline:`` blocks) and build it again. It must parse, compile in-house rather than fall back,
+    and decompile to identical text -- otherwise "edit in RVT, keep working here" loses something on
+    every trip."""
+    rvt = rvt_bridge.get_rvt()
+    broken: dict[str, str] = {}
+    total = 0
+    seen: set[str] = set()
+    for path in _corpus_bins():
+        if path.name in seen:
+            continue
+        seen.add(path.name)
+        try:
+            first = rvt.load(str(path))
+        except RuntimeError:
+            continue
+        if first.multiplayer is None:
+            continue
+        try:
+            megalo_compiler.compile_script(rvt, first, normalize_script_text(first.decompile_script()))
+        except megalo_compiler.UnsupportedConstruct:
+            continue  # test_real_variant_corpus_coverage_stays_above_the_floor's concern
+        total += 1
+        built_text = normalize_script_text(first.decompile_script())
+        second = rvt.load(str(path))
+        try:
+            megalo_compiler.compile_script(rvt, second, built_text)
+        except megalo_compiler.UnsupportedConstruct as exc:
+            broken[path.name] = f"won't recompile in-house: {exc}"[:140]
+            continue
+        if normalize_script_text(second.decompile_script()) != built_text:
+            broken[path.name] = "recompiles to different text"
+    assert total, "the corpus folders held no multiplayer game variants"
+    print(f"\nround trip: {total - len(broken)}/{total} built scripts recompile in-house to identical text")
+    for name, reason in sorted(broken.items()):
+        print(f"  broken: {name}: {reason}")
+    assert not broken
+
+
+# Lines that describe structure (blocks, declarations) rather than one thing a script does. The compiler
+# lays blocks out its own way -- inline scopes, fewer triggers -- so those can legitimately differ from
+# the original's; what each statement *does* cannot.
+_STRUCTURE_LINE = re.compile(r"^(if |altif |alt$|do$|end$|for each |on |inline: |declare |function |$)")
+
+
+def _leaf_statements(text: str) -> collections.Counter:
+    return collections.Counter(
+        line.strip() for line in text.splitlines() if not _STRUCTURE_LINE.match(line.strip())
+    )
+
+
+@pytest.mark.skipif(not _corpus_bins(), reason="IN_REACH_CORPUS_DIRS not set (or names no .bin files)")
+def test_recompiling_the_real_corpus_keeps_every_statement_exactly() -> None:
+    """The check "it compiles" could never make: every assignment and call in a real script must come
+    back from an in-house recompile *identical*. Found ``set_shape``'s two heights swapped in 112 of the
+    373 shipped scripts, which every other check in this file passed."""
+    rvt = rvt_bridge.get_rvt()
+    changed: dict[str, str] = {}
+    total = 0
+    seen: set[str] = set()
+    for path in _corpus_bins():
+        if path.name in seen:
+            continue
+        seen.add(path.name)
+        try:
+            variant = rvt.load(str(path))
+        except RuntimeError:
+            continue
+        if variant.multiplayer is None:
+            continue
+        original = normalize_script_text(variant.decompile_script())
+        try:
+            megalo_compiler.compile_script(rvt, variant, original)
+        except megalo_compiler.UnsupportedConstruct:
+            continue
+        total += 1
+        before, after = _leaf_statements(original), _leaf_statements(normalize_script_text(variant.decompile_script()))
+        lost, gained = list((before - after).elements()), list((after - before).elements())
+        if lost or gained:
+            changed[path.name] = f"{lost[0]!r} became {gained[0] if gained else 'nothing'!r}"[:160]
+    assert total, "the corpus folders held no multiplayer game variants"
+    print(f"\nstatements: {total - len(changed)}/{total} scripts recompile with every statement unchanged")
+    for name, what in sorted(changed.items()):
+        print(f"  changed: {name}: {what}")
+    assert not changed

@@ -67,6 +67,9 @@ def _render_block(body: list[Statement]) -> list[str]:
     return out
 
 
+_INLINE_PREFIX = "inline: "
+
+
 def _render_statement(stmt: Statement) -> list[str]:
     if stmt.kind == "declare":
         return [_render_declaration(stmt)]
@@ -77,7 +80,7 @@ def _render_statement(stmt: Statement) -> list[str]:
     if stmt.kind == "expr_stmt":
         return [render_expr(stmt.expr)]
     if stmt.kind == "if":
-        lines = [f"if {render_expr(stmt.condition)} then "]
+        lines = [f"{_INLINE_PREFIX if stmt.inline else ''}if {render_expr(stmt.condition)} then "]
         lines.extend(_indent(_render_block(stmt.body)))
         for clause in stmt.altif_clauses:
             lines.append(f"altif {render_expr(clause.condition)} then ")
@@ -88,7 +91,7 @@ def _render_statement(stmt: Statement) -> list[str]:
         lines.append("end")
         return lines
     if stmt.kind == "do":
-        lines = ["do"]
+        lines = [f"{_INLINE_PREFIX if stmt.inline else ''}do"]
         lines.extend(_indent(_render_block(stmt.body)))
         lines.append("end")
         return lines
