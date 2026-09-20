@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "in-reach"
-version = "0.2.0"
+version = "1.0.0"
 description = "Python tooling and command line to help improve the Halo Reach scripting experience (the IDE is in-reach-ide)."
 readme = "README.md"
 requires-python = ">=3.12"
