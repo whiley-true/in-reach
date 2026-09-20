@@ -18,7 +18,7 @@ from pathlib import Path
 from in_reach.app import env_file
 
 _ENV_NAME = ".env"
-#: Public (unlike the rest of this module's constants) -- in_reach.ide.logs_panel's own live Logs
+#: Public (unlike the rest of this module's constants) -- in_reach_ide.logs_panel's own live Logs
 #: tab attaches a handler straight to this same logger by name, and formats records the same way
 #: this module's own file/stream handlers do, so the two never drift apart.
 LOGGER_NAME = "in_reach"

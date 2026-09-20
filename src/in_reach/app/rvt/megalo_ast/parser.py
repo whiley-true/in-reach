@@ -238,7 +238,12 @@ class _Parser:
         if tok.kind == "string":
             self._advance()
             return StringLiteral(value=tok.value, span=_span(tok, tok))
-        raise MegaloParseError("expected a label value (int or string)", tok)
+        if tok.kind == "ident" and tok.text not in _UNIMPLEMENTED_RESERVED_WORDS and tok.text not in ("do", "randomly", "with"):
+            # A name, not a literal: `-- @label L_hill = "hill"` in a module lets the code say `with label L_hill`,
+            # which the linker replaces with the string. Neither compiler accepts it as it stands.
+            self._advance()
+            return Identifier(name=tok.text, span=_span(tok, tok))
+        raise MegaloParseError("expected a label value (an int, a string, or a name)", tok)
 
     def _parse_do_block(self) -> DoBlock:
         start = self._expect_ident("do")
@@ -390,6 +395,26 @@ class _Parser:
             self._expect_punct(")")
             return expr
         raise MegaloParseError("expected an expression", tok)
+
+
+def parse_expression(source: str, *, line: int = 1, col: int = 0) -> Expression:
+    """Parses ``source`` as exactly one expression (a condition, a value, a reference).
+
+    ``line``/``col`` (1-based / 0-based) say where ``source`` sits in some larger text, so every span in the
+    result -- and any error's position -- points at the real place rather than at the start of ``source``.
+    Used for the expressions inside ``-- @gate``/``-- @guard`` annotations, which live in comments the
+    statement grammar never sees.
+
+    Raises:
+        MegaloLexError / MegaloParseError: ``source`` isn't a single well-formed expression.
+    """
+    padded = "\n" * (line - 1) + " " * col + source
+    parser = _Parser([t for t in tokenize(padded) if t.kind != "comment"])
+    expression = parser._parse_expr()
+    trailing = parser._peek()
+    if trailing.kind != "eof":
+        raise MegaloParseError("unexpected text after the expression", trailing)
+    return expression
 
 
 def parse(source: str) -> Script:

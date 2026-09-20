@@ -1,0 +1,4 @@
+[module]
+name = "scoring"
+version = "1.0.0"
+summary = "One point per second for every player"

@@ -493,10 +493,13 @@ def _apply_scripted_option_value(v_obj, value: ScriptedOptionValue) -> None:
 def _apply_scripted_option(o_obj, option: ScriptedOption) -> None:
     """Everything except `name`/`desc` (own and each value's) -- see module docstring's "text
     fields" note."""
-    if len(option.values) != o_obj.value_count:
+    # A range option's enum values are meaningless, and a saved-and-reloaded one has none while a freshly created one has a
+    # single placeholder, so only an enum option's have to agree.
+    if not option.is_range and len(option.values) != o_obj.value_count:
         raise ValueError(f"scripted_options value count mismatch: settings has {len(option.values)}, variant has {o_obj.value_count}")
-    for i, value in enumerate(option.values):
-        _apply_scripted_option_value(o_obj.value(i), value)
+    if not option.is_range:
+        for i, value in enumerate(option.values):
+            _apply_scripted_option_value(o_obj.value(i), value)
     o_obj.is_range = option.is_range
     for model_val, engine_ref, field_name in (
         (option.range_default, o_obj.range_default, "range_default"),
@@ -624,6 +627,19 @@ class TableReconciliation:
         return bool(self.added)
 
 
+def _grow_options(mp, entries: list) -> None:
+    """Gives each variant option the shape its settings entry has: a new option is created with a single enum value and no
+    range, so an entry listing more values, or a range, needs them added. Only ever grows -- nothing is removed."""
+    for i, entry in enumerate(entries):
+        option = mp.scripted_option(i)
+        if entry.is_range:
+            if option.range_default is None:
+                option.make_range()
+        else:
+            while option.value_count < len(entry.values):
+                option.add_value()
+
+
 def reconcile_script_tables(rvt, mp, script_settings: ScriptSettings) -> TableReconciliation:
     """Makes each of the variant's scripted options, player-trait sets, stats and HUD widgets and its
     ``script_settings`` list agree, from whichever side has more.
@@ -663,6 +679,8 @@ def reconcile_script_tables(rvt, mp, script_settings: ScriptSettings) -> TableRe
             made += 1
         if made:
             created[settings_field] = made
+        if settings_field == "scripted_options":
+            _grow_options(mp, entries)
         count = getattr(mp, count_attr)
         appended = [extract(rvt, getattr(mp, accessor)(i)) for i in range(len(entries), count)]
         if appended:

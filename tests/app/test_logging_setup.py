@@ -126,9 +126,9 @@ def test_configure_logging_with_no_log_file_still_avoids_no_handler_warnings(tmp
 
 
 def test_get_logger_returns_a_child_of_the_in_reach_logger() -> None:
-    logger = logging_setup.get_logger("in_reach.ide.main_window")
+    logger = logging_setup.get_logger("in_reach_ide.main_window")
 
-    assert logger.name == "in_reach.in_reach.ide.main_window"
+    assert logger.name == "in_reach.in_reach_ide.main_window"
     assert logger.name.startswith(logging_setup._LOGGER_NAME + ".")
 
 

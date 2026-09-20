@@ -247,3 +247,18 @@ def test_has_comments(source: str, expected: bool) -> None:
 )
 def test_uses_directives(source: str, expected: bool) -> None:
     assert script_preprocess.uses_directives(source) is expected
+
+
+# -- linked projects ------------------------------------------------------------------------------------
+
+
+def test_a_linked_project_is_never_pulled_into(folder: Path) -> None:
+    """Its script is built from blocks and modules; output.txt isn't the source, so an RVT change to the built
+    script has nowhere to go."""
+    _write_script(folder, "mine\n")
+    before, after = _snapshots(folder, built="built\n", rvt="edited in rvt\n")
+    assert script_sync.plan_pull(folder, before, after).needed  # a single-file project would pull this
+
+    (folder / new_project.SCRIPT_DIRNAME / "project.toml").write_text("", encoding="utf-8")
+
+    assert script_sync.plan_pull(folder, before, after) == script_sync.PullPlan(needed=False)

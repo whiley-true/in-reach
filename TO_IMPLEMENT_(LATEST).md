@@ -495,6 +495,15 @@ every cap this section relies on against §3's corrected table.
 `project.toml [constants]` → active env profile. Unresolved, non-integer where a Number is required,
 or outside signed 16-bit is a lower error (IR015).
 
+> **As implemented (`app/script_project/constants.py`):** the order above is *wrong about the last two*. The
+> §5.2/§5.3 examples have `PHASE_TIMER = 6` in `project.toml` and `PHASE_TIMER=2` in `dev.env`, which only
+> makes sense if the profile overrides `[constants]` -- so `[constants]` are the *defaults*, and the order is
+> **module parameter → active profile → `project.toml [constants]`**. A constant written `"${OTHER}"` follows
+> OTHER's final value, so a profile that changes OTHER changes it too. A parameter's own `default` may be
+> `"${CONSTANT}"`, but a parameter can't refer to another parameter. A placeholder is also filled in an
+> annotation's arguments (`-- @ptimer p_t default=${interval}`), which the preprocessor used to skip because
+> annotations are comments; the `-- @` prefix, a `-- note`, `@doc` text and ordinary comments still aren't.
+
 Conditional compilation removes dev-only code from release builds and reclaims its budget:
 
 ```
@@ -548,9 +557,36 @@ round-trip, and feed the LLM overview. `-- @see TAG` points at a section of the 
 `-- @assumes BLOCK` records an ordering assumption the linter checks (IR016). This is now safe to
 commit to without the `mgl/2` hedge (comments are confirmed real syntax — see §0.1 item 3).
 
+### 4.8 Annotation syntax as implemented
+
+`src/in_reach/app/rvt/megalo_ast/annotations.py` (`parse_annotations()`) reads everything in §4.1–4.7; its module
+docstring is the grammar reference. Where this document's examples were loose, the parser chose:
+
+- **An annotation is a whole-line comment** starting `-- @name` (indentation free). `x = 1 -- @doc` is an
+  ordinary comment. `@if`/`@else`/`@end` stay build-profile directives, not annotations.
+- **Prose after the arguments needs a second `--`**: `-- @pnumber p_hud priority=high   -- player.number`. The
+  examples above put it bare (`... priority=high        player.number`); the parser reports that as an unexpected
+  argument. (`@doc` is the exception: its whole remainder is text.)
+- **Arguments** are whitespace-separated words; `key=value` has no spaces around `=`; `"strings"` and `{ groups }`
+  are one argument each. Inside a group, `name = value` pairs are comma-separated (trailing comma allowed) and a
+  value is a number, a `"string"`, `true`/`false` or a bare word.
+- **Storage** has twenty spellings: `@`, `@p`, `@o`, `@t` × `number|object|player|team|timer` -- the doc's
+  examples show eight; the rest follow the same pattern. `@o*` takes `KIND.NAME`, `@t*` takes `TEAM.NAME`.
+  `priority=` isn't allowed on a timer and `default=` isn't allowed on a player or object variable, the same rules
+  as a `declare`.
+- **`@fusion` has a fourth mode, `subroutine`** (§7's alternative lowering, opt-in only -- see `next_steps.md`
+  decision 3), besides `auto`, `never` and `force:GROUP`.
+- **The parser only parses.** Duplicate names, pool capacity, the 15-flag limit of a bitfield, what fields a
+  trait or option may have -- all the linter's and linker's (IR-rules), because they need more than one line.
+
 ---
 
 ## 5. Manifests
+
+> **Superseded in part (`next_steps.md`, decision 1):** a module's storage needs are *inferred from its
+> annotations*, never declared a second time. The `[requires]` and `[provides]` tables below are dropped; the
+> manifest keeps `[module]`, `[order]`, `[params]`, shared items and tags. The linter and budget panel show the
+> totals the annotations add up to.
 
 ### 5.1 `module.toml`
 

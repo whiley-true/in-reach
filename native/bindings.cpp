@@ -1052,14 +1052,32 @@ PYBIND11_MODULE(_reachvarianttool, m) {
       .def_readwrite("sort_order", &ReachMegaloGameStat::sortOrder)
       .def_readwrite("group_by_team", &ReachMegaloGameStat::groupByTeam);
 
+   // name/desc of the scripted things below are pointers into the variant's script_strings table. They are settable so a
+   // new entry can be given a string of its own (ScriptStringTable.add_new()) instead of the table's shared empty one
+   // every freshly-added entry starts with; None detaches. The table owns the strings, so nothing here needs keeping alive.
    py::class_<ReachMegaloOptionValueEntry>(m, "ScriptedOptionValue")
-      .def_property_readonly("name", [](ReachMegaloOptionValueEntry& v) -> ReachString* { return v.name; }, py::return_value_policy::reference_internal)
-      .def_property_readonly("desc", [](ReachMegaloOptionValueEntry& v) -> ReachString* { return v.desc; }, py::return_value_policy::reference_internal)
+      .def_property("name", [](ReachMegaloOptionValueEntry& v) -> ReachString* { return v.name; },
+         [](ReachMegaloOptionValueEntry& v, ReachString* s) { v.name = s; }, py::return_value_policy::reference_internal)
+      .def_property("desc", [](ReachMegaloOptionValueEntry& v) -> ReachString* { return v.desc; },
+         [](ReachMegaloOptionValueEntry& v, ReachString* s) { v.desc = s; }, py::return_value_policy::reference_internal)
       .def_readwrite("value", &ReachMegaloOptionValueEntry::value);
 
    py::class_<ReachMegaloOption>(m, "ScriptedOption")
-      .def_property_readonly("name", [](ReachMegaloOption& o) -> ReachString* { return o.name; }, py::return_value_policy::reference_internal)
-      .def_property_readonly("desc", [](ReachMegaloOption& o) -> ReachString* { return o.desc; }, py::return_value_policy::reference_internal)
+      .def_property("name", [](ReachMegaloOption& o) -> ReachString* { return o.name; },
+         [](ReachMegaloOption& o, ReachString* s) { o.name = s; }, py::return_value_policy::reference_internal)
+      .def_property("desc", [](ReachMegaloOption& o) -> ReachString* { return o.desc; },
+         [](ReachMegaloOption& o, ReachString* s) { o.desc = s; }, py::return_value_policy::reference_internal)
+      .def("add_value", [](ReachMegaloOption& o) -> ReachMegaloOptionValueEntry& {
+            auto* value = o.add_value(); // nullptr for a range option, or at Limits::max_script_option_values
+            if (!value)
+               throw std::runtime_error("Cannot add a value: the option is a range option, or has the maximum number of values.");
+            return *value;
+         }, py::return_value_policy::reference_internal,
+         "Appends an enum value (its value 0, name/description unset) and returns it. Raises RuntimeError for a range "
+         "option or at the engine's value limit.")
+      .def("make_range", &ReachMegaloOption::make_range,
+         "Gives the option its range_min/range_max/range_default entries (what RVT's own 'range' switch does). Does not "
+         "change is_range; set that too.")
       .def_readwrite("is_range", &ReachMegaloOption::isRange)
       .def("value", [](ReachMegaloOption& o, size_t i) -> ReachMegaloOptionValueEntry& {
             if (i >= o.values.size())
@@ -1075,8 +1093,10 @@ PYBIND11_MODULE(_reachvarianttool, m) {
       .def_readwrite("current_value_index", &ReachMegaloOption::currentValueIndex);
 
    py::class_<ReachMegaloPlayerTraits, ReachPlayerTraits>(m, "ScriptedPlayerTraits")
-      .def_property_readonly("name", [](ReachMegaloPlayerTraits& t) -> ReachString* { return t.name; }, py::return_value_policy::reference_internal)
-      .def_property_readonly("desc", [](ReachMegaloPlayerTraits& t) -> ReachString* { return t.desc; }, py::return_value_policy::reference_internal);
+      .def_property("name", [](ReachMegaloPlayerTraits& t) -> ReachString* { return t.name; },
+         [](ReachMegaloPlayerTraits& t, ReachString* s) { t.name = s; }, py::return_value_policy::reference_internal)
+      .def_property("desc", [](ReachMegaloPlayerTraits& t) -> ReachString* { return t.desc; },
+         [](ReachMegaloPlayerTraits& t, ReachString* s) { t.desc = s; }, py::return_value_policy::reference_internal);
 
    // ---- GameVariantDataMultiplayer / GameVariant -----------------------------------------
 

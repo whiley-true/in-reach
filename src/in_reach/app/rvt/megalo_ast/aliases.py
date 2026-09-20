@@ -133,7 +133,15 @@ def _resolve_expr(expr: Expression, scope: _Scope) -> Expression:
         value = scope.get(expr.name)
         return expr if value is None else _at(value, expr.span)
     if isinstance(expr, Member):
-        return expr.model_copy(update={"target": _resolve_expr(expr.target, scope)})
+        target = _resolve_expr(expr.target, scope)
+        nested = _nested_variable(scope.get(expr.name))
+        if nested is not None:
+            # `alias p_n = player.number[0]` used as `current_player.p_n`: native reads that as
+            # `current_player.number[0]`, so the alias names a variable *of whatever it is used on*.
+            type_name, index = nested
+            member = Member(target=target, name=type_name, span=expr.span)
+            return Index(target=member, index=_at(index, expr.span), span=expr.span)
+        return expr.model_copy(update={"target": target})
     if isinstance(expr, Index):
         return expr.model_copy(update={
             "target": _resolve_expr(expr.target, scope), "index": _resolve_expr(expr.index, scope),
@@ -150,6 +158,23 @@ def _resolve_expr(expr: Expression, scope: _Scope) -> Expression:
             "left": _resolve_expr(expr.left, scope), "right": _resolve_expr(expr.right, scope),
         })
     return expr  # int/percent/string literals
+
+
+#: Scopes whose variables belong to something (a player, an object, a team) -- so an alias for one is used as
+#: ``owner.alias``. ``global`` and ``temporaries`` stand alone and are substituted like any other alias.
+_OWNED_SCOPES = frozenset({"player", "object", "team"})
+
+
+def _nested_variable(value: Expression | None) -> tuple[str, Expression] | None:
+    """``("number", <0>)`` for an alias value shaped ``player.number[0]`` (or ``object.``/``team.``), else ``None``."""
+    if (
+        isinstance(value, Index)
+        and isinstance(value.target, Member)
+        and isinstance(value.target.target, Identifier)
+        and value.target.target.name in _OWNED_SCOPES
+    ):
+        return value.target.name, value.index
+    return None
 
 
 def _at(expr: Expression, span: SourceSpan) -> Expression:

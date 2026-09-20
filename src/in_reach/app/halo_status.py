@@ -1,7 +1,7 @@
 """Whether Halo: The Master Chief Collection is currently running -- PROMPT.md: "if the ide
 detects (it should check every .5s) that Halo Mcc is running ... then the flame should be filled"
-(see :class:`~in_reach.ide.activity_bar.ActivityBar`'s own status indicator, driven from
-:meth:`~in_reach.ide.main_window.MainWindow._refresh_halo_status`).
+(see :class:`~in_reach_ide.activity_bar.ActivityBar`'s own status indicator, driven from
+:meth:`~in_reach_ide.main_window.MainWindow._refresh_halo_status`).
 
 Windows-only, and process-name-based rather than a window-title lookup (an earlier pass used
 ``FindWindowW`` against the window title "Halo: The Master Chief Collection" -- PROMPT.md:

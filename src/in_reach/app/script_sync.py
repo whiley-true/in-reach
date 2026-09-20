@@ -18,6 +18,9 @@ Pulling replaces ``output.txt`` with the decompiled text, so a pull that would l
 edits, comments, or ``-- @if`` / ``${...}`` build-profile directives (the decompiled script is one profile
 already resolved, with no comments) -- is reported as a reason to ask first rather than done silently.
 
+Only for a single-file project. A *linked* project (one with a ``script/project.toml``) compiles from the
+linker's output, so a change to the built script has no source to be pulled into.
+
 Pure Python: nothing here loads the native extension, so the GUI process can call it.
 """
 
@@ -29,7 +32,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from in_reach.app import new_project, script_preprocess
+from in_reach.app import new_project, script_preprocess, script_project
 
 #: Kept equal to :data:`in_reach.app.rvt.decompile.SCRIPT_FILENAME` (which imports this module, so it
 #: can't be imported here); ``tests/app/test_script_sync.py`` checks they agree.
@@ -125,6 +128,10 @@ def plan_pull(folder: Path, before: ScriptSnapshot | None, after: ScriptSnapshot
         after: The snapshot that resync wrote.
     """
     if before is None or after is None or before.text == after.text:
+        return PullPlan(needed=False)
+    if script_project.is_linked(folder):
+        # A linked project is built from blocks and modules; output.txt isn't its source, so there is nothing
+        # to pull into (and overwriting it would only leave a stray file). RVT can't edit a script anyway.
         return PullPlan(needed=False)
     current = read_script(folder)
     if current == after.text:

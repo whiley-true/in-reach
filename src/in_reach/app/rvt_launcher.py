@@ -47,7 +47,7 @@ def launch_rvt(target: Path | None = None, *, exe_path: Path | None = None, pope
 
     Returns:
         Whatever ``popen`` returns -- a real :class:`subprocess.Popen` handle to the launched
-        process by default, so a caller (see :meth:`~in_reach.ide.main_window.MainWindow.
+        process by default, so a caller (see :meth:`~in_reach_ide.main_window.MainWindow.
         launch_rvt`) can later check whether it's still running and terminate it (PROMPT.md: "if
         project is closed in ide, if Reach Variant tool is open for that project it should be
         closed").
