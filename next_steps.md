@@ -157,7 +157,8 @@ Right now a script is edited as plain text and errors come back in Apply's failu
   **First GitHub runs found three real problems, all fixed but not yet re-run:** (1) the workflow installed the
   package non-editable, so on 3.12/3.13 the tests imported a site-packages copy without the built module and
   650 tests silently skipped, and on 3.14 they would have tested the *committed* module -- now editable, with a
-  step that fails if the module just built doesn't load; (2) `build.py` finished and installed the build, then
+  step (`native/verify.py`, unit-tested) that fails if the module just built doesn't load *or* if a different
+  copy of it was loaded; (2) `build.py` finished and installed the build, then
   crashed deleting its temporary build directory because MSBuild still held a handle on it -- the default build
   directory is now the persistent, git-ignored `native/build/`; (3) four IDE tests had never run on Windows
   under Qt's `offscreen` platform, which has no emoji font (icons all render as one box) -- the Windows job now

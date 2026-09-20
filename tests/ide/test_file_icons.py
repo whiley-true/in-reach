@@ -104,3 +104,30 @@ def test_icon_for_path_handles_a_dotfile_with_no_further_suffix(tmp_path: Path, 
     mapped = file_icons.icon_for_suffix(".gitignore").pixmap(32, 32).toImage()
 
     assert icon == mapped
+
+
+def test_a_drive_that_denies_access_still_gets_an_icon(monkeypatch) -> None:
+    """Qt's file model asks for an icon for every drive root, including one Windows won't let us look at (a
+    locked or card-reader drive). ``Path.is_dir()`` raises ``PermissionError`` for it on Python 3.12/3.13
+    (3.14 returns ``False``); out of this Qt virtual method that surfaced as "Exceptions caught in Qt event
+    loop" and failed every test that showed the Explorer, on a machine with such a drive."""
+
+    def denied(self) -> bool:
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(Path, "is_dir", denied)
+
+    icon = file_icons.icon_for_path(Path("G:/"))
+
+    assert not icon.isNull()
+
+
+def test_the_explorer_icon_provider_survives_an_unreadable_path(monkeypatch) -> None:
+    from PyQt6.QtCore import QFileInfo
+
+    def denied(self) -> bool:
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(Path, "is_dir", denied)
+
+    assert not file_icons.ExplorerIconProvider().icon(QFileInfo("G:/")).isNull()

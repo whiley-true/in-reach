@@ -12,6 +12,7 @@ Everything needed to build it is in this folder:
 | `bindings.cpp`, `type_casters.h` | the pybind11 bindings written for in-reach |
 | `CMakeLists.txt` | compiles the two into `_reachvarianttool` |
 | `build.py` | builds it and installs the module and its Qt runtime DLLs into the package |
+| `verify.py` | checks the installed module is the one in-reach actually loads (CI runs it between build and tests) |
 
 Wheels from PyPI contain a built module, so nobody installing in-reach needs any of this; it's for changing
 the bindings, or for building on a Python version a wheel wasn't published for. CI builds it too
@@ -63,11 +64,11 @@ python native/build.py                       # --vcpkg-root C:/vcpkg (or $VCPKG_
 ```
 
 That configures and builds with CMake and copies `_reachvarianttool.cp3XX-win_amd64.pyd`, `Qt5Core.dll`,
-`z.dll`, `pcre2-16.dll`, `double-conversion.dll` and `qt.conf` into `src/in_reach/app/rvt/native/`. A build
-build tree is kept in `native/build/` (git-ignored; `--build-dir` puts it elsewhere), so later builds are
+`z.dll`, `pcre2-16.dll`, `double-conversion.dll` and `qt.conf` into `src/in_reach/app/rvt/native/`. The
+build tree is kept in `native/build/cp3XX/` (git-ignored, one per Python version; `--build-dir` puts it
+elsewhere), so later builds are
 incremental: touching only `bindings.cpp` recompiles that one file and relinks (a couple of minutes); the
-first build compiles the whole engine (several).
-A zero exit code is not proof of a good build if you drive CMake yourself -- grep the log for `error C` /
+first build compiles the whole engine (several). A zero exit code is not proof of a good build if you drive CMake yourself -- grep the log for `error C` /
 `error LNK`; `build.py` stops on a failed build and on a missing or ambiguous module.
 
 The `.pyd` and DLLs currently in the repo are committed build output, so a checkout works without building.

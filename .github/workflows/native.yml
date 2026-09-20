@@ -64,10 +64,7 @@ jobs:
         run: python native/build.py --vcpkg-root "$env:VCPKG_INSTALLATION_ROOT"
 
       - name: Check the module just built is the one being tested
-        run: >
-          python -c "from in_reach.app.rvt import rvt_bridge; import _reachvarianttool as m;
-          assert rvt_bridge.is_available(), 'the built module did not load';
-          print(m.__file__)"
+        run: python native/verify.py
 
       - name: Run the whole test suite against it
         run: python -m pytest -q -rs

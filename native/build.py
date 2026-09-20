@@ -1,7 +1,7 @@
 """Builds ``_reachvarianttool`` from this folder and installs it into the package.
 
     python native/build.py                      # uses this interpreter, C:/vcpkg (or $VCPKG_ROOT)
-    python native/build.py --build-dir out/nb   # keep the build tree somewhere else (default: native/build)
+    python native/build.py --build-dir out/nb   # keep the build tree somewhere else (default: native/build/<cpXY>)
 
 It configures and builds with CMake, then copies the built module and the Qt runtime DLLs it needs into
 ``src/in_reach/app/rvt/native/`` -- where :mod:`in_reach.app.rvt.rvt_bridge` looks for them. The module is
@@ -26,8 +26,10 @@ NATIVE_DIR = Path(__file__).resolve().parent
 DEFAULT_DEST = NATIVE_DIR.parent / "src" / "in_reach" / "app" / "rvt" / "native"
 #: Kept between runs (git-ignored), so a second build is incremental. Deliberately not a temporary directory:
 #: MSBuild leaves helper processes holding handles on its build tree for a while after the build, so deleting
-#: one straight afterwards fails on Windows -- which failed CI with a finished, installed build.
-DEFAULT_BUILD_DIR = NATIVE_DIR / "build"
+#: one straight afterwards fails on Windows -- which failed CI with a finished, installed build. One
+#: subdirectory per Python version (``build/cp312``, ...): CMake caches the Python libraries it found, so
+#: building for a second interpreter into the same tree would quietly reuse the first one's.
+BUILD_ROOT = NATIVE_DIR / "build"
 #: What's next to the built module that it needs at runtime -- vcpkg copies these beside it.
 _RUNTIME_DLL_PATTERNS = ("*.dll",)
 #: Qt reads this next to Qt5Core.dll; an empty [Paths] section stops it searching for a Qt install.
@@ -39,6 +41,11 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def python_tag() -> str:
+    """``cp312`` for Python 3.12 -- what the built module's filename must carry to load in this interpreter."""
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
 def _require_pybind11() -> None:
     try:
         import pybind11  # noqa: F401
@@ -46,8 +53,14 @@ def _require_pybind11() -> None:
         sys.exit("pybind11 isn't installed in this interpreter -- run: python -m pip install pybind11")
 
 
-def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, python: str = sys.executable) -> Path:
-    """Builds the module and installs it into ``dest``. Returns the installed module's path."""
+def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, tag: str | None = None) -> Path:
+    """Builds the module for *this* interpreter and installs it into ``dest``. Returns the installed path.
+
+    ``tag`` is the ``cpXY`` the built module must carry (default: this interpreter's, see
+    :func:`python_tag`); anything else is refused rather than installed.
+    """
+    tag = tag or python_tag()
+    python = Path(sys.executable).as_posix()
     toolchain = vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake"
     if not toolchain.is_file():
         sys.exit(f"no vcpkg toolchain at {toolchain} -- pass --vcpkg-root or set VCPKG_ROOT")
@@ -58,7 +71,13 @@ def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, python: s
             "-G", "Visual Studio 17 2022", "-A", "x64",
             f"-DCMAKE_TOOLCHAIN_FILE={toolchain.as_posix()}",
             "-DVCPKG_TARGET_TRIPLET=x64-windows",
-            f"-DPython3_EXECUTABLE={Path(python).as_posix()}",
+            # Every spelling, because which one counts depends on how pybind11 was told to find Python (the legacy
+            # finder reads PYTHON_EXECUTABLE, FindPython reads Python_/Python3_EXECUTABLE). Left out, CMake falls
+            # back to the first `python` on PATH -- and silently builds for the wrong interpreter whenever that
+            # isn't this one.
+            f"-DPYTHON_EXECUTABLE={python}",
+            f"-DPython_EXECUTABLE={python}",
+            f"-DPython3_EXECUTABLE={python}",
         ]
     )
     _run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(jobs)])
@@ -67,6 +86,11 @@ def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, python: s
     modules = sorted(release_dir.glob("_reachvarianttool*.pyd"))
     if len(modules) != 1:
         sys.exit(f"expected exactly one built module in {release_dir}, found {[m.name for m in modules]}")
+    if f".{tag}-" not in modules[0].name:
+        sys.exit(
+            f"built {modules[0].name}, but this interpreter is {tag} and can't load it -- CMake used a different "
+            f"Python; delete {build_dir} and check which python it found"
+        )
 
     dest.mkdir(parents=True, exist_ok=True)
     for stale in dest.glob("_reachvarianttool*.pyd"):
@@ -83,7 +107,7 @@ def build(vcpkg_root: Path, build_dir: Path, dest: Path, *, jobs: int, python: s
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--vcpkg-root", type=Path, default=Path(os.environ.get("VCPKG_ROOT", "C:/vcpkg")))
-    parser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR, help=f"default: {DEFAULT_BUILD_DIR}")
+    parser.add_argument("--build-dir", type=Path, default=None, help=f"default: {BUILD_ROOT}/<cpXY>")
     parser.add_argument("--dest", type=Path, default=DEFAULT_DEST, help=f"default: {DEFAULT_DEST}")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     args = parser.parse_args(argv)
@@ -92,7 +116,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit("_reachvarianttool only builds on Windows (MSVC, and in-reach itself targets Windows)")
     _require_pybind11()
 
-    installed = build(args.vcpkg_root, args.build_dir, args.dest, jobs=args.jobs)
+    build_dir = args.build_dir if args.build_dir is not None else BUILD_ROOT / python_tag()
+    installed = build(args.vcpkg_root, build_dir, args.dest, jobs=args.jobs)
     print(f"installed {installed}")
 
 
