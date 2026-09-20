@@ -91,7 +91,7 @@ BUILD_DIRNAME = "build"
 BUILD_DIST_SUBDIR = "dist"
 INIT_GAMETYPE_DIRNAME = "init_gametype"
 #: PROMPT.md: "please also add a Notes.txt" -- since then the backing file of the Dashboard's
-#: "Notepad" box (see :mod:`in_reach.ide.notepad`), whose own placeholder text is what a fresh
+#: "Notepad" box (see :mod:`in_reach_ide.notepad`), whose own placeholder text is what a fresh
 #: project shows, so it starts empty (an earlier "Use this space for free form notes." first line
 #: would have hidden that placeholder).
 NOTES_FILENAME = "Notes.txt"
@@ -196,7 +196,7 @@ def source_variant_path(project_dir: Path, gametype_folder: Path) -> Path:
     :func:`~in_reach.app.rvt.compile.run_compile`'s own docstring for why a compile always rebuilds
     from this exact fixed base rather than incrementally re-using ``build/``'s own prior output).
 
-    Not what :meth:`in_reach.ide.main_window.MainWindow.launch_rvt` opens RVT against -- that's
+    Not what :meth:`in_reach_ide.main_window.MainWindow.launch_rvt` opens RVT against -- that's
     :func:`compiled_variant_path`, the freshly-*built* gametype (this project's own hand-edited
     settings/script actually baked in), not this untouched original.
 
@@ -217,7 +217,7 @@ def compiled_variant_path(folder: Path) -> Path:
     ``build/dist/<folder.name>.bin``.
 
     PROMPT.md: "when clicking into rvt, it seems to be showing blank gametype and description not
-    the contents from the saved settings" -- :meth:`~in_reach.ide.main_window.MainWindow.launch_rvt`
+    the contents from the saved settings" -- :meth:`~in_reach_ide.main_window.MainWindow.launch_rvt`
     used to hand RVT :func:`source_variant_path` instead (the project's original, never-touched
     starting point, per its own docstring), so RVT always opened onto whatever the source ``.bin``
     happened to look like at creation time, never anything the user had actually saved into
@@ -247,7 +247,7 @@ def is_generated_file(path: Path) -> bool:
     build/resync/decompile overwrites it wholesale (schema files: "regenerated fresh whenever a
     project is (re)decompiled", see :mod:`in_reach.app.rvt.schema_io`). PROMPT.md: "schema files
     should be non-editable (by hand)". The IDE opens one read-only rather than letting an edit
-    silently vanish on the next one (see :meth:`in_reach.ide.tabs.TabPane.open_file`).
+    silently vanish on the next one (see :meth:`in_reach_ide.tabs.TabPane.open_file`).
 
     Args:
         path: Any file path -- doesn't have to point inside a real project, or even exist.

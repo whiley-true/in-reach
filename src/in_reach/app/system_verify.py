@@ -8,7 +8,7 @@ First, nothing here talks to the user. The v2 checklist printed straight to stdo
 ``input()``/``msvcrt.getch()`` in the middle of a check; this one only ever *reports* what a step
 resolved to -- :class:`Outcome` says whether it found one answer, needs the user to pick between
 several, or found nothing at all -- and leaves every prompt to whatever is driving it (see
-:mod:`in_reach.ide.verify_dialog`). That's also what makes the whole checklist testable without a
+:mod:`in_reach_ide.verify_dialog`). That's also what makes the whole checklist testable without a
 Steam install, a running MCC, or a terminal.
 
 Second, each location's default path is derived here in code, from the step before it, rather than

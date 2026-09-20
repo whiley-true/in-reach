@@ -72,6 +72,7 @@ class LinkResult:
     settings_changed: bool = False
     written: list[Path] = field(default_factory=list)
     project: ScriptProject | None = None  # what was linked, for a caller that wants its modules and blocks
+    model: SemanticModel | None = None  # ... and its fragments (None if the project didn't load)
 
     @property
     def errors(self) -> list[ProjectDiagnostic]:
@@ -274,6 +275,7 @@ def link(folder: Path, *, write: bool = True) -> LinkResult:
         return result
 
     model = build_model(project)
+    result.model = model
     result.diagnostics += model.diagnostics + lint(model)
     if result.errors:
         return result

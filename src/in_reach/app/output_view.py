@@ -4,10 +4,10 @@ comment ... at the top"): a fresh copy of the project's hand-edited ``script/out
 auto-generated banner comment prepended, written under ``build/`` -- landing it under
 :func:`~in_reach.app.new_project.is_generated_file`'s own ``BUILD_DIRNAME`` check for free, so the
 IDE opens it read-only with the usual padlock tab icon (see
-:meth:`~in_reach.ide.tabs.TabPane.open_file`) without needing a special case there.
+:meth:`~in_reach_ide.tabs.TabPane.open_file`) without needing a special case there.
 
 Regenerated fresh every time the button is clicked (see
-:meth:`~in_reach.ide.main_window.MainWindow.view_output_txt`) rather than kept in sync
+:meth:`~in_reach_ide.main_window.MainWindow.view_output_txt`) rather than kept in sync
 automatically, so it always reflects the script's current on-disk content -- there's no other
 writer of ``script/output.txt`` to hook a sync into anyway (see
 :mod:`~in_reach.app.rvt.decompile`'s own module docstring: it's "the one genuinely hand-editable
@@ -93,3 +93,35 @@ def _write_linked_view(folder: Path) -> Path:
     view_path.parent.mkdir(parents=True, exist_ok=True)
     view_path.write_text(text, encoding="utf-8")
     return view_path
+
+
+#: The decompiled view's file, next to ``Compiled.txt``.
+DECOMPILED_FILENAME = "Decompiled.txt"
+
+_DECOMPILED_BANNER = (
+    "-- This file is auto-generated and non-editable: the script of the built .bin as RVT shows it -- no modules,\n"
+    "-- no profile, no annotations. It's provided for reference and debugging. Edit script/ and rebuild.\n\n"
+)
+
+
+def decompiled_view_path(folder: Path) -> Path:
+    return folder / BUILD_DIRNAME / DECOMPILED_FILENAME
+
+
+def write_decompiled_view(folder: Path) -> Path:
+    """(Re)writes ``build/Decompiled.txt`` from the project's built ``.bin`` (``build/dist/<name>.bin``): its script decompiled
+    the way ReachVariantTool shows it. Needs the native extension.
+
+    Raises:
+        OSError: There is no built ``.bin``, or it can't be read.
+        ImportError: The native extension isn't available."""
+    from in_reach.app import new_project
+    from in_reach.app.rvt import decompile, rvt_bridge
+
+    built = new_project.compiled_variant_path(folder)
+    variant = rvt_bridge.get_rvt().load(str(built))
+    text = decompile.normalize_script_text(variant.decompile_script()) if variant.multiplayer is not None else ""
+    path = decompiled_view_path(folder)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_DECOMPILED_BANNER + text, encoding="utf-8")
+    return path

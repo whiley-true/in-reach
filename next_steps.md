@@ -173,7 +173,9 @@ Follow `TO_IMPLEMENT` milestones 1-3, after the corrections below. The pieces, r
    example shows those; measuring them needs a compile per candidate). The budget is the Scripts view (storage
    pools, engine tables, and trigger/condition/action counters measured on the built variant and recorded in
    `link_map.json` by `record_counters()`); "bits" (space usage) is still only in the Dashboard's stats box.
-6. **Python as a one-way generator** front-end that emits `.mgl`/AST into `build/` (decided earlier: a
+6. **Python as a one-way generator** -- *dropped from the roadmap (decided): the IDE/CLI split, shareable modules and the composition
+   board below replaced it; nothing here should be built for Python authoring.*
+6-old. **Python as a one-way generator** front-end that emits `.mgl`/AST into `build/` (decided earlier: a
    generator, not a synced peer). Only after modules show what `.mgl` can't express -- an
    `inline function`/macro facility in `.mgl` may cover most of it.
 
@@ -266,6 +268,33 @@ Right now a script is edited as plain text and errors come back in Apply's failu
 - **CI can't run the corpus** (MCC files aren't redistributable). The 100% figures are a local measurement;
   consider committing a *derived* fidelity report (counts only, no game content).
 - The full suite takes ~6.5 minutes; worth splitting fast/slow markers before it grows further.
+
+---
+
+## Roadmap after the split (decided; work done)
+
+The repos: `in-reach` (this: library + CLI + the native module), `in-reach-ide` (the PyQt IDE, extracted with its git history;
+depends on `in-reach>=0.3,<0.4`), `within-reach` (hot reload / screen capture; a scaffold, `in-reach` and `in-reach-ide` will
+depend on it). Windows only; no VSCode tooling (a text file in any editor is the goal); no Linux CI; no Python authoring.
+
+- **Phase 0** guard tests -- `tests/test_import_boundaries.py`: the library and CLI import no GUI and never the IDE; importing
+  `script_project`/`megalo_ast` loads no native module. Done.
+- **Phase 1** `in_reach.api` + a full CLI (`build`, `check`/`lint`, `link`, `show`, `create-project`, `new-module`, `profile`,
+  `new`, `export`, `verify`, `launch`, `vcs ...`, `module ...`, `block-order`, `move-fragment`, `run`), `--format json`
+  (schema 1), exit codes 0/1/2. `in-reach run` opens the IDE only if `in-reach-ide` is installed. Done.
+- **Phase 2** (language server / VSCode extension): dropped.
+- **Phase 3** code views: `show --view rvt|rvt+|megalo`, `build/Decompiled.txt`, "View Decompiled" in the IDE. Done.
+- **Phase 4** shareable modules: `module add|update|lock|verify`, `project.lock`, path and git sources. Done. **Not done:** a
+  registry/hosted index (decided: path and git URL are enough for now); nothing checks a shared module against the
+  linter's rules *before* vendoring it (it is checked like any module once added).
+- **Phase 5** index database: deferred (its consumer was the language server).
+- **Phase 6** composition: the edit API and commands are done; the IDE board (module checkboxes, drag to reorder blocks,
+  "Move to" for fragments) is done. **Not done:** dragging a *fragment* between blocks with the mouse (it is a right-click
+  menu), and a visual budget/fusion preview while dragging (the view refreshes after each edit).
+
+**Known gaps / risks from the split:** the IDE repo's CI installs `in-reach` from PyPI, so nothing there can pass until an
+`in-reach` with `in_reach.api` (0.3.0) is published -- release `in-reach` first. `tests/hill_project.py` in `in-reach-ide` is a copy
+of this repo's fixture and must be kept in step by hand. Only the cp314 native module is committed here; CI builds the others.
 
 ---
 

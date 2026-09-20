@@ -771,7 +771,7 @@ def ref_file_diff(folder: Path, ref_a: str, ref_b: str, rel_path: str) -> tuple[
     or a :class:`Snapshot.sha`, same as :func:`diff`) -- what the Compare window's own per-file diff
     view shows for a selected changed file (PROMPT.md, a later pass: "please then add text
     colourings and line numbers in the compare window to make the text and changes clearer and more
-    visually appealing" -- reuses :class:`~in_reach.ide.diff_view.DiffViewWidget`, the same
+    visually appealing" -- reuses :class:`~in_reach_ide.diff_view.DiffViewWidget`, the same
     line-numbered, syntax-highlighted view :func:`uncommitted_file_diff` already feeds the Changes
     tab's own diff view). ``None`` on either side means ``rel_path`` doesn't exist there (added/
     removed) or isn't valid UTF-8 text (binary), same as :func:`uncommitted_file_diff`.
@@ -1107,7 +1107,7 @@ def commit_file_diff(folder: Path, sha: str, rel_path: str) -> tuple[str | None,
     """``(old_text, new_text)`` for ``rel_path`` as changed *by* commit ``sha`` -- ``old_text`` is
     its own first parent's content (``None`` for a root commit, or a newly added file), ``new_text``
     is this commit's own content (``None`` if this commit removed it). What the Git panel's own
-    History section feeds :class:`~in_reach.ide.unified_diff_view.UnifiedDiffViewWidget` when a
+    History section feeds :class:`~in_reach_ide.unified_diff_view.UnifiedDiffViewWidget` when a
     changed file is clicked for a selected commit. Same shape as :func:`ref_file_diff`/
     :func:`uncommitted_file_diff`.
 

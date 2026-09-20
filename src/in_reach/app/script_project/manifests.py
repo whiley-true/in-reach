@@ -49,6 +49,11 @@ class ModuleRef(_Model):
 
     name: str
     params: dict[str, Scalar] = Field(default_factory=dict)
+    #: Where the module came from (``path:../shared/hill_score`` or ``git+https://host/repo.git@rev``), written by
+    #: ``in-reach module add``; the files themselves are vendored into ``script/modules/<name>/`` (see :mod:`.packages`).
+    source: str | None = None
+    #: ``enabled = false`` keeps the module in the project without building it (see :mod:`.edit`).
+    enabled: bool = True
 
 
 class KindSpec(_Model):
@@ -76,6 +81,11 @@ class ModuleSection(_Model):
     summary: str = ""
     tags: list[str] = Field(default_factory=list)
     features: list[str] = Field(default_factory=list)
+    # What a shared module says about itself (nothing here changes how it links).
+    description: str = ""
+    license: str = ""
+    authors: list[str] = Field(default_factory=list)
+    min_in_reach: str = ""  # the oldest in-reach that can build it, "0.3.0"
 
 
 class OrderSection(_Model):
@@ -126,12 +136,12 @@ _PROJECT_SCHEMA: dict[str, tuple] = {
     "blocks": ("table", {"order"}),
     "constants": ("any",),
     "pins": ("any",),
-    "modules": ("array", {"name", "params"}),
+    "modules": ("array", {"name", "params", "source", "enabled"}),
     "kinds": ("named", {"reached_by"}),
     "caps": ("any",),
 }
 _MODULE_SCHEMA: dict[str, tuple] = {
-    "module": ("table", {"name", "version", "summary", "tags", "features"}),
+    "module": ("table", {"name", "version", "summary", "tags", "features", "description", "license", "authors", "min_in_reach"}),
     "order": ("table", {"after", "before", "phase"}),
     "params": ("named", {"type", "doc", "default"}),
     "shared": ("table", {"traits", "options", "widgets", "labels"}),

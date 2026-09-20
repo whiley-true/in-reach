@@ -93,6 +93,7 @@ class ScriptProject:
     profile: script_preprocess.Profile | None = None
     constants: dict[str, str] = field(default_factory=dict)
     modules: list[LoadedModule] = field(default_factory=list)
+    disabled_modules: list[str] = field(default_factory=list)  # listed with enabled = false: kept, not built
     blocks: dict[str, LoadedBlock] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     kinds: dict[str, MergedKind] = field(default_factory=dict)
@@ -172,7 +173,16 @@ class _Loader:
         self._collect_blocks(manifest, where)
         self._order(manifest, where)
         self._merge_kinds(manifest, where)
+        self._check_pins()
         return self.project
+
+    def _check_pins(self) -> None:
+        """Warns when a shared module's vendored files no longer match ``project.lock`` (editing them is legitimate, so
+        this is never an error here; ``in-reach module verify`` is the strict check)."""
+        from . import packages
+
+        if (self.scripts / packages.LOCK_FILENAME).is_file():
+            self.project.diagnostics += packages.verify_modules(self.folder, severity="warning")
 
     def _load_profile_and_constants(self, manifest: ProjectManifest, where: dict) -> None:
         name = script_preprocess.active_profile_name(self.folder) or manifest.project.profile
@@ -215,6 +225,9 @@ class _Loader:
                 self.error("module-duplicate", f"module {ref.name} is listed twice", PROJECT_FILENAME, line, col)
                 continue
             listed.add(ref.name)
+            if not ref.enabled:
+                self.project.disabled_modules.append(ref.name)
+                continue  # switched off: it stays in the project, but nothing of it is built
             self._load_module(index, ref.name, ref.params, where)
 
         if modules_dir.is_dir():
