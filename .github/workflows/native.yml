@@ -4,10 +4,17 @@ name: Native extension
 # runs the whole test suite against the module it just built -- the Ubuntu jobs in tests.yml skip every test
 # that needs it -- and produces platform-tagged wheels that contain it.
 #
-# This workflow only *builds and uploads artifacts*. Publishing to PyPI is still publish.yml, which builds an
-# untagged wheel from the committed module; switch it to these wheels once this job has passed on a real run.
+# This workflow only *builds, tests and uploads artifacts* (`wheel-py<version>`). Publishing is publish.yml,
+# which calls this workflow (`workflow_call`) so a release is built and tested with exactly these steps, then
+# uploads those wheels.
 
 on:
+  workflow_call:
+  # Every push to main (a release merge), not only ones touching the paths below: a release-tag run can restore
+  # caches only from the default branch, so this is what leaves the vcpkg Qt5 cache where a release can find it
+  # instead of compiling Qt from source in the middle of publishing.
+  push:
+    branches: [main]
   pull_request:
     branches: [development, main]
     paths:
@@ -79,6 +86,20 @@ jobs:
           Write-Host $wheel.Name
           $tag = "cp$('${{ matrix.python-version }}'.Replace('.', ''))-cp$('${{ matrix.python-version }}'.Replace('.', ''))-win_amd64"
           if ($wheel.Name -notlike "*-$tag.whl") { throw "expected a $tag wheel, got $($wheel.Name)" }
+
+      # What a user gets: the wheel, installed into an empty environment, run from outside the checkout. The
+      # tests above import the source tree, so only this proves the wheel itself carries a loadable module.
+      - name: Smoke-test the wheel in a clean environment
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "smoke"
+          python -m venv $venv
+          & "$venv\Scripts\python.exe" -m pip install (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if ($LASTEXITCODE -ne 0) { throw "installing the wheel failed" }
+          Push-Location $env:RUNNER_TEMP
+          & "$venv\Scripts\python.exe" -c "import in_reach; from in_reach.app.rvt import rvt_bridge; assert 'site-packages' in in_reach.__file__, in_reach.__file__; assert rvt_bridge.is_available(), 'the wheel has no loadable native module'; print(rvt_bridge.get_rvt().__file__)"
+          if ($LASTEXITCODE -ne 0) { throw "the installed wheel doesn't work" }
+          Pop-Location
 
       - uses: actions/upload-artifact@v4
         with:

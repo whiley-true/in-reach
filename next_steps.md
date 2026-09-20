@@ -30,12 +30,6 @@ code does today, and `TO_IMPLEMENT_(LATEST).md` is still the design for the modu
   `add_scripted_*`) are built into the bundled `.pyd` and committed in `mega-ide` as `5d0fe97`.
   See `native/README.md`.
 
-**Not committed in this repo.** A lot of work is sitting in the working tree (compiler, pool, aliases,
-labels/tables, env profiles, native `.pyd`, about a dozen new test files). Commit it in themed pieces rather than one blob --
-suggested split: (1) alias pass + condition precedence + top-level loops, (2) template pool + table/label
-creation + reconcile, (3) env profiles + palette/status bar + starters, (4) the `.pyd` on its own (it's a
-tracked 2 MB binary).
-
 ---
 
 ## Priorities
@@ -165,10 +159,19 @@ Right now a script is edited as plain text and errors come back in Apply's failu
   uses the real platform, the maps-panel test reads `full_text` instead of the width-dependent elided text, and
   the emoji-rendering comparisons skip with a stated reason where a platform can't draw emoji. **Still to
   confirm on a real run:** that the 3.12-3.14 jobs go green with the native tests actually running (not
-  skipped), and that vcpkg's Qt5 caches. `publish.yml` still builds an untagged wheel from the *committed*
-  module; once the native job is green, switch publish to its wheels (build on Windows, one wheel per Python,
-  `pypa/gh-action-pypi-publish` over the lot) and stop committing the `.pyd`/DLLs -- until then a checkout works
-  without a toolchain because they're committed.
+  skipped), and that vcpkg's Qt5 caches. **All of that went green on real runs and was merged.**
+  **Publishing** (`publish.yml`) now builds one `cp3XX-win_amd64` wheel per Python by *calling* `native.yml` (a
+  reusable workflow, so a release is built and tested with exactly the steps that pass on PRs) plus an sdist, and
+  `.github/scripts/check_dist.py` refuses to upload unless `dist/` is exactly that -- 3.12-3.14 Windows wheels and
+  one sdist, one version, equal to the release tag. The gate exists because the old Ubuntu build would now tag its
+  wheel `linux_x86_64`, which PyPI rejects *after* the sdist may already be up, and a PyPI version can't be
+  re-uploaded. `native.yml` also runs on pushes to `main` so a release finds the vcpkg Qt cache. **Not yet run:**
+  a real release -- the first one is the test of `publish.yml` (actionlint-clean and covered by
+  `test_publish_workflow.py`, but GitHub has never executed it). **Still to do afterwards:** stop committing the
+  `.pyd`/DLLs (CI now produces them; a checkout then needs `python native/build.py` before native features or
+  tests work) once a release has published cleanly. The sdist currently includes the committed module too. Each
+  wheel is also installed into a clean environment and imported from outside the checkout before it is uploaded
+  as an artifact (the smoke-test step in `native.yml`), since the test suite only ever imports the source tree.
   Still Windows-only and per-CPython-version (the engine uses MSVC-specific constructs); Linux/macOS wheels
   would need a portability pass first.
 - **Multi-platform / multi-Python**: solved for Python (CI builds 3.12-3.14 wheels, see above), not for
