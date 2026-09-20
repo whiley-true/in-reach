@@ -203,3 +203,15 @@ def test_the_wheel_is_installed_and_imported_from_a_clean_environment_before_it_
     assert "'site-packages' in in_reach.__file__" in smoke  # imported from the install, not the checkout
     assert "rvt_bridge.is_available()" in smoke
     assert "$LASTEXITCODE" in smoke  # a native command failing doesn't stop a pwsh step by itself
+
+
+def test_the_bump_label_check_reads_the_labels_live_not_from_the_event_snapshot() -> None:
+    """The regression: Cut Release opens its PR and adds the label a moment later, so an ``opened`` run saw the payload's
+    empty label list, failed, and (finishing last) left the required check red on a PR that had its label. Re-running it
+    replays the same stale payload, so the check has to ask GitHub for the labels as they are now."""
+    workflow = (Path(__file__).parents[2] / ".github" / "workflows" / "require-bump-label.yml").read_text(encoding="utf-8")
+
+    code = "\n".join(line for line in workflow.splitlines() if not line.strip().startswith("#"))  # the comments explain it
+
+    assert "issues/${PR_NUMBER}/labels" in code and "github.event.pull_request.labels" not in code
+    assert "cancel-in-progress: true" in workflow  # the newest event wins
