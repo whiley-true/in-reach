@@ -122,9 +122,9 @@ def test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_trigger(juggern
 
 def test_a_non_tail_if_body_is_still_built_inline_using_a_wrapper_trigger(juggernaut) -> None:
     """When something follows the "if" within the same body, its conditions can't be allowed to gate
-    that trailing code too -- so it still needs the "Run Inline Nested Trigger" wrapper (embedded
-    directly in the parent's own opcode list, zero extra trigger slots) to isolate it, same as before
-    tail-position flattening (see test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_
+    that trailing code too -- so the conditions *and* the body go in a "Run Inline Nested Trigger"
+    wrapper (embedded directly in the parent's own opcode list, zero extra trigger slots), same as
+    before tail-position flattening (see test_a_trailing_if_body_is_compiled_directly_with_no_wrapper_
     trigger) was added."""
     rvt, variant = juggernaut
     mp = variant.multiplayer
@@ -142,7 +142,13 @@ def test_a_non_tail_if_body_is_still_built_inline_using_a_wrapper_trigger(jugger
         and isinstance(top.opcode(i).argument(0), rvt.MegaloScopeArgument)
     ]
     assert len(wrapper_actions) == 1
-    assert wrapper_actions[0].argument(0).data.opcode(0).decompile(variant) == "game.end_round()"
+    # The condition is the wrapper's own first opcode, not the enclosing trigger's: a condition gates
+    # everything after it in its block, so one left outside would gate `global.number[1] = 2` as well
+    # (see test_megalo_if_gating.py).
+    scope = wrapper_actions[0].argument(0).data
+    assert isinstance(scope.opcode(0), rvt.Condition)
+    assert scope.opcode(1).decompile(variant) == "game.end_round()"
+    assert not any(isinstance(top.opcode(i), rvt.Condition) for i in range(top.opcode_count))
     reloaded = _save_and_reload(rvt, variant)
     text = reloaded.decompile_script()
     assert "if global.number[0] == 1 then" in text
@@ -222,11 +228,14 @@ def test_and_conjuncts_get_distinct_or_groups(juggernaut) -> None:
 
 
 def test_and_inside_or_condition_is_supported(juggernaut) -> None:
-    """``a and b or c`` == ``(a and b) or c`` (that's how the grammar's own precedence parses it) --
-    a real case confirmed in RCC Onslaught v13.bin. The engine's own flat or_group model can't
-    express this directly (AND across groups, OR within one), so this needs real CNF distribution:
-    ``(a and b) or c`` == ``(a or c) and (b or c)`` -- 2 groups, {a,c} and {b,c}, not the 2 groups
-    {a},{b},{c} a naive "and gets its own group, or shares one" reading might produce instead."""
+    """``a and b or c`` is ``a and (b or c)`` -- in Megalo ``or`` binds *tighter* than ``and`` (the
+    opposite of most languages), because that's simply how the engine stores a condition list: ``or``
+    puts a condition in the previous one's ``or_group``, ``and`` starts a new group. Confirmed by
+    compiling this same text with the native compiler and reading each condition's ``or_group``
+    (0, 1, 1) -- see ``test_megalo_condition_groups.py``, which checks in-house against native
+    directly. Read the other way, as ``(a and b) or c``, it would need CNF distribution -- four
+    conditions, ``(a or c) and (b or c)`` -- and would also mean something different (this compiler
+    used to do exactly that, silently changing a real script's logic *and* its size)."""
     rvt, variant = juggernaut
     mp = variant.multiplayer
     source = (
@@ -239,33 +248,27 @@ def test_and_inside_or_condition_is_supported(juggernaut) -> None:
 
     top = mp.trigger(mp.trigger_count - 1)  # the if's body is inline -- no separate trigger for it
     conditions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Condition)]
-    assert len(conditions) == 4
+    assert len(conditions) == 3  # no distribution: `or` just shares the previous condition's group
     groups = {}
     for c in conditions:
         groups.setdefault(c.or_group, []).append(c.decompile(variant))
     assert len(groups) == 2
     (group_a, group_b) = sorted(groups.values(), key=len)
-    assert len(group_a) == 2 and len(group_b) == 2
-    assert "global.number[0] == 3" in group_a and "global.number[0] == 3" in group_b
+    assert group_a == ["global.number[0] == 1"]
+    assert group_b == ["global.number[1] == 2", "global.number[0] == 3"]
 
-    # Not asserting the round-tripped text matches the original source exactly: the decompiler
-    # reconstructs *some* textually-equivalent CNF/DNF reading of the same flat or_group structure,
-    # not necessarily the one the source happened to be written in -- the or_group/count assertions
-    # above already verify the structure itself is correct.
+    # And it reads back as the very text it was written as, since decompiling a condition list is
+    # exactly this flat `and`/`or` chain.
     reloaded = _save_and_reload(rvt, variant)
-    assert "game.end_round()" in reloaded.decompile_script()
+    assert "if global.number[0] == 1 and global.number[1] == 2 or global.number[0] == 3 then" in reloaded.decompile_script()
 
 
-def test_two_levels_of_and_or_nesting_is_supported(juggernaut) -> None:
-    """A parenthesized ``or`` nested inside an ``and`` that's itself inside a top-level ``or`` --
-    ``(A or B) and C or D`` -- needs a second level of CNF distribution beyond what
-    ``test_and_inside_or_condition_is_supported`` above exercises (a single level): standard
-    distribution gives ``(P and Q) or D`` == ``(P or D) and (Q or D)`` where ``P = (A or B)`` and
-    ``Q = C``, i.e. ``((A or B) or D) and (C or D)`` == ``(A or B or D) and (C or D)`` -- 2 groups,
-    ``{A, B, D}`` and ``{C, D}``, confirmed algebraically correct (not just "no exception raised")
-    and confirmed directly against the actual compiled or_group structure here, same as the
-    single-level case above. See :meth:`_Compiler._to_cnf_clauses`'s own docstring for the general
-    recursive distribution that replaced the old one-level-only special case."""
+def test_a_parenthesized_or_group_inside_an_and_is_supported(juggernaut) -> None:
+    """``(A or B) and C or D``. Native Megalo can't express parentheses in a condition at all (it
+    rejects them), so this is an in-house extension -- and under Megalo's precedence (``or`` tighter
+    than ``and``) it means ``(A or B) and (C or D)``: two groups, ``{A, B}`` and ``{C, D}``, no
+    distribution needed. (Under the *other* precedence this compiler used to assume it was
+    ``((A or B) and C) or D``, five conditions across ``{A, B, D}`` and ``{C, D}``.)"""
     rvt, variant = juggernaut
     mp = variant.multiplayer
     source = (
@@ -279,18 +282,39 @@ def test_two_levels_of_and_or_nesting_is_supported(juggernaut) -> None:
 
     top = mp.trigger(mp.trigger_count - 1)  # the if's body is inline -- no separate trigger for it
     conditions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Condition)]
-    assert len(conditions) == 5
+    assert len(conditions) == 4
     groups = {}
     for c in conditions:
         groups.setdefault(c.or_group, []).append(c.decompile(variant))
-    assert len(groups) == 2
-    (group_a, group_b) = sorted(groups.values(), key=len)
-    assert len(group_a) == 2 and len(group_b) == 3
-    assert group_a == ["global.number[0] == 3", "global.number[1] == 4"]
-    assert group_b == ["global.number[0] == 1", "global.number[1] == 2", "global.number[1] == 4"]
+    assert sorted(groups.values()) == [
+        ["global.number[0] == 1", "global.number[1] == 2"],
+        ["global.number[0] == 3", "global.number[1] == 4"],
+    ]
 
-    reloaded = _save_and_reload(rvt, variant)
-    assert "game.end_round()" in reloaded.decompile_script()
+
+def test_an_and_inside_a_parenthesized_or_needs_real_cnf_distribution(juggernaut) -> None:
+    """``(a and b) or c`` -- parentheses are the only way to write it, since flat ``and``/``or`` can't
+    say "and inside or". It genuinely needs distribution: ``(a or c) and (b or c)``, two groups
+    ``{a, c}`` and ``{b, c}``."""
+    rvt, variant = juggernaut
+    mp = variant.multiplayer
+    source = (
+        "if (global.number[0] == 1 and global.number[1] == 2) or global.number[0] == 3 then\r\n"
+        "   game.end_round()\r\n"
+        "end\r\n"
+    )
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    top = mp.trigger(mp.trigger_count - 1)
+    conditions = [top.opcode(i) for i in range(top.opcode_count) if isinstance(top.opcode(i), rvt.Condition)]
+    groups = {}
+    for c in conditions:
+        groups.setdefault(c.or_group, []).append(c.decompile(variant))
+    assert sorted(groups.values()) == [
+        ["global.number[0] == 1", "global.number[0] == 3"],
+        ["global.number[1] == 2", "global.number[0] == 3"],
+    ]
 
 
 def test_not_wrapping_a_compound_condition_pushes_the_negation_inward(juggernaut) -> None:
@@ -1178,19 +1202,22 @@ def test_script_option_reference_is_supported(juggernaut) -> None:
     real, first-class indexed variable scope the engine supports (confirmed directly against a real
     compiled opcode: its own scope.format is "script_option[%i]", the same indexed clone-and-
     retarget shape every other pool reference uses, just with a different fixed prefix and pool size
-    -- Megalo::Limits::max_script_options is 16), not previously recognized at all. Found via a full
-    sweep of every real MCC-shipped built-in game/hopper variant (ctf_054.bin's own
-    "set_shape(cylinder, script_option[6], 10, 10)"). juggernaut.bin's own script has no existing
-    '_any_variable'-typed reference to 'script_option[]' to source a template from (only its own
-    declare statements mention one, which this module's own declare handling is a pure no-op over --
-    see module docstring's "declare" bullet -- so nothing gets scanned from it), so this still falls
-    back here -- but the failure message itself is this test's own regression target: it's now
-    recognized as a 'script_option[]'-shaped reference at all (previously not a recognized reference
-    shape in the first place)."""
+    -- Megalo::Limits::max_script_options is 16). Found via a full sweep of every real MCC-shipped
+    built-in game/hopper variant (ctf_054.bin's own "set_shape(cylinder, script_option[6], 10, 10)").
+
+    juggernaut.bin's own script has no existing '_any_variable'-typed reference to 'script_option[]'
+    to copy (only its own declare statements mention one, which this module's own declare handling
+    is a pure no-op over, so nothing gets scanned from it) -- this used to fall back to the native
+    compiler for exactly that reason. It no longer needs one: an ``_any_variable`` slot is just a
+    wrapper, so the compiler builds the wrapped ``number`` reference directly (see
+    ``_build_script_option_arg``)."""
     rvt, variant = juggernaut
     source = "global.number[0] = script_option[0]\r\n"
-    with pytest.raises(megalo_compiler.UnsupportedConstruct, match="script_option"):
-        megalo_compiler.compile_script(rvt, variant, source)
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    reloaded = _save_and_reload(rvt, variant)
+    assert "global.number[0] = script_option[0]" in reloaded.decompile_script()
 
 
 def test_script_option_retarget_to_a_different_index_round_trips_correctly(juggernaut) -> None:
@@ -1371,10 +1398,10 @@ def test_compiler_scans_templates_from_a_separate_copy_not_the_target_variant(ju
     assert scan_mp is not variant.multiplayer
 
 
-# -- declare (validated, no-op) --------------------------------------------------------------------
+# -- declare (emits no opcode; see test_variable_declarations.py for what it does write) ------------
 
 
-def test_declare_is_accepted_as_a_no_op(juggernaut) -> None:
+def test_declare_emits_no_opcode(juggernaut) -> None:
     rvt, variant = juggernaut
     mp = variant.multiplayer
     source = "declare global.number[0] with network priority local\r\nglobal.number[0] = 1\r\n"
@@ -1532,8 +1559,9 @@ def test_running_out_of_triggers_raises_unsupported_construct_not_a_raw_runtime_
     converts it to UnsupportedConstruct so the caller's own native-compiler fallback still kicks in
     cleanly."""
     rvt, variant = juggernaut
-    # 1 (top-level trigger) + 320 for-each loops (each needing its own real trigger) == 321 > 320.
-    source = "for each object do\r\n   current_object.delete()\r\nend\r\n" * 320
+    # Each top-level for-each is one trigger of its own (nothing shares it, and there's no wrapper), so
+    # 321 of them is one more than the engine allows.
+    source = "for each object do\r\n   current_object.delete()\r\nend\r\n" * 321
     with pytest.raises(megalo_compiler.UnsupportedConstruct):
         megalo_compiler.compile_script(rvt, variant, source)
 
@@ -1741,3 +1769,34 @@ def test_run_compile_falls_back_to_native_for_an_unsupported_edited_script(tmp_p
     rvt = rvt_bridge.get_rvt()
     compiled = rvt.load(str(result.output_path))
     assert "current_player.number[0] = 1" in compiled.decompile_script()
+
+
+# -- shape dimension order ---------------------------------------------------------------------------
+# The existing shape tests use equal top/bottom heights, which is how the two being swapped went unseen:
+# a cylinder is (radius, top, bottom) and a box (radius, length, top, bottom), the order the engine's own
+# decompiler prints them in.
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["cylinder, 50, 20, 30", "cylinder, 360, 1000, 10", "box, 40, 50, 20, 30"],
+    ids=["cylinder", "cylinder wide", "box"],
+)
+def test_a_shapes_dimensions_keep_their_order(juggernaut, shape: str) -> None:
+    rvt, variant = juggernaut
+    source = f"current_object.set_shape({shape})\r\n"
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    assert f"current_object.set_shape({shape})" in _save_and_reload(rvt, variant).decompile_script()
+
+
+def test_a_shape_compiles_to_what_the_native_compiler_produces(juggernaut) -> None:
+    rvt, variant = juggernaut
+    source = "current_object.set_shape(cylinder, 50, 20, 30)\r\ncurrent_object.set_shape(box, 40, 50, 20, 30)\r\n"
+    native = rvt.load(str(_JUGGERNAUT_BIN))
+    assert native.multiplayer.compile_script(source).success
+
+    megalo_compiler.compile_script(rvt, variant, source)
+
+    assert variant.decompile_script() == native.decompile_script()

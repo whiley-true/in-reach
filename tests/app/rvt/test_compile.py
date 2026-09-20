@@ -404,3 +404,35 @@ def test_run_compile_isolated_reports_unparseable_child_output_as_a_build_result
 
     assert result.success is False
     assert "compile result" in result.failure.lower()
+
+
+# -- message positions ----------------------------------------------------------------------------------------
+
+
+class _NativeMessage:
+    def __init__(self, line: int, col: int, text: str) -> None:
+        self.line, self.col, self.text = line, col, text
+
+
+def test_native_line_numbers_are_shifted_to_one_based_and_columns_left_alone() -> None:
+    """The native compiler numbers lines from 0 and columns from 1 (measured: a bad call at the start of
+    the first line reports (0, 1); indented five spaces on the second, (1, 6)). Unshifted, every error
+    pointed one line above the one that was wrong."""
+    first, indented = compile_module._messages([_NativeMessage(0, 1, "a"), _NativeMessage(1, 6, "b")])
+    assert (first.line, first.col) == (1, 1)
+    assert (indented.line, indented.col) == (2, 6)
+    assert [first.text, indented.text] == ["a", "b"]
+
+
+def test_a_real_native_error_reports_the_line_the_user_sees_in_their_editor(tmp_path) -> None:
+    from in_reach.app.rvt import rvt_bridge
+
+    if not rvt_bridge.is_available():
+        pytest.skip("native extension not available")
+    rvt = rvt_bridge.get_rvt()
+    from in_reach.app.blank_variant import resolve_blank_variant
+
+    variant = rvt.load(str(resolve_blank_variant(firefight=False)))
+    result = variant.multiplayer.compile_script("game.end_round()\n\n   this_is_not_a_real_call()\n")  # line 3, col 4
+    [message] = compile_module._messages(list(result.fatal_errors) + list(result.errors))
+    assert (message.line, message.col) == (3, 4)

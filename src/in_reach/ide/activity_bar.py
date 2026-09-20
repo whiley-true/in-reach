@@ -1,6 +1,6 @@
-"""The far-left activity bar: ten reorderable icons at the top -- a compile/"Apply" action and
-nine sidebar-view toggles (Dashboard, Search, Git, Scripts, Map Files, Documentation, Kanban,
-Testing, LLM), exactly one of whose views is ever active, switching the primary sidebar's content,
+"""The far-left activity bar: eleven reorderable icons at the top -- a compile/"Apply" action and
+ten sidebar-view toggles (Dashboard, Search, Git, Scripts, Map Files, Documentation, Kanban,
+Testing, Playtest, LLM), exactly one of whose views is ever active, switching the primary sidebar's content,
 VSCode-style: clicking the already-active one collapses the sidebar instead of switching -- then,
 pinned at the bottom: a flame status indicator (see :meth:`ActivityBar.set_halo_status`), a help
 icon (still a no-op), and a settings cog, which opens the Settings popout (see
@@ -90,7 +90,8 @@ _STATUS_TOOLTIPS = {
 #: default order and in the top bar view". A further pass moved search up ("please move search
 #: magnifying glass to come under dashboard"), added a Kanban stub right after Documentation
 #: ("under documentation please add an icon for Kanban"), and moved Testing to sit directly ahead of
-#: LLM ("please move tests to come before llm").
+#: LLM ("please move tests to come before llm"). Playtest sits directly after Testing ("please add an
+#: icon under testing for playtest").
 _DEFAULT_ORDER = (
     "compile",
     "explorer",
@@ -101,6 +102,7 @@ _DEFAULT_ORDER = (
     "documentation",
     "kanban",
     "testing",
+    "playtest",
     "llm",
 )
 ORDER_ENV_KEY = "ACTIVITY_BAR_ORDER"
@@ -603,6 +605,14 @@ class ActivityBar(QWidget):
         )
         self.testing_button.clicked.connect(lambda: self._handle_click("testing"))
 
+        # PROMPT.md: "please add an icon under testing for playtest which should be the icon of a
+        # sprinting man" -- a real sidebar-view toggle with a placeholder view behind it (see
+        # MainWindow's own PlaytestPanel wiring), same treatment as Testing just above.
+        self.playtest_button = _bar_button(
+            "sprint", "Playtest (toggle primary sidebar)", checkable=True, checked=False
+        )
+        self.playtest_button.clicked.connect(lambda: self._handle_click("playtest"))
+
         # PROMPT.md: "above search please add a map icon for 'Map Files' (stubbed for now)" -- a
         # real sidebar-view toggle (like Explorer/Search), just with a placeholder view behind it
         # (see MainWindow's own MapsPanel wiring), same treatment as Git/Scripts above.
@@ -629,6 +639,7 @@ class ActivityBar(QWidget):
             "documentation": self.documentation_button,
             "kanban": self.kanban_button,
             "testing": self.testing_button,
+            "playtest": self.playtest_button,
             "maps": self.maps_button,
             "llm": self.llm_button,
             "search": self.search_button,
@@ -646,6 +657,7 @@ class ActivityBar(QWidget):
                     "documentation": self.documentation_button,
                     "kanban": self.kanban_button,
                     "testing": self.testing_button,
+                    "playtest": self.playtest_button,
                     "maps": self.maps_button,
                     "llm": self.llm_button,
                     "search": self.search_button,

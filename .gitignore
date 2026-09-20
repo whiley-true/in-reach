@@ -35,3 +35,7 @@ notes.txt
 
 # Windows crash dumps (WER LocalDumps) -- large binaries, never meant to be committed
 *.dmp
+# Build output (python -m build / pip wheel, and CI's wheel step)
+/build/
+/dist/
+/native/build/

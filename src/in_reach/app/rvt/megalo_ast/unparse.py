@@ -67,6 +67,9 @@ def _render_block(body: list[Statement]) -> list[str]:
     return out
 
 
+_INLINE_PREFIX = "inline: "
+
+
 def _render_statement(stmt: Statement) -> list[str]:
     if stmt.kind == "declare":
         return [_render_declaration(stmt)]
@@ -77,7 +80,7 @@ def _render_statement(stmt: Statement) -> list[str]:
     if stmt.kind == "expr_stmt":
         return [render_expr(stmt.expr)]
     if stmt.kind == "if":
-        lines = [f"if {render_expr(stmt.condition)} then "]
+        lines = [f"{_INLINE_PREFIX if stmt.inline else ''}if {render_expr(stmt.condition)} then "]
         lines.extend(_indent(_render_block(stmt.body)))
         for clause in stmt.altif_clauses:
             lines.append(f"altif {render_expr(clause.condition)} then ")
@@ -88,7 +91,7 @@ def _render_statement(stmt: Statement) -> list[str]:
         lines.append("end")
         return lines
     if stmt.kind == "do":
-        lines = ["do"]
+        lines = [f"{_INLINE_PREFIX if stmt.inline else ''}do"]
         lines.extend(_indent(_render_block(stmt.body)))
         lines.append("end")
         return lines
@@ -130,7 +133,37 @@ def render_expr(expr: Expression) -> str:
     if expr.kind == "call":
         return f"{render_expr(expr.target)}({', '.join(render_expr(a) for a in expr.args)})"
     if expr.kind == "unary":
-        return f"not {render_expr(expr.operand)}"
+        return f"not {_render_operand(expr.operand, _PREC_NOT)}"
     if expr.kind == "binary":
-        return f"{render_expr(expr.left)} {expr.op} {render_expr(expr.right)}"
+        prec = _BINARY_PRECEDENCE[expr.op]
+        # Left-associative: a same-level operand on the right is a nested group, so it needs parentheses
+        # to come back as the same tree (`a and (b and c)`); on the left it doesn't.
+        return f"{_render_operand(expr.left, prec)} {expr.op} {_render_operand(expr.right, prec + 1)}"
     raise ValueError(f"unknown expression kind {expr.kind!r}")
+
+
+# Lowest to highest binding. `or` binds tighter than `and` (see parser.py's _parse_expr), then `not`
+# (which takes one term), then comparisons, then `|`; everything else is a postfix/primary.
+_PREC_NOT = 3
+_BINARY_PRECEDENCE = {
+    "and": 1, "or": 2,
+    "==": 4, "!=": 4, "<": 4, ">": 4, "<=": 4, ">=": 4,
+    "|": 5,
+}
+_PREC_ATOM = 10
+
+
+def _precedence(expr: Expression) -> int:
+    if expr.kind == "binary":
+        return _BINARY_PRECEDENCE[expr.op]
+    if expr.kind == "unary":
+        return _PREC_NOT
+    return _PREC_ATOM
+
+
+def _render_operand(expr: Expression, required: int) -> str:
+    """``expr`` as text, parenthesized if it binds looser than ``required``. Megalo itself can't express
+    a parenthesized condition (the native compiler rejects one), so this only ever adds them for a tree
+    that could only have come from source that had them -- keeping the round trip faithful."""
+    text = render_expr(expr)
+    return f"({text})" if _precedence(expr) < required else text

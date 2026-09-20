@@ -77,6 +77,11 @@ class StatusBar(QWidget):
         # empty) left side and the right-side cursor/spaces segments -- the same "center between
         # two stretches" trick as the top bar's own Quick Access pill -- in the slot the project
         # label used to occupy before it moved to that pill (see this module's own docstring).
+        # The active build profile (see in_reach.app.script_preprocess), on the otherwise empty left
+        # edge -- clickable to change it, hidden with no project open or nothing to choose between.
+        self.profile_label = _ClickableLabel()
+        self.profile_label.hide()
+        layout.addWidget(self.profile_label)
         layout.addStretch(1)
         self.vcs_label = _ClickableLabel()
         self.vcs_label.hide()
@@ -113,6 +118,17 @@ class StatusBar(QWidget):
     def clear_vcs_status(self) -> None:
         """Hides the branch/stamp/saved segment -- no project open, or it has no history yet."""
         self.vcs_label.hide()
+
+    def set_profile(self, name: str | None, *, on_click: Callable[[], None]) -> None:
+        """Shows the left-edge build-profile segment: ``Profile: <name>``, or ``No profile`` when the
+        project has profiles but none is chosen. Clicking it runs ``on_click`` (a quick-pick)."""
+        self.profile_label.setText(f"Profile: {name}" if name else "No profile")
+        self.profile_label.set_on_click(on_click)
+        self.profile_label.show()
+
+    def clear_profile(self) -> None:
+        """Hides the build-profile segment -- no project open, or it has no profiles to pick from."""
+        self.profile_label.hide()
 
     def set_cursor_info(
         self,

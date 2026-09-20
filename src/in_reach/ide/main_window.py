@@ -45,8 +45,10 @@ from in_reach.app import (
     project,
     recent,
     rvt_launcher,
+    script_sync,
     system_verify,
 )
+from in_reach.app.kanban_db import KanbanStore
 from in_reach.ide import file_dialogs, icons, style
 from in_reach.ide import indent_state
 from in_reach.ide import theme as theme_module
@@ -59,7 +61,9 @@ from in_reach.ide.explorer import ExplorerPanel
 from in_reach.ide.git_panel import GitPanel
 from in_reach.ide.kanban_panel import KanbanPanel
 from in_reach.ide.llm_panel import LlmPanel
+from in_reach.ide import maps_panel as maps_panel_module
 from in_reach.ide.maps_panel import MapsPanel
+from in_reach.ide.playtest_panel import PlaytestPanel
 from in_reach.ide.quick_access import Command, QuickAccessBar
 from in_reach.ide.scripts_panel import ScriptsPanel
 from in_reach.ide.search_panel import SearchPanel
@@ -148,6 +152,25 @@ _SHORTCUT_COMMAND_PALETTE = "Ctrl+Shift+P"
 _SHORTCUT_LAUNCH_MCC = "Ctrl+Shift+M"
 _SHORTCUT_LAUNCH_RVT = "Ctrl+Shift+L"
 
+#: PROMPT.md: "add command palette shortcuts and entries for all present functionality. please use
+#: equivalent vscode shortcuts whenever possible" -- each one is VSCode's own real default binding
+#: for the closest equivalent command, verified against the full list above for collisions before
+#: picking it (matters: two window-level bindings sharing one key sequence make Qt treat every press
+#: as *ambiguous* and fire neither -- see the Ctrl+Shift+P fix this same rule exists because of, and
+#: .claude/rules/shortcuts-and-command-palette.md's own docstring for the rule itself).
+_SHORTCUT_TOGGLE_SIDEBAR = "Ctrl+B"
+_SHORTCUT_TOGGLE_PANEL = "Ctrl+J"
+_SHORTCUT_SETTINGS = "Ctrl+,"
+#: No real VSCode "compile"/"apply" analog -- modeled on "Run Build Task" instead, the closest real
+#: VSCode command to "turn my edited source into the actual output artifact".
+_SHORTCUT_APPLY = "Ctrl+Shift+B"
+#: VSCode's own "Toggle Output" (the closest real equivalent to this app's read-only log view).
+_SHORTCUT_VIEW_LOGS = "Ctrl+Shift+U"
+_SHORTCUT_VIEW_DASHBOARD = "Ctrl+Shift+E"  # VSCode: Explorer
+_SHORTCUT_VIEW_SEARCH = "Ctrl+Shift+F"  # VSCode: Search
+_SHORTCUT_VIEW_GIT = "Ctrl+Shift+G"  # VSCode: Source Control
+_SHORTCUT_SPLIT_RIGHT = "Ctrl+\\"  # VSCode: Split Editor
+
 #: The three settings/ files RVT saving a project's own .bin regenerates on every resync (see
 #: :func:`~in_reach.app.rvt.decompile.resync_from_bin`) -- PROMPT.md: "when making changes to a
 #: project in rvt, upon save: any open script_settings.json, settings.json, or strings.json
@@ -167,10 +190,20 @@ _VIEW_DISPLAY_NAMES = {
     "documentation": "Documentation",
     "kanban": "Kanban",
     "testing": "Testing",
+    "playtest": "Playtest",
     "maps": "Map Files",
     "llm": "LLM",
     "search": "Search",
 }
+
+
+#: PROMPT.md: "in the side panels we want to add a header to each panel (to make it clearer to the
+#: user which tab they're on)" -- one bold title strip pinned above whichever panel the sidebar is
+#: showing, like VSCode's own "EXPLORER"/"SEARCH" heading (see :meth:`MainWindow._set_sidebar_header`).
+_SIDEBAR_HEADER_STYLE = (
+    "QLabel#sidebarHeader { font-weight: bold; padding: 8px 12px 6px 12px;"
+    " border-bottom: 1px solid palette(mid); }"
+)
 
 
 class _NoProjectSidebarPage(QWidget):
@@ -227,6 +260,8 @@ class _FileMenuButton(QToolButton):
         menu.addSeparator()
         _add_action(menu, "Save", window.save_current, _SHORTCUT_SAVE)
         menu.addAction("Save All", window.save_all)
+        menu.addSeparator()
+        _add_action(menu, "Apply", window.apply_settings_changes, _SHORTCUT_APPLY)
         menu.addSeparator()
         _add_action(menu, "Close Project", window.close_project, _SHORTCUT_CLOSE_PROJECT)
         _add_action(menu, "Close Editor", window.close_editor, _SHORTCUT_CLOSE_EDITOR)
@@ -311,6 +346,7 @@ class _ViewMenuButton(QToolButton):
         # `window.quick_access` -- MainWindow doesn't set that alias until *after* the top bar
         # (and so this button) finishes constructing, see _TopBar.__init__'s own comment.
         _add_action(menu, "Command Palette", quick_access.open_command_palette, _SHORTCUT_COMMAND_PALETTE)
+        _add_action(menu, "Settings", window.open_settings_dialog, _SHORTCUT_SETTINGS)
         menu.addSeparator()
 
         appearance_menu = menu.addMenu("Appearance")
@@ -322,6 +358,10 @@ class _ViewMenuButton(QToolButton):
         scale_menu.addAction("Decrease", window._zoom_out)
         menu.addSeparator()
 
+        _add_action(menu, "Toggle Sidebar", window.toggle_sidebar, _SHORTCUT_TOGGLE_SIDEBAR)
+        _add_action(menu, "Toggle Panel", window.toggle_panel, _SHORTCUT_TOGGLE_PANEL)
+        menu.addSeparator()
+
         # PROMPT.md's own re-ordering, keyed to activity_bar.py's own button attributes -- "docs"/
         # "ai" there are the existing Documentation/LLM entries, not a rename (see activity_bar.py's
         # own module docstring). A later pass ("please move search magnifying glass to come under
@@ -329,23 +369,31 @@ class _ViewMenuButton(QToolButton):
         # Kanban ... and finally please move tests to come before llm (and re-arrange order in
         # view)") moved Search up under Dashboard, added Kanban right after Documentation, and
         # moved Testing to sit directly ahead of LLM -- kept in sync with activity_bar.py's own
-        # _DEFAULT_ORDER.
+        # _DEFAULT_ORDER. A further pass ("add command palette shortcuts and entries for all present
+        # functionality[,] use equivalent vscode shortcuts whenever possible") gave the three panels
+        # with a real VSCode-equivalent view (Explorer/Search/Source Control) that view's own real
+        # default keybinding; the rest have no clean VSCode equivalent to model one on, same as they
+        # have no real functionality behind them yet either (see CLAUDE.md).
+        # (label, activity-bar button attribute, shortcut or None)
         panel_buttons = (
-            ("Dashboard", "explorer_button"),
-            ("Search", "search_button"),
-            ("Git", "git_button"),
-            ("Scripts", "scripts_button"),
-            ("Map Files", "maps_button"),
-            ("Documentation", "documentation_button"),
-            ("Kanban", "kanban_button"),
-            ("Testing", "testing_button"),
-            ("LLM", "llm_button"),
+            ("Dashboard", "explorer_button", _SHORTCUT_VIEW_DASHBOARD),
+            ("Search", "search_button", _SHORTCUT_VIEW_SEARCH),
+            ("Git", "git_button", _SHORTCUT_VIEW_GIT),
+            ("Scripts", "scripts_button", None),
+            ("Map Files", "maps_button", None),
+            ("Documentation", "documentation_button", None),
+            ("Kanban", "kanban_button", None),
+            ("Testing", "testing_button", None),
+            ("Playtest", "playtest_button", None),
+            ("LLM", "llm_button", None),
         )
-        for label, attr in panel_buttons:
-            menu.addAction(label, lambda _checked=False, a=attr: getattr(window.activity_bar, a).click())
+        for label, attr, shortcut in panel_buttons:
+            _add_action(
+                menu, label, lambda _checked=False, a=attr: getattr(window.activity_bar, a).click(), shortcut
+            )
         menu.addSeparator()
 
-        menu.addAction("View Logs", window.view_logs)
+        _add_action(menu, "View Logs", window.view_logs, _SHORTCUT_VIEW_LOGS)
         self.setMenu(menu)
 
 
@@ -611,6 +659,10 @@ class MainWindow(QWidget):
         # it should be closed" -- the RVT process launch_rvt() most recently started for each
         # project folder, so _close_rvt_for_project() knows what (if anything) to terminate.
         self._rvt_processes: dict[Path, subprocess.Popen] = {}
+        # Created the first time anything actually needs it (see _kanban_store()) -- most sessions
+        # never open the Kanban view, and this keeps a fresh kanban.db from appearing in every
+        # .in-reach folder a window merely opens.
+        self._kanban_store_obj: KanbanStore | None = None
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("in-reach")
         self.setWindowIcon(icons.app_icon())
@@ -686,6 +738,7 @@ class MainWindow(QWidget):
 
         env_project_dir = project.get_project_dir(self.root_dir)
         self.explorer_panel.active_project_changed.connect(self.search_panel.set_project_folder)
+        self.explorer_panel.active_project_changed.connect(self.kanban_panel.set_project_folder)
         self.explorer_panel.active_project_changed.connect(self.git_panel.set_project)
         self.explorer_panel.active_project_changed.connect(self._rewatch_project_bin)
         self.explorer_panel.active_project_changed.connect(self._on_active_project_changed)
@@ -729,7 +782,14 @@ class MainWindow(QWidget):
         self.explorer_panel.view_output_requested.connect(self.view_output_txt)
         self.explorer_panel.launch_rvt_requested.connect(self.launch_rvt)
         self.explorer_panel.open_builtin_folder_requested.connect(self._open_builtin_folder)
+        self.explorer_panel.notepad_open_in_editor_requested.connect(self.open_notepad_in_editor)
+        self.explorer_panel.notepad_open_in_window_requested.connect(self.open_notepad_in_window)
+        self.explorer_panel.notepad_saved.connect(self._on_notepad_saved)
+        self.maps_panel.open_folder_requested.connect(self._open_builtin_folder)
+        self.kanban_panel.open_board_requested.connect(self._open_kanban_board)
+        self._refresh_maps_panel()
         self.search_panel.file_activated.connect(self._on_search_file_activated)
+        self.search_panel.set_open_paths_provider(self.main_panel.open_file_paths)
 
         self.bottom_panel = BottomPanel()
         self._bottom_panel_card = style.wrap_tab_widget(self.bottom_panel)
@@ -752,6 +812,8 @@ class MainWindow(QWidget):
         # Also needs self.status_bar to already exist -- same reasoning as the status label above.
         self.explorer_panel.active_project_changed.connect(self._refresh_vcs_status)
         self._refresh_vcs_status(self.explorer_panel.current_folder)
+        self.explorer_panel.active_project_changed.connect(self._refresh_profile_indicator)
+        self._refresh_profile_indicator(self.explorer_panel.current_folder)
 
         # PROMPT.md (Quick Access Bar work): bottom-right Ln/Col/Spaces segments -- connects to the
         # panel's own re-broadcast signal (MainPanelArea.cursor_info_changed), not one specific
@@ -854,6 +916,12 @@ class MainWindow(QWidget):
         sidebar.setStyleSheet(style.PANEL_BORDER_STYLE)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.sidebar_header = QLabel(_VIEW_DISPLAY_NAMES[DEFAULT_VIEW])
+        self.sidebar_header.setObjectName("sidebarHeader")
+        self.sidebar_header.setStyleSheet(_SIDEBAR_HEADER_STYLE)
+        layout.addWidget(self.sidebar_header)
 
         self.explorer_panel = ExplorerPanel()
         self.search_panel = SearchPanel()
@@ -862,6 +930,7 @@ class MainWindow(QWidget):
         self.documentation_panel = DocumentationPanel()
         self.kanban_panel = KanbanPanel()
         self.testing_panel = TestingPanel()
+        self.playtest_panel = PlaytestPanel()
         self.maps_panel = MapsPanel()
         self.llm_panel = LlmPanel()
         self._sidebar_pages = {
@@ -871,6 +940,7 @@ class MainWindow(QWidget):
             "documentation": self.documentation_panel,
             "kanban": self.kanban_panel,
             "testing": self.testing_panel,
+            "playtest": self.playtest_panel,
             "maps": self.maps_panel,
             "llm": self.llm_panel,
             "search": self.search_panel,
@@ -890,8 +960,26 @@ class MainWindow(QWidget):
         self.top_bar.sidebar_toggle.setChecked(visible)
         self.top_bar.sidebar_toggle.blockSignals(False)
 
+    def _refresh_maps_panel(self) -> None:
+        """Feeds the Map Files panel's slugs the folders the Verify System Settings checklist has
+        currently resolved (re-read on every call -- the checklist can change them at any time)."""
+        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        values = env_file.get_env_values(env_path)
+        self.maps_panel.set_paths({key: values.get(key, "") for _heading, key in maps_panel_module.SLUGS})
+
+    def _set_sidebar_header(self, view: str) -> None:
+        """Retitles the strip above the sidebar's content to ``view``'s user-facing name -- the
+        one place every view switch funnels the header through, so it can't drift from which panel
+        is actually showing."""
+        self.sidebar_header.setText(_VIEW_DISPLAY_NAMES.get(view, view))
+
     def _on_sidebar_view_selected(self, view: str) -> None:
         self._active_sidebar_view = view
+        self._set_sidebar_header(view)
+        if view == "maps":
+            self._refresh_maps_panel()
+        elif view == "kanban":
+            self._show_default_kanban_board()
         if self.explorer_panel.current_folder is None:
             # "when no project is opened, clicking on dashboard, locations or search a blank
             # sidebar should popout" -- the real panel underneath has nothing but its own "no
@@ -916,6 +1004,7 @@ class MainWindow(QWidget):
         Explorer View" (a tab's context menu) doesn't yet select the specific file within the tree,
         just gets the tree itself on screen."""
         self._active_sidebar_view = "explorer"
+        self._set_sidebar_header("explorer")
         self._sidebar_stack.setCurrentWidget(self._sidebar_pages["explorer"])
         self._show_sidebar(True)
         self.activity_bar.set_active_view("explorer")
@@ -1013,12 +1102,13 @@ class MainWindow(QWidget):
         shortcut as its ``detail``, followed by "Set Theme" and "Set UI Scale", each a two-level
         pick. Rebuilt on every open rather than cached, since none of this is expensive to
         construct and this keeps it all from ever going stale."""
-        from in_reach.app import notes_settings
-
         return [
             Command(label="New Window", action=self.open_new_window, detail=_SHORTCUT_NEW_WINDOW),
+            Command(label="Load Welcome Tab", action=self.open_welcome_tab),
             Command(label="Open Folder", action=self.open_folder, detail=_SHORTCUT_OPEN_FOLDER),
             Command(label="Save", action=self.save_current, detail=_SHORTCUT_SAVE),
+            Command(label="Save All", action=self.save_all),
+            Command(label="Apply", action=self.apply_settings_changes, detail=_SHORTCUT_APPLY),
             Command(label="Close Project", action=self.close_project, detail=_SHORTCUT_CLOSE_PROJECT),
             Command(label="Close Editor", action=self.close_editor, detail=_SHORTCUT_CLOSE_EDITOR),
             Command(label="Close Window", action=self.close, detail=_SHORTCUT_CLOSE_WINDOW),
@@ -1027,6 +1117,15 @@ class MainWindow(QWidget):
             Command(label="Cut", action=self.edit_cut, detail=_SHORTCUT_CUT),
             Command(label="Copy", action=self.edit_copy, detail=_SHORTCUT_COPY),
             Command(label="Paste", action=self.edit_paste, detail=_SHORTCUT_PASTE),
+            Command(label="Find", action=self.edit_find, detail=_SHORTCUT_FIND),
+            Command(label="Replace", action=self.edit_replace, detail=_SHORTCUT_REPLACE),
+            Command(label="Select All", action=self.select_all, detail=_SHORTCUT_SELECT_ALL),
+            Command(label="Split Right", action=self.split_active_tab_right, detail=_SHORTCUT_SPLIT_RIGHT),
+            Command(label="Split Down", action=self.split_active_tab_down),
+            Command(label="Close All", action=self.close_all_tabs),
+            Command(label="Toggle Sidebar", action=self.toggle_sidebar, detail=_SHORTCUT_TOGGLE_SIDEBAR),
+            Command(label="Toggle Panel", action=self.toggle_panel, detail=_SHORTCUT_TOGGLE_PANEL),
+            Command(label="Settings", action=self.open_settings_dialog, detail=_SHORTCUT_SETTINGS),
             Command(
                 label="Set Theme",
                 children=[
@@ -1041,15 +1140,39 @@ class MainWindow(QWidget):
                     Command(label="Decrease", action=self._zoom_out),
                 ],
             ),
-            Command(label="Open Notes", action=self.open_notes),
+            # PROMPT.md's own re-ordering -- kept in sync with _ViewMenuButton's own panel_buttons,
+            # same reasoning as that tuple's own comment.
+            Command(label="Dashboard", action=lambda: self.activity_bar.explorer_button.click(), detail=_SHORTCUT_VIEW_DASHBOARD),
+            Command(label="Search", action=lambda: self.activity_bar.search_button.click(), detail=_SHORTCUT_VIEW_SEARCH),
+            Command(label="Git", action=lambda: self.activity_bar.git_button.click(), detail=_SHORTCUT_VIEW_GIT),
+            Command(label="Scripts", action=lambda: self.activity_bar.scripts_button.click()),
+            Command(label="Map Files", action=lambda: self.activity_bar.maps_button.click()),
+            Command(label="Documentation", action=lambda: self.activity_bar.documentation_button.click()),
+            Command(label="Kanban", action=lambda: self.activity_bar.kanban_button.click()),
+            Command(label="Testing", action=lambda: self.activity_bar.testing_button.click()),
+            Command(label="Playtest", action=lambda: self.activity_bar.playtest_button.click()),
+            Command(label="LLM", action=lambda: self.activity_bar.llm_button.click()),
+            Command(label="View Logs", action=self.view_logs, detail=_SHORTCUT_VIEW_LOGS),
+            Command(label="Launch Halo MCC", action=self.launch_mcc_from_menu, detail=_SHORTCUT_LAUNCH_MCC),
+            Command(label="Launch RVT", action=self.launch_rvt_from_menu, detail=_SHORTCUT_LAUNCH_RVT),
+            Command(label="New Kanban Board", action=self.new_kanban_board),
             Command(
-                label="Set Notes Format",
+                label="Open Kanban Board",
                 children=[
-                    Command(label="Text (.txt)", action=lambda: self._set_notes_format(notes_settings.FORMAT_TXT)),
-                    Command(label="Markdown (.md)", action=lambda: self._set_notes_format(notes_settings.FORMAT_MD)),
+                    Command(label=board.name, action=lambda b=board.id: self._open_kanban_board(b))
+                    for board in self._kanban_boards()
                 ],
             ),
+            Command(label="Select Build Profile", children=self._build_profile_commands()),
+            Command(label="Open Notepad in Editor", action=self.open_notepad_in_editor),
+            Command(label="Open Notepad in Window", action=self.open_notepad_in_window),
+            Command(
+                label="Open In-Reach Maps",
+                action=lambda: self._open_builtin_folder(system_verify.INREACH_MAPS_KEY),
+            ),
             Command(label="Commit", action=self._vcs_commit_via_dialog),
+            Command(label="Stage All", action=lambda: self.git_panel.stage_all_button.click()),
+            Command(label="Unstage All", action=lambda: self.git_panel.unstage_all_button.click()),
             Command(label="Stamp Release", action=self._vcs_stamp_via_dialog),
             Command(label="New Branch", action=self._vcs_new_branch_via_dialog),
             Command(
@@ -1104,6 +1227,8 @@ class MainWindow(QWidget):
                     for ref_a, label_a in self._vcs_compare_refs()
                 ],
             ),
+            Command(label="Export RVT File", action=self.export_rvt_file),
+            Command(label="View Output.txt", action=self.view_output_txt),
         ]
 
     def _vcs_branches(self) -> list[str]:
@@ -1353,17 +1478,10 @@ class MainWindow(QWidget):
         return chosen
 
     def open_settings_dialog(self) -> None:
-        """The activity bar's settings cog -- opens the Settings popout (System stubbed, UI's own
-        Notes format live, Theme live) centered at half the screen's size (see
+        """The activity bar's settings cog -- opens the Settings popout (System/UI stubbed, Theme
+        live) centered at half the screen's size (see
         :class:`~in_reach.ide.settings_dialog.SettingsDialog`'s own ``showEvent``)."""
-        from in_reach.app import notes_settings
-
-        dialog = SettingsDialog(
-            self,
-            on_theme_changed=self.on_theme_applied,
-            notes_format=notes_settings.get_notes_format(self._notes_format_env_path()),
-            on_notes_format_changed=self._set_notes_format,
-        )
+        dialog = SettingsDialog(self, on_theme_changed=self.on_theme_applied)
         dialog.exec()
 
     def open_recent_project(self, folder: Path) -> None:
@@ -1392,6 +1510,22 @@ class MainWindow(QWidget):
     def close_editor(self) -> None:
         _logger.info("closing the active tab")
         self.main_panel.active_pane.close_current()
+
+    def close_all_tabs(self) -> None:
+        """"Close All" -- the command palette's own entry for the tab context menu's identically
+        named action (see :meth:`~in_reach.ide.tabs.TabPane.close_all_tabs`), acting on the active
+        pane since there's no specific right-clicked tab to infer it from here."""
+        self.main_panel.active_pane.close_all_tabs()
+
+    def split_active_tab_right(self) -> None:
+        """"Split Right" (Ctrl+\\, matching VSCode's own default "Split Editor") -- splits the
+        active pane's own current tab (see
+        :meth:`~in_reach.ide.tabs.TabPane.split_active_tab_right`)."""
+        self.main_panel.active_pane.split_active_tab_right()
+
+    def split_active_tab_down(self) -> None:
+        """"Split Down" -- same as :meth:`split_active_tab_right`, the vertical direction."""
+        self.main_panel.active_pane.split_active_tab_down()
 
     # -- Edit menu --------------------------------------------------------------------------------
 
@@ -1446,6 +1580,17 @@ class MainWindow(QWidget):
             editor.selectAll()
 
     # -- View menu ------------------------------------------------------------------------------
+
+    def toggle_sidebar(self) -> None:
+        """"Toggle Sidebar" (Ctrl+B, matching VSCode's own default) -- flips the top bar's own
+        sidebar_toggle button, exactly as a real click on it would (including whatever that button
+        is already wired to, see ``_on_sidebar_toggle_changed``)."""
+        self.top_bar.sidebar_toggle.click()
+
+    def toggle_panel(self) -> None:
+        """"Toggle Panel" (Ctrl+J, matching VSCode's own default) -- flips the top bar's own
+        panel_toggle button, same "real click" reasoning as :meth:`toggle_sidebar`."""
+        self.top_bar.panel_toggle.click()
 
     def view_logs(self) -> None:
         """"View Logs" (the View menu, PROMPT.md) -- opens the bottom panel onto its live Logs tab
@@ -1741,6 +1886,10 @@ class MainWindow(QWidget):
         :attr:`_rvt_processes` as it goes, which would otherwise raise iterating the dict live."""
         for folder in list(self._rvt_processes):
             self._close_rvt_for_project(folder)
+        self.explorer_panel.notepad.flush()
+        if self._kanban_store_obj is not None:
+            self._kanban_store_obj.close()
+            self._kanban_store_obj = None
         super().closeEvent(event)
 
     def _current_project_bin(self) -> Path | None:
@@ -1828,7 +1977,21 @@ class MainWindow(QWidget):
         ``vcs.record_change()`` call, see :mod:`in_reach.app.vcs`'s own module docstring for the
         full history)."""
         folder = self.explorer_panel.current_folder
+        if path == self._notepad_path():
+            self.explorer_panel.notepad.reload()
         self._refresh_apply_enabled(folder)
+        if folder is not None:
+            self._refresh_vcs_status(folder)
+            # A saved profile file (or the active-profile pointer) can change what the indicator says.
+            self._refresh_profile_indicator(folder)
+
+    def _on_notepad_saved(self, path: Path) -> None:
+        """The Dashboard Notepad just autosaved ``path`` -- brings any open editor tab for the same
+        file up to date (unless that tab has its own unsaved edits) and refreshes the VCS status,
+        same as a save from a tab would."""
+        if not self.main_panel.dirty_tab_names([path]):
+            self.main_panel.reload_open_tabs([path])
+        folder = self.explorer_panel.current_folder
         if folder is not None:
             self._refresh_vcs_status(folder)
 
@@ -2514,40 +2677,155 @@ class MainWindow(QWidget):
         path = write_output_view(folder)
         self.main_panel.active_pane.open_file(path, force_reload=True)
 
-    def open_notes(self) -> None:
-        """"Open Notes" (the ``>`` command palette, PROMPT.md) -- opens the active
-        project's own freeform scratch notes file, ``Notes.txt`` or ``Notes.md`` per the saved
-        :mod:`in_reach.app.notes_settings` preference (see :func:`~in_reach.app.notes_settings.
-        ensure_notes_file`, which creates the target file from the same template ``Notes.txt``
-        already starts with if this is the first time it's been opened in that format). A no-op
-        with no project open.
+    # -- build profiles (script/env/<name>.env) -----------------------------------------------------
 
-        PROMPT.md: "if .md is chosen, then editor should be .md" -- opened as a real, editable tab
-        (see :meth:`~in_reach.ide.tabs.TabPane.open_file`'s own ``editable_markdown``) rather than
-        the usual read-only rendered preview every other ``.md`` file gets, so there's an actual
-        source view to type notes into and (via the magnifying-glass icon that appears next to the
-        split buttons for exactly this tab) split into a live preview alongside it.
-        """
+    def _build_profile_commands(self) -> list[Command]:
+        """The "Select Build Profile" palette pick: one entry per ``script/env/*.env`` profile of the
+        active project, the current one marked, plus "No profile" -- empty with no project open or no
+        profiles to choose between. (See :mod:`in_reach.app.script_preprocess`: the active profile's
+        ``${CONSTANTS}`` and ``-- @if`` blocks are applied to the script before it's compiled and before
+        ``Compiled.txt`` is written.)"""
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return []
+        from in_reach.app import script_preprocess
+
+        names = script_preprocess.list_profiles(folder)
+        if not names:
+            return []
+        active = script_preprocess.active_profile_name(folder)
+        commands = [
+            Command(label=name, detail="active" if name == active else "", action=lambda n=name: self._set_build_profile(n))
+            for name in names
+        ]
+        commands.append(
+            Command(label="No profile", detail="active" if active not in names else "", action=lambda: self._set_build_profile(None))
+        )
+        return commands
+
+    def _set_build_profile(self, name: str | None) -> None:
+        """Makes ``name`` (or, for ``None``, no profile) the one the active project builds with. A no-op
+        with no project open; a failure to write the choice is logged, not raised."""
         folder = self.explorer_panel.current_folder
         if folder is None:
             return
-        from in_reach.app import notes_settings
+        from in_reach.app import script_preprocess
 
-        notes_format = notes_settings.get_notes_format(self._notes_format_env_path())
-        path = notes_settings.ensure_notes_file(folder, notes_format)
-        _logger.info("opening notes for %s", folder)
-        self.main_panel.active_pane.open_file(path, editable_markdown=notes_format == notes_settings.FORMAT_MD)
+        try:
+            script_preprocess.set_active_profile(folder, name)
+        except (ValueError, OSError):
+            _logger.exception("couldn't set the build profile for %s to %r", folder, name)
+            return
+        _logger.info("build profile for %s set to %s", folder, name or "none")
+        self._refresh_profile_indicator(folder)
 
-    def _notes_format_env_path(self) -> Path:
-        return project.get_project_dir(self.root_dir) / ".env"
+    def _refresh_profile_indicator(self, folder: Path | None) -> None:
+        """The status bar's left-edge "Profile: <name>" segment for ``folder``: hidden with no project
+        open or none of ``script/env``'s profiles to choose between, else the active one (or "No
+        profile"). Clicking it opens the same pick as the palette's "Select Build Profile"."""
+        from in_reach.app import script_preprocess
 
-    def _set_notes_format(self, notes_format: str) -> None:
-        """"Set Notes Format" (the ``>`` command palette, PROMPT.md: "can be set in settings or
-        command palette") -- persists which file "Notes" opens from here on. Never touches whatever
-        notes file is already open in a tab."""
-        from in_reach.app import notes_settings
+        if folder is None or not script_preprocess.list_profiles(folder):
+            self.status_bar.clear_profile()
+            return
+        self.status_bar.set_profile(script_preprocess.active_profile_name(folder), on_click=self._pick_build_profile)
 
-        notes_settings.set_notes_format(self._notes_format_env_path(), notes_format)
+    def _pick_build_profile(self) -> None:
+        """Opens the "Select Build Profile" quick-pick (the status bar segment's own click)."""
+        commands = self._build_profile_commands()
+        if commands:
+            self.quick_access.open_action_list(commands, "Select Build Profile")
+
+    # -- Kanban (PROMPT.md: "the first pass of Kanban functionality") -----------------------------
+
+    def _kanban_store(self) -> KanbanStore:
+        """The one shared :class:`~in_reach.app.kanban_db.KanbanStore` for this window -- one
+        database in the project-root ``.in-reach`` folder serving every gametype project -- created
+        on first use, and handed to the sidebar panel (which keeps itself in sync with it)."""
+        if self._kanban_store_obj is None:
+            store = KanbanStore(project.get_project_dir(self.root_dir))
+            store.add_listener(self._on_kanban_changed)
+            self._kanban_store_obj = store
+            self.kanban_panel.set_store(store)
+        return self._kanban_store_obj
+
+    def _on_kanban_changed(self) -> None:
+        self.main_panel.refresh_kanban_tabs()
+
+    def _kanban_project(self, store: KanbanStore):
+        folder = self.explorer_panel.current_folder
+        if folder is None:
+            return None
+        return store.ensure_project(folder.name, new_project.read_project_title(folder))
+
+    def _kanban_boards(self) -> list:
+        """The active project's boards, for the "Open Kanban Board" palette pick -- empty with no
+        project open, or before the store has ever been created (nothing to list yet)."""
+        if self._kanban_store_obj is None or self.explorer_panel.current_folder is None:
+            return []
+        project_row = self._kanban_project(self._kanban_store_obj)
+        return self._kanban_store_obj.list_boards(project_row.id) if project_row else []
+
+    def _show_default_kanban_board(self) -> None:
+        """PROMPT.md: "when clicked it should load the default board in the editor view" -- the
+        Kanban icon opening the sidebar also opens the active project's default board (making a
+        fresh "Main Board" first if it has none yet). A no-op with no project open."""
+        if self.explorer_panel.current_folder is None:
+            return
+        store = self._kanban_store()
+        project_row = self._kanban_project(store)
+        if project_row is None:
+            return
+        board = store.ensure_default_board(project_row.id)
+        self._open_kanban_board(board.id)
+
+    def _open_kanban_board(self, board_id: int) -> None:
+        store = self._kanban_store()
+        self.main_panel.active_pane.open_kanban_board(store, board_id)
+
+    def new_kanban_board(self) -> None:
+        """"New Kanban Board" -- prompts for a name and opens the new board. A no-op with no
+        project open."""
+        if self.explorer_panel.current_folder is None:
+            return
+        self._kanban_store()
+        self.kanban_panel.new_board()
+
+    def _notepad_path(self) -> Path | None:
+        folder = self.explorer_panel.current_folder
+        return None if folder is None else folder / new_project.NOTES_FILENAME
+
+    def _open_notepad_tab(self):
+        """Hands the Dashboard Notepad's file over to a real editor tab (PROMPT.md: "it should be
+        possible to load in editor tab or in popout window") -- flushing whatever's typed but not
+        yet autosaved first, so the tab opens on the box's current content. An already-open tab
+        is refreshed from disk too, unless it has unsaved edits of its own (never clobbered).
+        Returns the ``(pane, index)`` now showing it, or ``None`` with no project open."""
+        path = self._notepad_path()
+        if path is None:
+            return None
+        self.explorer_panel.notepad.flush()
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+        pane = self.main_panel.active_pane
+        pane.open_file(path, force_reload=not self.main_panel.dirty_tab_names([path]))
+        return pane, pane.currentIndex()
+
+    def open_notepad_in_editor(self) -> None:
+        """"Open Notepad in Editor" -- the Dashboard Notepad box's own button, and a palette entry."""
+        if self._open_notepad_tab() is not None:
+            _logger.info("opened notepad in an editor tab for %s", self.explorer_panel.current_folder)
+
+    def open_notepad_in_window(self) -> None:
+        """"Open Notepad in Window" -- opens the notepad in an editor tab (see
+        :meth:`_open_notepad_tab`), then moves that tab to its own popout window, same as a tab's
+        own "Move to Window" context-menu entry."""
+        opened = self._open_notepad_tab()
+        if opened is None:
+            return
+        pane, index = opened
+        self.main_panel.move_tab_to_new_window(pane, index)
+        _logger.info("opened notepad in a popout window for %s", self.explorer_panel.current_folder)
 
     def export_rvt_file(self) -> None:
         """"Export RVT File" (PROMPT.md, under the Dashboard's own button row) -- compiles the
@@ -2638,7 +2916,13 @@ class MainWindow(QWidget):
         Tells the user to run Verify System Settings first rather than silently doing nothing if
         the checklist was never run (or that particular step never resolved) for this key.
         """
-        env_path = system_verify.env_path_for(project.get_project_dir(self.root_dir))
+        project_dir = project.get_project_dir(self.root_dir)
+        if env_key == system_verify.INREACH_MAPS_KEY:
+            # in-reach's own folder (PROMPT.md: "a button for In-Reach maps ... it should point to
+            # .in-reach maps") -- always resolvable, created on demand, no checklist run needed.
+            self.open_folder_in_os_explorer(system_verify.inreach_maps_dir(project_dir))
+            return
+        env_path = system_verify.env_path_for(project_dir)
         value = env_file.get_env_values(env_path).get(env_key, "")
         if not value or not Path(value).is_dir():
             QMessageBox.information(
@@ -2707,9 +2991,9 @@ class MainWindow(QWidget):
 
     def _on_watched_bin_changed(self, path: str) -> None:
         """Re-decompiles the watched ``.bin`` into ``settings/`` and ``build/``'s
-        ``*.autogenerated.json`` snapshot -- ``script/output.txt`` (the one genuinely
-        hand-editable thing left) is deliberately untouched, see
-        :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring. Best-effort: a
+        ``*.autogenerated.json`` snapshot, then -- if RVT's save changed the *script* -- pulls it into
+        ``script/output.txt`` too (:meth:`_pull_script_from_rvt`; the resync itself never touches that file,
+        see :func:`~in_reach.app.rvt.decompile.resync_from_bin`'s own docstring). Best-effort: a
         ``.bin`` RVT happened to be mid-write on, or any other decompile failure, is silently
         swallowed rather than popping an error over a background sync the user didn't explicitly
         ask for.
@@ -2748,6 +3032,7 @@ class MainWindow(QWidget):
                 category, category_icon = settings_io.load_meta_category(settings_path)
                 created_at = settings_io.load_meta_generated_at(settings_path)
                 map_entries = maps_io.read_maps_json(project.get_project_dir(self.root_dir))
+                script_before = script_sync.read_snapshot(folder)
                 try:
                     resync_from_bin(
                         bin_path,
@@ -2761,6 +3046,7 @@ class MainWindow(QWidget):
                     pass
                 else:
                     self.main_panel.reload_open_tabs(watched_json_paths)
+                    self._pull_script_from_rvt(folder, script_before)
                     self._sync_project_title(folder)
                     # PROMPT.md: "please also add a stats view into the dashboard" -- this resync
                     # just regenerated build/stats.autogenerated.json too.
@@ -2775,6 +3061,54 @@ class MainWindow(QWidget):
         # the *next* save still gets caught.
         if bin_path.is_file() and str(bin_path) not in self._bin_watcher.files():
             self._bin_watcher.addPath(str(bin_path))
+
+    def _pull_script_from_rvt(self, folder: Path, before: script_sync.ScriptSnapshot | None) -> None:
+        """If RVT's save changed the script (not just the file), puts RVT's version in
+        ``script/output.txt`` -- without this the next Apply rebuilds the ``.bin`` from ``output.txt`` and
+        silently throws RVT's script edits away. ``before`` is :func:`~in_reach.app.script_sync.
+        read_snapshot`'s result from *before* the resync that followed the save.
+
+        Pulls silently unless that would lose something (see :class:`~in_reach.app.script_sync.
+        PullReason`), in which case it asks first; declining leaves ``output.txt`` alone, and the RVT
+        version is simply not adopted (the next Apply builds from ``output.txt`` as it is).
+        """
+        after = script_sync.read_snapshot(folder)
+        plan = script_sync.plan_pull(folder, before, after)
+        if not plan.needed:
+            return
+        script = script_sync.script_path(folder)
+        reasons = list(plan.reasons)
+        if self.main_panel.dirty_tab_names([script]):
+            reasons.append(script_sync.PullReason.UNSAVED_EDITS)
+        if reasons and not self._confirm_pull_script([reason.value for reason in reasons]):
+            _logger.info("kept script/output.txt over ReachVariantTool's changed script for %s", folder)
+            return
+        script_sync.pull(folder, after)
+        self.main_panel.reload_open_tabs([script])
+        _logger.info("pulled ReachVariantTool's script into %s", script)
+
+    def _confirm_pull_script(self, reasons: list[str]) -> bool:
+        """Asks whether to replace ``script/output.txt`` with the script ReachVariantTool just saved,
+        listing what that would lose (``reasons``) -- kept as its own method purely as a test seam, same
+        reasoning as :meth:`_confirm_overwrite_rvt_changes`.
+
+        Returns:
+            ``True`` for "Use RVT's Script", ``False`` for "Keep Mine".
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("in-reach")
+        joined = "\n".join(f"- {reason}" for reason in reasons)
+        box.setText(
+            "You changed this project's script in ReachVariantTool.\n\n"
+            f"Replacing script/output.txt with it would lose:\n\n{joined}\n\n"
+            "Use ReachVariantTool's script, or keep script/output.txt as it is? (Keeping it means the "
+            "next Apply builds from it and discards the script changes made in ReachVariantTool.)"
+        )
+        use_button = box.addButton("Use RVT's Script", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Keep Mine", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(use_button)
+        box.exec()
+        return box.buttonRole(box.clickedButton()) == QMessageBox.ButtonRole.AcceptRole
 
     def _confirm_overwrite_rvt_changes(self, dirty_names: list[str]) -> bool:
         """Asks whether to let a just-saved RVT resync overwrite unsaved edits in ``dirty_names``

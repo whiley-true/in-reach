@@ -134,6 +134,25 @@ _ICON_SOURCES = {
         '<path d="M4.9 10.3L4.2 11.6C3.6 13 4.6 14.5 6.1 14.5H9.9C11.4 14.5 12.4 13 11.8 11.6'
         'L11.1 10.3Z" fill="{color}" fill-opacity="0.45"/>',
     ),
+    "sprint": (  # PROMPT.md: "please add an icon under testing for playtest which should be the icon
+        # of a sprinting man" -- a running figure in profile facing right (a head, a leaning torso,
+        # bent arms swinging opposite the legs, a forward knee-drive and a trailing back leg), plus
+        # two short speed lines behind it. Stroked limbs with round caps rather than filled shapes,
+        # same "deliberately simple, not traced from any icon set" reasoning as "compass"/"map".
+        "0 0 16 16",
+        '<circle cx="10.8" cy="2.7" r="1.7" fill="{color}"/>'
+        '<path d="M9.7 4.9L7.7 8.7" fill="none" stroke="{color}" stroke-width="1.8" stroke-linecap="round"/>'
+        '<path d="M9.4 5.6L12.3 6.6L13.3 4.9" fill="none" stroke="{color}" stroke-width="1.5"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<path d="M9.1 5.9L6.4 6.3L5.4 8.2" fill="none" stroke="{color}" stroke-width="1.5"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<path d="M7.7 8.7L10.6 10.5L9.3 13.7" fill="none" stroke="{color}" stroke-width="1.6"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<path d="M7.7 8.7L5.6 11.2L2.9 12.4" fill="none" stroke="{color}" stroke-width="1.6"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<path d="M1.2 4.4H3.6M0.8 7H2.8" fill="none" stroke="{color}" stroke-width="1"'
+        ' stroke-linecap="round" stroke-opacity="0.6"/>',
+    ),
     "robot": (  # PROMPT.md: "beneath the map a stubbed entry for LLM (using a Robot)" -- a plain
         # robot head (an antenna, a rounded-rect face, two eyes, a mouth line, two side arms), same
         # "deliberately simple, not traced from any icon set" reasoning as "compass"/"map" above.

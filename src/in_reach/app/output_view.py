@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from in_reach.app import script_preprocess
 from in_reach.app.new_project import BUILD_DIRNAME, SCRIPT_DIRNAME
 from in_reach.app.rvt.decompile import SCRIPT_FILENAME
 
@@ -59,7 +60,17 @@ def write_output_view(folder: Path) -> Path:
     except OSError:
         script_text = ""
 
+    # What the compiler is actually given: the active profile's constants and blocks applied. If the
+    # profile or script can't be preprocessed, show the source as written with the reason on top, rather
+    # than raising -- this is the view a user opens to find out what's wrong.
+    banner = _BANNER
+    try:
+        script_text = script_preprocess.preprocess_project(folder, script_text)
+    except script_preprocess.PreprocessError as exc:
+        where = f"line {exc.line}" if exc.path is None else f"{exc.path.name}, line {exc.line}"
+        banner += f"-- NOT PREPROCESSED ({where}): {exc.message}\n\n"
+
     view_path = output_view_path(folder)
     view_path.parent.mkdir(parents=True, exist_ok=True)
-    view_path.write_text(_BANNER + script_text, encoding="utf-8")
+    view_path.write_text(banner + script_text, encoding="utf-8")
     return view_path

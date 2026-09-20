@@ -93,7 +93,14 @@ def icon_for_path(path: Path) -> QIcon:
     """The icon for a filesystem entry -- a folder emoji for a directory, else
     :func:`icon_for_suffix` off its own suffix (or its bare name, for a dotfile like
     ``.gitignore``)."""
-    if path.is_dir():
+    try:
+        is_directory = path.is_dir()
+    except OSError:
+        # A drive Windows won't let us look at (locked, card reader): Python 3.12/3.13 raise PermissionError
+        # here where 3.14 returns False, and this runs inside a Qt virtual method (ExplorerIconProvider.icon),
+        # where an exception isn't handled by anything.
+        is_directory = False
+    if is_directory:
         return _glyph_icon(_FOLDER_EMOJI_CLOSED)
     suffix = path.suffix if path.suffix else path.name
     return icon_for_suffix(suffix)

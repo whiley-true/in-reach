@@ -386,8 +386,11 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
     labels = [c.label for c in commands]
     assert labels == [
         "New Window",
+        "Load Welcome Tab",
         "Open Folder",
         "Save",
+        "Save All",
+        "Apply",
         "Close Project",
         "Close Editor",
         "Close Window",
@@ -396,11 +399,39 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Cut",
         "Copy",
         "Paste",
+        "Find",
+        "Replace",
+        "Select All",
+        "Split Right",
+        "Split Down",
+        "Close All",
+        "Toggle Sidebar",
+        "Toggle Panel",
+        "Settings",
         "Set Theme",
         "Set UI Scale",
-        "Open Notes",
-        "Set Notes Format",
+        "Dashboard",
+        "Search",
+        "Git",
+        "Scripts",
+        "Map Files",
+        "Documentation",
+        "Kanban",
+        "Testing",
+        "Playtest",
+        "LLM",
+        "View Logs",
+        "Launch Halo MCC",
+        "Launch RVT",
+        "New Kanban Board",
+        "Open Kanban Board",
+        "Select Build Profile",
+        "Open Notepad in Editor",
+        "Open Notepad in Window",
+        "Open In-Reach Maps",
         "Commit",
+        "Stage All",
+        "Unstage All",
         "Stamp Release",
         "New Branch",
         "New Branch From",
@@ -409,13 +440,13 @@ def test_build_command_palette_commands_offers_set_theme_and_set_ui_scale(projec
         "Merge Branch",
         "Restore Snapshot",
         "Compare",
+        "Export RVT File",
+        "View Output.txt",
     ]
     theme_command = next(c for c in commands if c.label == "Set Theme")
     assert [c.label for c in theme_command.children] == ["Light", "Dark", "Whiley"]
     scale_command = next(c for c in commands if c.label == "Set UI Scale")
     assert [c.label for c in scale_command.children] == ["Increase", "Decrease"]
-    notes_format_command = next(c for c in commands if c.label == "Set Notes Format")
-    assert [c.label for c in notes_format_command.children] == ["Text (.txt)", "Markdown (.md)"]
 
 
 def test_running_a_set_theme_command_applies_and_persists_the_theme(project_window: MainWindow) -> None:

@@ -30,13 +30,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from in_reach.app.project_search import compile_search_pattern, preserve_case
 from in_reach.ide import icons
 
 _BAR_STYLE = (
     "QWidget#findReplaceBar { background-color: palette(alternate-base);"
     " border-bottom: 1px solid palette(mid); }"
 )
-_TOGGLE_STYLE = (
+TOGGLE_STYLE = (
     "QToolButton { border: 1px solid transparent; border-radius: 3px; padding: 1px 5px;"
     " color: palette(text); }"
     "QToolButton:checked { background-color: palette(highlight); border-color: palette(highlight);"
@@ -45,46 +46,14 @@ _TOGGLE_STYLE = (
 _CLOSE_ICON_SIZE = 12
 
 
-def compile_search_pattern(
-    query: str, *, match_case: bool, whole_word: bool, regex: bool
-) -> re.Pattern | None:
-    """The compiled pattern ``query`` (under the current match-case/whole-word/regex options)
-    resolves to, or ``None`` for an empty query or an invalid regex -- shared by both live
-    highlighting/counting and Replace All, so the two can never disagree about what "matches".
-    """
-    if not query:
-        return None
-    flags = 0 if match_case else re.IGNORECASE
-    pattern = query if regex else re.escape(query)
-    if whole_word and not regex:
-        pattern = rf"\b{pattern}\b"
-    try:
-        return re.compile(pattern, flags)
-    except re.error:
-        return None
-
-
-def preserve_case(original: str, replacement: str) -> str:
-    """PROMPT.md: "replace should have preserve case" -- VSCode's own heuristic: an all-uppercase
-    match gets an all-uppercase replacement, a capitalized (title-case first letter) match gets a
-    capitalized replacement, anything else is left alone."""
-    if not original or not replacement:
-        return replacement
-    if original.isupper():
-        return replacement.upper()
-    if original[0].isupper() and original[1:].islower():
-        return replacement[0].upper() + replacement[1:]
-    return replacement
-
-
-def _toggle_button(text: str, tooltip: str) -> QToolButton:
+def toggle_button(text: str, tooltip: str) -> QToolButton:
     button = QToolButton()
     button.setText(text)
     button.setCheckable(True)
     button.setToolTip(tooltip)
     button.setAutoRaise(True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setStyleSheet(_TOGGLE_STYLE)
+    button.setStyleSheet(TOGGLE_STYLE)
     return button
 
 
@@ -163,9 +132,9 @@ class FindReplaceBar(QWidget):
         self.find_input.textChanged.connect(self._refresh_matches)
         find_row.addWidget(self.find_input, 1)
 
-        self.match_case_button = _toggle_button("Aa", "Match Case")
-        self.whole_word_button = _toggle_button("ab", "Match Whole Word")
-        self.regex_button = _toggle_button(".*", "Use Regular Expression")
+        self.match_case_button = toggle_button("Aa", "Match Case")
+        self.whole_word_button = toggle_button("ab", "Match Whole Word")
+        self.regex_button = toggle_button(".*", "Use Regular Expression")
         for button in (self.match_case_button, self.whole_word_button, self.regex_button):
             button.toggled.connect(self._refresh_matches)
             find_row.addWidget(button)
@@ -173,7 +142,7 @@ class FindReplaceBar(QWidget):
         # PROMPT.md: "find in selection" -- captures the editor's current selection the moment
         # this is turned on (see _on_find_in_selection_toggled), same "snapshot once, not a live
         # binding" reasoning as _PlainTextEditor's own "$schema" line-protection span.
-        self.find_in_selection_button = _toggle_button("[¶]", "Find in Selection")
+        self.find_in_selection_button = toggle_button("[¶]", "Find in Selection")
         self.find_in_selection_button.toggled.connect(self._on_find_in_selection_toggled)
         find_row.addWidget(self.find_in_selection_button)
 
@@ -216,7 +185,7 @@ class FindReplaceBar(QWidget):
         self.replace_input.setPlaceholderText("Replace")
         replace_row.addWidget(self.replace_input, 1)
 
-        self.preserve_case_button = _toggle_button("AB", "Preserve Case")
+        self.preserve_case_button = toggle_button("AB", "Preserve Case")
         replace_row.addWidget(self.preserve_case_button)
 
         self.replace_button = QToolButton()

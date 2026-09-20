@@ -1,0 +1,6 @@
+# The source distribution carries the C++ the wheel's compiled module is built from (see native/README.md),
+# but not build output or the prebuilt module.
+graft native
+global-exclude *.pyc
+global-exclude __pycache__
+prune native/build

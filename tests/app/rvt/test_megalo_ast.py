@@ -307,13 +307,68 @@ def test_missing_end_raises() -> None:
         parse("do\n   global.number[0] = 1\n")
 
 
-@pytest.mark.parametrize("keyword", ["function", "enum", "inline"])
+@pytest.mark.parametrize("keyword", ["function", "enum"])
 def test_unimplemented_reserved_keywords_raise_rather_than_silently_misparse(keyword: str) -> None:
-    """function/enum/inline are real, reserved Compiler keywords (confirmed via compile_script(),
-    see nodes.py's module docstring) this grammar doesn't implement a production for -- must raise,
-    not silently fall through to being treated as a bare Identifier/Call expression."""
+    """function/enum are real, reserved Compiler keywords (confirmed via compile_script(), see
+    nodes.py's module docstring) this grammar doesn't implement a production for -- must raise, not
+    silently fall through to being treated as a bare Identifier/Call expression."""
     with pytest.raises(MegaloParseError):
         parse(f"{keyword} foo\nend\n")
+
+
+# -- inline: -----------------------------------------------------------------------------------------
+# What decompile_script() prints for "Run Inline Nested Trigger" (an in-house-built variant is full of
+# them). It used to be rejected outright, so a script pulled back out of such a .bin couldn't be parsed.
+
+
+def test_inline_do_block_parses_and_round_trips() -> None:
+    text = "if global.number[0] == 1 then \n   inline: do\n      global.number[1] = 2\n   end\nend\n"
+
+    script = parse(text)
+
+    inner = script.body[0].body[0]
+    assert isinstance(inner, DoBlock) and inner.inline is True
+    assert "inline: do" in unparse(script)
+    assert parse(unparse(script)).body[0].body[0].inline is True
+
+
+def test_inline_if_parses_and_round_trips() -> None:
+    text = "inline: if global.number[0] == 1 then \n   global.number[1] = 2\nend\nglobal.number[2] = 3\n"
+
+    script = parse(text)
+
+    assert isinstance(script.body[0], IfStatement) and script.body[0].inline is True
+    assert isinstance(script.body[1], Assignment)  # a sibling of the if, not part of it
+    assert "inline: if" in unparse(script)
+    again = parse(unparse(script))
+    assert again.body[0].inline is True and isinstance(again.body[1], Assignment)
+
+
+def test_a_plain_do_or_if_is_not_inline() -> None:
+    script = parse("do\n   global.number[0] = 1\nend\nif global.number[0] == 1 then \n   game.end_round()\nend\n")
+
+    assert [stmt.inline for stmt in script.body] == [False, False]
+
+
+def test_inline_can_follow_an_event_binding() -> None:
+    script = parse("on init: inline: do\n   global.number[0] = 1\nend\n")
+
+    assert isinstance(script.body[0], EventTrigger)
+    assert script.body[0].body.inline is True
+
+
+def test_the_inline_flag_survives_alias_resolution() -> None:
+    from in_reach.app.rvt.megalo_ast import resolve_aliases
+
+    script = resolve_aliases(parse("alias x = global.number[0]\ninline: do\n   x = 1\nend\n"))
+
+    assert script.body[0].inline is True
+
+
+@pytest.mark.parametrize("text", ["inline: global.number[0] = 1\n", "inline do\nend\n", "inline:\n"])
+def test_inline_must_be_followed_by_a_do_or_if_block(text: str) -> None:
+    with pytest.raises(MegaloParseError):
+        parse(text)
 
 
 @pytest.mark.parametrize("keyword", ["else", "elseif"])
