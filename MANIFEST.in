@@ -4,3 +4,5 @@ graft native
 global-exclude *.pyc
 global-exclude __pycache__
 prune native/build
+# ...and no compiled files at all: the sdist is the C++ (and everything else) to build them from.
+prune src/in_reach/app/rvt/native

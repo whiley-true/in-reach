@@ -395,10 +395,20 @@ def test_vcs_refuses_bad_input_with_exit_1(runner: CliRunner, tmp_path: Path) ->
 # -- new ------------------------------------------------------------------------------------------------------------
 
 
+def test_new_without_the_native_module_exits_2_and_creates_nothing(runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("in_reach.app.rvt.rvt_bridge.is_available", lambda: False)
+
+    result = runner.invoke(main, ["new", "My Game", "--root", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 2 and json.loads(result.output)["ok"] is False and not (tmp_path / ".in-reach").exists()
+
+
 def test_new_creates_a_gametype_project_from_a_bin(runner: CliRunner, tmp_path: Path) -> None:
+    from in_reach.app.rvt import rvt_bridge
+
     source = Path(__file__).parent / "app" / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
-    if not source.is_file():
-        pytest.skip("fixture .bin not present")
+    if not (source.is_file() and rvt_bridge.is_available()):
+        pytest.skip("fixture .bin or native module not available")
 
     result = runner.invoke(main, ["new", "My Game", "--from", str(source), "--root", str(tmp_path), "--format", "json"])
 

@@ -190,9 +190,20 @@ def test_set_profile_reports_the_new_state(tmp_path: Path) -> None:
     assert api.set_profile(folder, None).active is None
 
 
+def test_new_gametype_project_without_the_native_module_is_an_environment_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("in_reach.app.rvt.rvt_bridge.is_available", lambda: False)
+
+    with pytest.raises(api.ApiError) as raised:
+        api.new_gametype_project(tmp_path, "Fresh")
+
+    assert raised.value.exit_code == api.EXIT_ENVIRONMENT and not (tmp_path / ".in-reach").exists()  # nothing half-made
+
+
 def test_new_gametype_project_makes_the_workspace_when_it_is_missing(tmp_path: Path) -> None:
-    if not _JUGGERNAUT.is_file():
-        pytest.skip("fixture .bin not present")
+    from in_reach.app.rvt import rvt_bridge
+
+    if not (_JUGGERNAUT.is_file() and rvt_bridge.is_available()):
+        pytest.skip("fixture .bin or native module not available")
 
     folder = api.new_gametype_project(tmp_path, "Fresh", source_variant=_JUGGERNAUT)
 

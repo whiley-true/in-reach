@@ -4,10 +4,9 @@ __pycache__/
 *.pyc
 *.pyd
 *.egg-info/
-# ...except the prebuilt _reachvarianttool native module (ported from refactor/mide/native/), which
-# is a committed binary shipped as package-data, not a regenerated build artifact -- see
-# src/in_reach/app/rvt/rvt_bridge.py.
-!/src/in_reach/app/rvt/native/*.pyd
+# The compiled _reachvarianttool module and the Qt runtime beside it are build output (native/build.py, and CI's
+# native.yml for the published wheels), not source -- see native/README.md.
+/src/in_reach/app/rvt/native/
 .pytest_cache/
 src/inreach.egg-info
     

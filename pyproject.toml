@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2"]
+dev = ["pytest==8.4.2", "setuptools>=68"]
 
 [project.scripts]
 in-reach = "in_reach.cli:main"

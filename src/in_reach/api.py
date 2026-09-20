@@ -317,7 +317,15 @@ def set_profile(folder: Path, name: str | None) -> ProfileInfo:
 
 
 def new_gametype_project(root: Path, title: str, *, source_variant: Path | None = None, description: str = "") -> Path:
-    """Creates a gametype project at ``<root>/<id>`` (making ``<root>/.in-reach`` if it is missing); returns its folder."""
+    """Creates a gametype project at ``<root>/<id>`` (making ``<root>/.in-reach`` if it is missing); returns its folder.
+
+    Raises:
+        ApiError: The native extension isn't available (exit code 2) -- a new project is made by decompiling a game
+            variant into ``settings/`` and ``script/``, which needs it."""
+    from in_reach.app.rvt import rvt_bridge
+
+    if not rvt_bridge.is_available():
+        raise ApiError("the native _reachvarianttool module isn't available for this Python", EXIT_ENVIRONMENT)
     project_dir = project_module.get_project_dir(Path(root))
     if not project_dir.is_dir():
         project_module.create_project(Path(root))

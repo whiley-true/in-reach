@@ -256,9 +256,11 @@ Right now a script is edited as plain text and errors come back in Apply's failu
   wheel `linux_x86_64`, which PyPI rejects *after* the sdist may already be up, and a PyPI version can't be
   re-uploaded. `native.yml` also runs on pushes to `main` so a release finds the vcpkg Qt cache. **Not yet run:**
   a real release -- the first one is the test of `publish.yml` (actionlint-clean and covered by
-  `test_publish_workflow.py`, but GitHub has never executed it). **Still to do afterwards:** stop committing the
-  `.pyd`/DLLs (CI now produces them; a checkout then needs `python native/build.py` before native features or
-  tests work) once a release has published cleanly. The sdist currently includes the committed module too. Each
+  `test_publish_workflow.py`, but GitHub has never executed it). **Done:** the `.pyd`/DLLs are no longer
+  committed (git-ignored; a checkout needs `python native/build.py` before native features or tests work), the sdist is
+  source only, a wheel carries only its own Python's module, and the bundled ReachVariantTool is down from 62 MB to 28 MB
+  (the OpenGL software fallback, ANGLE/Direct3D DLLs and Qt translations were never loaded -- checked by launching it and
+  reading its loaded-module list; `tests/app/test_native_packaging.py` keeps all of that true). Each
   wheel is also installed into a clean environment and imported from outside the checkout before it is uploaded
   as an artifact (the smoke-test step in `native.yml`), since the test suite only ever imports the source tree.
   Still Windows-only and per-CPython-version (the engine uses MSVC-specific constructs); Linux/macOS wheels

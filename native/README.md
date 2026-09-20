@@ -79,5 +79,7 @@ incremental: touching only `bindings.cpp` recompiles that one file and relinks (
 first build compiles the whole engine (several). A zero exit code is not proof of a good build if you drive CMake yourself -- grep the log for `error C` /
 `error LNK`; `build.py` stops on a failed build and on a missing or ambiguous module.
 
-The `.pyd` and DLLs currently in the repo are committed build output, so a checkout works without building.
-Rebuilding replaces them; commit the result only when the bindings changed.
+**Nothing built is committed.** `src/in_reach/app/rvt/native/` is git-ignored: a source checkout has no native module until
+you run `python native/build.py` (tests that need it skip until then), and the published wheels get theirs from CI
+(`native.yml`). A wheel carries only the running Python's `_reachvarianttool.cpXYZ-*.pyd` (`setup.py` leaves out the others a
+dev tree may hold), and the sdist carries the C++ but no compiled file.
