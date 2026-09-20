@@ -128,10 +128,11 @@ class StringReconciliation:
     strings: dict
     added: list[int] = field(default_factory=list)
     removed: list[int] = field(default_factory=list)
+    updated: list[int] = field(default_factory=list)  # entries whose text :func:`own_text` replaced
 
     @property
     def changed(self) -> bool:
-        return bool(self.added or self.removed)
+        return bool(self.added or self.removed or self.updated)
 
 
 def _is_untranslated(entry: dict) -> bool:
@@ -179,6 +180,24 @@ def reconcile_script_strings(mp, strings: dict) -> StringReconciliation:
         return StringReconciliation(strings)
     entries.sort(key=lambda entry: entry["index"])
     return StringReconciliation({**strings, "script_strings": entries}, added, removed)
+
+
+def own_text(reconciled: StringReconciliation, owned: dict[int, str]) -> StringReconciliation:
+    """``reconciled`` with the English text of each script string in ``owned`` (index -> text; see
+    :mod:`~in_reach.app.rvt.resource_text`) set to that text, so what :func:`apply_strings` writes -- and what gets saved
+    to ``settings/strings.json`` -- is what the code says. Other languages of an entry are left as they are."""
+    entries = [dict(entry) for entry in reconciled.strings["script_strings"]]
+    updated = []
+    for entry in entries:
+        text = owned.get(entry["index"])
+        if text is not None and entry["text"].get("english") != text:
+            entry["text"] = {**entry["text"], "english": text}
+            updated.append(entry["index"])
+    if not updated:
+        return reconciled
+    return StringReconciliation(
+        {**reconciled.strings, "script_strings": entries}, reconciled.added, reconciled.removed, updated
+    )
 
 
 def apply_strings(mp, strings: dict) -> list[str]:

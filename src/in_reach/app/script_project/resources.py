@@ -13,6 +13,12 @@ an alias (``alias t_freeze = script_traits[0]``) in the built script. Decision 2
 Forge labels are not written here: a label is created when the compiler first meets its name, and
 :mod:`in_reach.app.rvt.settings_writer` records it afterwards. ``@label`` only supplies the name to substitute.
 
+``name`` and ``desc`` (of a trait set, and of an option) are what the game shows. They live in the variant's strings table,
+not in the settings entry, so :mod:`in_reach.app.rvt.resource_text` writes them there (and into ``settings/strings.json``)
+at compile time -- with no ``name`` a trait set is called by its alias and a toggle's values "Off" and "On". The copy in
+``script_settings.json`` is only a mirror, which a round trip through the ``.bin`` rewrites, so it is left out of the digest
+that decides whether an entry was edited, and a refresh from the module keeps whatever is there.
+
 Field names: an ``@trait``'s keys are ``<category>_<field>`` (``movement_speed``, ``defense_damage_resist``), the
 categories and fields of :class:`~in_reach.app.rvt.models.traits.PlayerTraits`; ``name`` and ``desc`` are the entry's
 own. An ``@option`` is ``type = "toggle"`` (``default`` 0 or 1) or ``type = "range"`` (``min``, ``max``, ``default``).
@@ -56,6 +62,11 @@ class ResourceInfo:
     index: int
     owner: str
     digest: str
+    # The text the declaration asked for, which the compile writes into the variant's strings table (``resource_text``):
+    # ``label``/``note`` are an explicit ``name``/``desc``; ``values`` the names of an option's enum values.
+    label: str | None = None
+    note: str | None = None
+    values: tuple[str, ...] = ()
 
     @property
     def alias_value(self) -> str:
@@ -75,8 +86,35 @@ class _Invalid(Exception):
     pass
 
 
+DIGEST_VERSION = "2:"
+
+
+def _without_text(value):
+    """``value`` with every ``name`` and ``desc`` key removed, at any depth."""
+    if isinstance(value, dict):
+        return {k: _without_text(v) for k, v in value.items() if k not in ("name", "desc")}
+    if isinstance(value, list):
+        return [_without_text(v) for v in value]
+    return value
+
+
+def _keeping_text(fresh: BaseModel, current: BaseModel) -> BaseModel:
+    """``fresh`` (built from the declaration) but with ``current``'s display text: it is the game's, or the user's, to
+    change, not the module's to reset -- and a name blanked by a round trip through the ``.bin`` stays as it was."""
+    keep = {field: getattr(current, field) for field in ("name", "desc") if hasattr(current, field)}
+    return fresh.model_copy(update=keep)
+
+
 def digest(entry: BaseModel) -> str:
-    return hashlib.sha256(json.dumps(entry.model_dump(mode="json"), sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    """A fingerprint of what a settings entry does in the game variant. The display text (``name``, ``desc``) is left
+    out: the compiler never writes it (it is looked up from the strings table when settings are extracted, and comes
+    back blank for an entry the linker made), so a round trip through the ``.bin`` -- Launch RVT, a resync -- changes
+    it without anyone having edited the entry, and counting it would make every such entry look hand-edited."""
+    dumped = _without_text(entry.model_dump(mode="json"))
+    if dumped.get("is_range"):
+        dumped.pop("values", None)  # a range option's enum values mean nothing: a saved-and-reloaded one has none
+    text = json.dumps(dumped, sort_keys=True)
+    return DIGEST_VERSION + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 # -- annotation fields -> settings entries --------------------------------------------------------------
@@ -144,7 +182,7 @@ def _option_entry(name: str, fields: dict) -> ScriptedOption:
             if not low <= default <= high:
                 raise _Invalid(f"the default {default} isn't between min {low} and max {high}")
             return ScriptedOption(
-                name=label, desc=desc, is_range=True,
+                name=label, desc=desc, is_range=True, values=[ScriptedOptionValue(value=0)],  # a range option keeps one value
                 range_min=ScriptedOptionValue(value=low), range_max=ScriptedOptionValue(value=high),
                 range_default=ScriptedOptionValue(value=default), range_current=default,
             )
@@ -207,8 +245,13 @@ def plan_resources(
         before = previous.get(annotation.name)
         if before and before.get("kind") == kind and 0 <= before.get("index", -1) < len(entries):
             index = before["index"]
-            untouched = digest(entries[index]) == before.get("digest")
+            recorded_before = before.get("digest", "")
+            # A digest without the version prefix was written before display text was left out of it: it can't be
+            # compared with today's, so that entry is adopted (refreshed from its declaration) once, and recorded in
+            # the new form from then on.
+            untouched = not recorded_before.startswith(DIGEST_VERSION) or digest(entries[index]) == recorded_before
             if untouched:
+                entry = _keeping_text(entry, entries[index])
                 entries[index] = entry
                 recorded = digest(entry)
             else:
@@ -231,7 +274,11 @@ def plan_resources(
             entries.append(entry)
             index = len(entries) - 1
             recorded = digest(entry)
-        plan.resources[annotation.name] = ResourceInfo(kind=kind, index=index, owner=item.owner, digest=recorded)
+        _, label, note = _split(dict(annotation.fields))
+        value_names = tuple(v.name for v in entry.values) if kind == "option" and not entry.is_range else ()
+        plan.resources[annotation.name] = ResourceInfo(
+            kind=kind, index=index, owner=item.owner, digest=recorded, label=label, note=note or None, values=value_names
+        )
 
     updates = {attr: lists[kind] for kind, (attr, _, _) in _KINDS.items() if lists[kind] != list(getattr(current, attr))}
     if updates:

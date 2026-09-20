@@ -423,10 +423,7 @@ def _link_map(
             }
             for name, slot in allocation.slots.items()
         },
-        "resources": {
-            name: {"kind": info.kind, "index": info.index, "owner": info.owner, "digest": info.digest}
-            for name, info in plan.resources.items()
-        },
+        "resources": {name: _resource_entry(info) for name, info in plan.resources.items()},
         "labels": dict(plan.labels),
         "budget": budget,
         "order": list(project.order),
@@ -436,6 +433,16 @@ def _link_map(
         "fusion": fusion,
         "source_lines": text.source_lines(),
     }
+
+
+def _resource_entry(info) -> dict:
+    entry = {"kind": info.kind, "index": info.index, "owner": info.owner, "digest": info.digest}
+    text = {key: value for key, value in (("name", info.label), ("desc", info.note)) if value}
+    if info.values:
+        text["values"] = list(info.values)
+    if text:
+        entry["text"] = text  # what the compile writes into the strings table for this entry
+    return entry
 
 
 def _write(folder: Path, result: LinkResult, plan: ResourcePlan) -> None:

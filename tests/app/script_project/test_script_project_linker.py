@@ -238,7 +238,7 @@ def test_a_resource_the_user_edited_in_settings_is_not_overwritten(tmp_path: Pat
     _linked(tmp_path)
     settings_path = tmp_path / "settings" / "script_settings.json"
     data = json.loads(settings_path.read_text(encoding="utf-8"))
-    data["scripted_player_traits"][0]["name"] = "Renamed by hand"
+    data["scripted_player_traits"][0]["traits"]["movement"]["speed"] = "value_200"  # what someone did in RVT
     settings_path.write_text(json.dumps(data), encoding="utf-8")
     (tmp_path / "script" / "modules" / "hill_buff" / "hill_buff.mgl").write_text(
         '-- @trait t_hill_buff { movement_speed = "value_150" }\n-- @fragment HILL_PASS.buff\n-- @loop player\ny = 1\n', encoding="utf-8"
@@ -247,7 +247,7 @@ def test_a_resource_the_user_edited_in_settings_is_not_overwritten(tmp_path: Pat
     result = link(tmp_path)
 
     assert result.ok and not result.settings_changed
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["scripted_player_traits"][0]["name"] == "Renamed by hand"
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["scripted_player_traits"][0]["traits"]["movement"]["speed"] == "value_200"
 
 
 def test_a_resource_table_that_is_full_fails_the_link(tmp_path: Path) -> None:
@@ -390,3 +390,24 @@ def test_counters_with_no_link_map_are_ignored(tmp_path: Path) -> None:
 
     assert record_counters(tmp_path, {"triggers": 1}) == []
     assert not (tmp_path / "build").exists()
+
+
+def test_the_text_a_declaration_asks_for_is_in_the_link_map_for_the_compile(tmp_path: Path) -> None:
+    module = (
+        '-- @trait t_named { name = "Slow Down", desc = "Half", movement_speed = "value_050" }\n'
+        '-- @trait t_plain { movement_speed = "value_100" }\n'
+        '-- @option o_dev { type = "toggle" }\n'
+        "-- @fragment HILL_PASS.buff\n-- @loop player\ny = 1\n"
+    )
+
+    resources = _linked(tmp_path, modules__hill_buff__hill_buff_dot_mgl=module).link_map["resources"]
+
+    assert resources["t_named"]["text"] == {"name": "Slow Down", "desc": "Half"}
+    assert "text" not in resources["t_plain"]  # nothing asked for: the compile names it after its alias
+    assert resources["o_dev"]["text"] == {"values": ["Off", "On"]}
+
+
+def test_an_option_links_now_that_the_engine_can_build_one(tmp_path: Path) -> None:
+    result = _linked(tmp_path, blocks__setup_dot_mgl='-- @option o_dev { type = "toggle", default = 1 }\non init: do\nend\n')
+
+    assert result.ok and "alias o_dev = script_option[0]" in result.compiled

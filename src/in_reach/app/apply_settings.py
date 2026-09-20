@@ -275,6 +275,10 @@ def _strip_never_applied_script_settings_text(data: dict) -> None:
                 continue
             option.pop("name", None)
             option.pop("desc", None)
+            if option.get("is_range"):
+                # A range option's enum values mean nothing: a freshly created one has a single placeholder, a saved and
+                # reloaded one has none, and neither is anything to apply (see settings_writer._apply_scripted_option).
+                option.pop("values", None)
             values = option.get("values")
             if isinstance(values, list):
                 for value in values:

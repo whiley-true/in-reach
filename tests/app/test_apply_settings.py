@@ -561,3 +561,27 @@ def test_editing_required_object_types_leaves_nothing_pending(_project: tuple[Pa
 
     assert result.success is True
     assert apply_settings.settings_have_unapplied_changes(folder) is False
+
+
+def test_a_range_options_enum_values_never_count_as_an_unapplied_difference() -> None:
+    """A range option's enum values mean nothing: a fresh build has a placeholder, a reloaded ``.bin`` has none, and
+    Apply used to stay enabled forever comparing the two."""
+    from in_reach.app.apply_settings import _strip_never_applied_script_settings_text
+
+    with_placeholder = {"scripted_options": [{"is_range": True, "values": [{"value": 0}], "range_max": {"value": 30}}]}
+    without = {"scripted_options": [{"is_range": True, "values": [], "range_max": {"value": 30}}]}
+
+    for data in (with_placeholder, without):
+        _strip_never_applied_script_settings_text(data)
+
+    assert with_placeholder == without and "values" not in with_placeholder["scripted_options"][0]
+
+
+def test_an_enum_options_values_still_count() -> None:
+    from in_reach.app.apply_settings import _strip_never_applied_script_settings_text
+
+    data = {"scripted_options": [{"is_range": False, "values": [{"value": 0, "name": "Off"}, {"value": 1}]}]}
+
+    _strip_never_applied_script_settings_text(data)
+
+    assert data["scripted_options"][0]["values"] == [{"value": 0}, {"value": 1}]  # text stripped, the values kept

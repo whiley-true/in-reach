@@ -65,7 +65,7 @@ from in_reach.app.blank_variant import resolve_blank_variant
 
 from in_reach.app.script_project import ProjectDiagnostic, is_linked, link, record_counters
 
-from . import decompile, megalo_compiler, settings_io, settings_writer, strings_io, strings_writer, template_source
+from . import decompile, megalo_compiler, resource_text, settings_io, settings_writer, strings_io, strings_writer, template_source
 from .decompile import write_build_snapshot
 from .rvt_bridge import get_rvt
 from .settings_io import load_game_settings
@@ -459,8 +459,19 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             strings_data = strings_io.load_strings(strings_path)
         except (OSError, ValueError) as exc:
             return BuildResult(success=False, failure=f"Failed to read {strings_path}: {exc}")
+        # A trait set or option a script project declares is named by strings of its own (see resource_text), made now so
+        # the reconciliation below adds them to strings.json.
+        owned_text: dict[int, str] = {}
+        if linked is not None:
+            try:
+                owned_text = resource_text.assign_resource_text(
+                    mp, resource_text.texts_from_link_map(link_map["resources"])
+                ).owned
+            except ValueError as exc:
+                return BuildResult(success=False, failure=f"Failed to name the script's resources: {exc}")
         # Same idea as the forge labels above: the script decides which strings exist.
         reconciled_strings = strings_writer.reconcile_script_strings(mp, strings_data)
+        reconciled_strings = strings_writer.own_text(reconciled_strings, owned_text)
         try:
             string_warnings = strings_writer.apply_strings(mp, reconciled_strings.strings)
         except ValueError as exc:

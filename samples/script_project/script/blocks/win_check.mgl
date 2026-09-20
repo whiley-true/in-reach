@@ -1,0 +1,6 @@
+-- Ordinary Megalo, with a constant from project.toml.
+for each player do
+   if current_player.score >= ${SCORE_TO_WIN} then
+      game.end_round()
+   end
+end

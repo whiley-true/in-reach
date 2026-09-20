@@ -50,6 +50,14 @@ rebuild all four sets from the script text -- without calling it; see
 | `WidgetArgument.set_value(mp, index)`, `PlayerTraitsArgument.set_value(mp, index)` | Their `.value` is a refcount pointer into the variant's own table with no setter. Same pattern as the existing `ForgeLabelArgument.set_value()`. Raises `IndexError` past the table's end. |
 | `MultiplayerData.add_scripted_option()` / `add_scripted_player_traits()` / `add_scripted_stat()` / `add_scripted_hud_widget()` | Nothing else can create an entry: native `compile_script()` fails with "Index N is out of bounds" for a table entry (unlike forge labels, which it creates on first mention). These do what RVT's own script-editor "add" buttons do (`emplace_back()`, `is_defined = true`, name defaulted to an empty script string; options go through the engine's own `create_script_option()`). Each raises `RuntimeError` at its engine cap (16 options, 16 trait sets, 4 stats, 4 widgets). |
 
+### Names and shape of scripted options and trait sets
+
+| Change | Why |
+|---|---|
+| `ScriptedPlayerTraits.name`/`.desc`, `ScriptedOption.name`/`.desc`, `ScriptedOptionValue.name`/`.desc`: read-only -> read/write | A new entry points at the script-strings table's one shared empty string; setting text on that string would rename every entry. The setter takes a `ReachString` (e.g. one from `script_strings.add_new()`) so an entry can have its own, which is what `resource_text.py` does. |
+| `ScriptedOption.add_value()` | The engine's own `ReachMegaloOption::add_value()`; a toggle needs a second value and `add_scripted_option()` makes one. `RuntimeError` for a range option or at the value limit. |
+| `ScriptedOption.make_range()` | The engine's own `make_range()` (what RVT's range switch does): creates `range_min`/`range_max`/`range_default`. Set `is_range` too. |
+
 `Variable.which` was already writable, so `current_player.script_stat[N]` needed no change to
 `set_scope_by_format()`; the compiler copies `which` from a `current_player.number[N]` example.
 

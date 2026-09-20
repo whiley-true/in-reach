@@ -206,6 +206,17 @@ Right now a script is edited as plain text and errors come back in Apply's failu
 
 ### 5. Known compiler gaps (all fall back to native, none is wrong)
 
+- ~~**`@option` couldn't be built; trait sets and options had empty names.**~~ Fixed with three new native bindings (a
+  rebuild of the `.pyd` -- see `native/README.md`): `name`/`desc` became settable on trait sets, options and option values,
+  `ScriptedOption.add_value()` and `.make_range()`. A new entry points at the strings table's one shared empty string, so a
+  declared trait showed a blank name in game; `resource_text.py` now gives each declared entry strings of its own (the
+  alias by default, `name = "..."`/`desc = "..."` when given, "Off"/"On" for a toggle) and `strings_writer.own_text` keeps
+  `settings/strings.json` in step. The code *owns* that text -- overwritten every build -- because the strings are found by
+  position and a position moves when something is declared before it; rename by editing the declaration. Options now
+  build (toggle and range) and follow their declaration through a resync; a range option's enum values, which a reload
+  drops, no longer count as a difference anywhere.
+  **Still to do:** `@stat` and `@widget` have no text to name (a widget has none; stats aren't declarable yet).
+
 - A stat on an owner other than `current_player` (`global.player[3].script_stat[1]`, a team's stat) needs an
   example in the base script. A native binding to select the team-stat scope, or to derive `which` for other
   owners, would close it.

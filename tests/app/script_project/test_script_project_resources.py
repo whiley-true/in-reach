@@ -4,6 +4,7 @@ moved, and the user's edits win."""
 import pytest
 
 from in_reach.app.rvt.megalo_ast import parse_annotations
+from in_reach.app.rvt.models.enums import MovementSpeed
 from in_reach.app.rvt.models.script_settings import (
     ScriptedHUDWidget, ScriptedOption, ScriptedOptionValue, ScriptedPlayerTraits, ScriptSettings,
 )
@@ -19,6 +20,13 @@ def _declared(text: str, owner: str = "module m") -> list[Declared]:
 
 def _plan(text: str, current: ScriptSettings | None = None, previous: dict | None = None):
     return plan_resources(_declared(text), current or ScriptSettings(), previous or {})
+
+
+def _with_speed(plan, speed: str) -> ScriptSettings:
+    """``plan``'s settings with its first trait set's movement speed changed (a real edit, unlike its display text)."""
+    trait = plan.settings.scripted_player_traits[0]
+    traits = trait.traits.model_copy(update={"movement": trait.traits.movement.model_copy(update={"speed": MovementSpeed(speed)})})
+    return plan.settings.model_copy(update={"scripted_player_traits": [trait.model_copy(update={"traits": traits})]})
 
 
 def _previous(plan) -> dict:
@@ -145,29 +153,72 @@ def test_an_untouched_entry_is_refreshed_when_its_declaration_changes() -> None:
 
 
 def test_an_entry_the_user_edited_is_left_alone_and_their_edit_wins() -> None:
-    first = _plan('-- @trait a { name = "From code", speed = "value_100" }\n')
-    edited = first.settings.model_copy(update={
-        "scripted_player_traits": [first.settings.scripted_player_traits[0].model_copy(update={"name": "Renamed in RVT"})]
-    })
+    first = _plan('-- @trait a { speed = "value_100" }\n')
+    edited = _with_speed(first, "value_200")  # what someone did to it in RVT
 
-    second = _plan('-- @trait a { name = "From code", speed = "value_150" }\n', edited, _previous(first))
+    second = _plan('-- @trait a { speed = "value_150" }\n', edited, _previous(first))
 
     entry = second.settings.scripted_player_traits[0]
-    assert entry.name == "Renamed in RVT" and entry.traits.movement.speed == "value_100"  # the module's change didn't land
+    assert entry.traits.movement.speed == "value_200"  # the module's change didn't land
     assert not second.changed
     assert second.resources["a"].digest == first.resources["a"].digest  # still what the linker wrote, so it stays an edit
 
 
 def test_an_edit_that_stays_edited_is_still_left_alone_on_the_next_relink() -> None:
     first = _plan('-- @trait a { speed = "value_100" }\n')
-    edited = first.settings.model_copy(update={
-        "scripted_player_traits": [first.settings.scripted_player_traits[0].model_copy(update={"name": "mine"})]
-    })
+    edited = _with_speed(first, "value_200")
     second = _plan('-- @trait a { speed = "value_150" }\n', edited, _previous(first))
 
     third = _plan('-- @trait a { speed = "value_150" }\n', second.settings, _previous(second))
 
-    assert third.settings.scripted_player_traits[0].name == "mine" and not third.changed
+    assert third.settings.scripted_player_traits[0].traits.movement.speed == "value_200" and not third.changed
+
+
+# -- display text is not an edit (a trait edited in the module stopped landing after a round trip through the .bin) --
+
+
+def test_a_blanked_display_name_does_not_stop_the_module_changing_the_entry() -> None:
+    """The regression: a resync from the ``.bin`` (Launch RVT) blanks a linker-made entry's ``name`` -- the compiler never
+    writes it -- which used to make the entry look hand-edited, so the module's next change was ignored for good."""
+    first = _plan('-- @trait a { speed = "value_120" }\n')
+    round_tripped = first.settings.model_copy(update={
+        "scripted_player_traits": [first.settings.scripted_player_traits[0].model_copy(update={"name": "", "desc": ""})]
+    })
+
+    second = _plan('-- @trait a { speed = "value_200" }\n', round_tripped, _previous(first))
+
+    entry = second.settings.scripted_player_traits[0]
+    assert entry.traits.movement.speed == "value_200" and second.changed
+    assert entry.name == ""  # the text stays as it was: it isn't the module's to reset
+
+
+def test_display_text_changed_by_hand_survives_a_refresh_from_the_module() -> None:
+    first = _plan('-- @trait a { name = "From code", speed = "value_100" }\n')
+    renamed = first.settings.model_copy(update={
+        "scripted_player_traits": [first.settings.scripted_player_traits[0].model_copy(update={"name": "My name"})]
+    })
+
+    second = _plan('-- @trait a { name = "From code", speed = "value_150" }\n', renamed, _previous(first))
+
+    entry = second.settings.scripted_player_traits[0]
+    assert (entry.name, entry.traits.movement.speed) == ("My name", "value_150")
+
+
+def test_the_digest_ignores_names_and_descriptions_at_any_depth() -> None:
+    a = _plan('-- @option o { type = "toggle", name = "One" }\n').settings.scripted_options[0]
+    b = a.model_copy(update={"name": "Two", "desc": "other", "values": [v.model_copy(update={"name": "x"}) for v in a.values]})
+
+    assert digest(a) == digest(b) and digest(a).startswith("2:")
+
+
+def test_a_digest_from_before_the_versioned_form_is_adopted_once() -> None:
+    first = _plan('-- @trait a { speed = "value_100" }\n')
+    legacy = {"a": {"kind": "trait", "index": 0, "digest": "0123456789abcdef"}}  # what the first release wrote
+
+    second = _plan('-- @trait a { speed = "value_150" }\n', first.settings, legacy)
+
+    assert second.settings.scripted_player_traits[0].traits.movement.speed == "value_150"
+    assert second.resources["a"].digest.startswith("2:")
 
 
 def test_a_removed_declaration_never_removes_its_entry() -> None:
@@ -215,3 +266,42 @@ def test_the_digest_depends_on_the_content_only() -> None:
     a = ScriptedHUDWidget(position=2)
 
     assert digest(a) == digest(ScriptedHUDWidget(position=2)) != digest(ScriptedHUDWidget(position=3))
+
+
+# -- range options, and the text a declaration asks for ----------------------------------------------------------
+
+
+def test_a_range_options_placeholder_enum_values_are_not_part_of_its_digest() -> None:
+    """A saved-and-reloaded range option has no enum values while a freshly built one has a placeholder: not an edit."""
+    built = _plan('-- @option o { type = "range", min = 1, max = 30, default = 10 }\n').settings.scripted_options[0]
+
+    assert built.values and digest(built) == digest(built.model_copy(update={"values": []}))
+
+
+def test_an_enum_options_values_are_part_of_its_digest() -> None:
+    built = _plan('-- @option o { type = "toggle" }\n').settings.scripted_options[0]
+
+    assert digest(built) != digest(built.model_copy(update={"values": built.values[:1]}))
+
+
+def test_a_range_option_built_from_a_declaration_keeps_one_placeholder_value() -> None:
+    [option] = _plan('-- @option o { type = "range", min = 1, max = 5, default = 3 }\n').settings.scripted_options
+
+    assert option.is_range and len(option.values) == 1  # what the engine creates, so the two agree
+
+
+def test_the_text_a_declaration_asks_for_is_recorded_for_the_compile() -> None:
+    plan = _plan(
+        '-- @trait t_a { name = "Fast", desc = "Runs faster", speed = "value_120" }\n'
+        '-- @trait t_b { speed = "value_100" }\n'
+        '-- @option o_a { type = "toggle" }\n'
+        '-- @option o_r { type = "range", min = 1, max = 3, default = 2, name = "Minutes" }\n'
+        "-- @widget w { position = 1 }\n"
+    )
+
+    info = plan.resources
+    assert (info["t_a"].label, info["t_a"].note) == ("Fast", "Runs faster")
+    assert (info["t_b"].label, info["t_b"].note, info["t_b"].values) == (None, None, ())
+    assert info["o_a"].values == ("Off", "On") and info["o_a"].label is None
+    assert info["o_r"].label == "Minutes" and info["o_r"].values == ()  # a range option has no enum values to name
+    assert (info["w"].label, info["w"].values) == (None, ())
