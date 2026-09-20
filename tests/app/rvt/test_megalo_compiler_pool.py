@@ -6,6 +6,7 @@ in an ``_any_variable`` slot).
 Every "compiles with the pool" test has a twin proving it *doesn't* without one -- otherwise a pool
 that quietly did nothing (because the base already supplied everything) would pass them all.
 """
+import logging
 import tempfile
 from pathlib import Path
 
@@ -99,13 +100,14 @@ def test_a_chain_past_a_pools_real_size_is_still_unsupported_with_the_pool(rvt, 
         )
 
 
-def test_a_blank_base_with_the_pool_produces_the_in_house_compilers_own_structure(rvt, blank) -> None:
-    """Not the native compiler's: no ``declare`` lines, where native emits one per variable used."""
+def test_a_blank_base_with_the_pool_declares_what_the_script_uses_as_native_does(rvt, blank) -> None:
+    """The in-house compiler declares every variable the script uses -- the same declarations native
+    emits -- so a script written against a blank base comes out identical either way."""
     megalo_compiler.compile_script(rvt, blank, _LOOP, template_pool=_pool(rvt))
-    assert "declare " not in normalize_script_text(blank.decompile_script())
     native = rvt.load(str(resolve_blank_variant(firefight=False)))
     assert native.multiplayer.compile_script(_LOOP).success
     assert "declare player.number[0]" in normalize_script_text(native.decompile_script())
+    assert normalize_script_text(blank.decompile_script()) == normalize_script_text(native.decompile_script())
 
 
 # -- when the pool is (and isn't) built ---------------------------------------------------------
@@ -264,16 +266,18 @@ def _project(tmp_path: Path, *, source_variant: Path) -> tuple[Path, Path]:
     return project_dir, folder
 
 
-def test_run_compile_builds_a_blank_based_project_with_the_in_house_compiler(tmp_path: Path) -> None:
+def test_run_compile_builds_a_blank_based_project_with_the_in_house_compiler(tmp_path: Path, caplog) -> None:
     project_dir, folder = _project(tmp_path, source_variant=resolve_blank_variant(firefight=False))
     (folder / "script" / "output.txt").write_text(_LOOP.replace("\n", "\r\n"), encoding="utf-8")
 
-    result = compile_module.run_compile(project_dir, folder, save=True)
+    # In-process, unlike run_compile()'s isolated child, so the fallback log line can be observed.
+    with caplog.at_level(logging.INFO, logger="in_reach"):
+        result = compile_module._run_compile_in_process(project_dir, folder, save=True)
 
     assert result.success is True, compile_module.format_build_result(result)
+    # Proof this didn't just fall back to native compile_script(), which a blank base used to force.
+    assert not [record for record in caplog.records if "falling back" in record.getMessage()]
     compiled = rvt_bridge.get_rvt().load(str(result.output_path))
     text = compiled.decompile_script()
     assert "current_player.timer[0].set_rate(-150%)" in text
-    # Proof this didn't just fall back to compile_script(), which a blank base used to force: native
-    # would have declared every variable the script uses, and the in-house compiler declares none.
-    assert "declare " not in text
+    assert "declare player.number[0]" in text

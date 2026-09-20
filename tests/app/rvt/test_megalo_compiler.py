@@ -1392,10 +1392,10 @@ def test_compiler_scans_templates_from_a_separate_copy_not_the_target_variant(ju
     assert scan_mp is not variant.multiplayer
 
 
-# -- declare (validated, no-op) --------------------------------------------------------------------
+# -- declare (emits no opcode; see test_variable_declarations.py for what it does write) ------------
 
 
-def test_declare_is_accepted_as_a_no_op(juggernaut) -> None:
+def test_declare_emits_no_opcode(juggernaut) -> None:
     rvt, variant = juggernaut
     mp = variant.multiplayer
     source = "declare global.number[0] with network priority local\r\nglobal.number[0] = 1\r\n"

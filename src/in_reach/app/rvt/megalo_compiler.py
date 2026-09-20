@@ -84,10 +84,12 @@ Supported:
   real case: ``add_weapon`` names both "Add Weapon to Player" and "Add Weapon To Biped" -- resolved
   by preferring whichever candidate's own non-context/non-out argument count matches the actual
   call, see ``_find_function``'s own docstring).
-- ``declare`` statements are parsed and validated (scope/type/index in range) but otherwise treated
-  as a no-op -- Megalo's own real semantics for these are compile-time bookkeeping (network
-  replication priority/initial-value hints), not a runtime opcode; not reproducing the priority/
-  initial-value metadata is a real, deliberate limitation of this pass, not an oversight.
+- ``declare`` statements (``declare global.number[0] with network priority high = 7``) set the
+  variable's network priority and initial value in the variant's own declaration tables, and every
+  variable the script merely uses is declared implicitly (network priority ``low``, initial value
+  zero) -- the script is the whole truth, exactly as with the native compiler, so the variant's own
+  prior declarations are discarded. See :mod:`in_reach.app.rvt.variable_declarations`; anything it
+  can't represent falls back to native.
 - A property read/write as a *direct* assignment RHS/LHS (``X = current_player.biped.health``,
   ``current_player.biped.shields = 200``/``+= 50``/etc). Despite looking exactly like a plain
   variable read/assignment, a property isn't a stored variable at all -- each one is its own
@@ -384,6 +386,11 @@ from .megalo_ast.nodes import BinaryOp, Identifier, SourceSpan, UnaryOp
 from .megalo_ast.parser import MegaloParseError
 from .megalo_ast.unparse import render_expr
 from .megalo_ast.visit import walk
+from .variable_declarations import (
+    UnsupportedDeclaration,
+    collect_declarations,
+    write_declarations,
+)
 
 # Every real (parsed) AST node carries a source span for editor/syntax-highlighting purposes -- this
 # module never reads it back, so a synthetic node this compiler builds itself (see
@@ -1295,6 +1302,7 @@ class _Compiler:
         # on top of the first instead of replacing it, hitting Limits::max_triggers (320) almost
         # immediately even though the script's own construct set was otherwise fully supported.
         self._mp.clear_triggers()
+        declarations = self._collect_declarations(script)
 
         # Two passes: allocate every named function's own subroutine trigger FIRST (so a call to a
         # function declared later in the file, or one function calling another, both resolve
@@ -1319,6 +1327,8 @@ class _Compiler:
         for event_stmt in event_triggers:
             self._compile_event_trigger(event_stmt)
 
+        self._write_declarations(declarations)
+
         # See _MAX_CONDITIONS/_MAX_ACTIONS's own docstring: unlike Limits::max_triggers, nothing in
         # the native save path itself catches this, so it must be checked explicitly, after
         # everything above has finished building (this reflects the true total across every trigger
@@ -1332,6 +1342,21 @@ class _Compiler:
             raise UnsupportedConstruct(
                 f"compiled script needs {counts['actions']} actions, only {_MAX_ACTIONS} allowed"
             )
+
+    @staticmethod
+    def _collect_declarations(script):
+        try:
+            return collect_declarations(script, _POOL_SIZES)
+        except UnsupportedDeclaration as exc:
+            raise UnsupportedConstruct(str(exc)) from exc
+
+    def _write_declarations(self, plan) -> None:
+        if plan.script_option_count:
+            self._ensure_table_entries("script_option", plan.script_option_count)
+        try:
+            write_declarations(self._rvt, self._mp, plan)
+        except UnsupportedDeclaration as exc:
+            raise UnsupportedConstruct(str(exc)) from exc
 
     def _compile_event_trigger(self, stmt) -> None:
         # "on <event>: <statement>" is top-level only -- real Megalo has no nested event bindings.
@@ -1385,7 +1410,7 @@ class _Compiler:
             # statement is in tail position relative to the enclosing trigger.
             self._compile_statements(stmt.body, trigger, tail=tail)
         elif stmt.kind == "declare":
-            self._compile_declare(stmt)
+            pass  # collected up front and written once the script has compiled -- see _write_declarations()
         else:
             raise UnsupportedConstruct(f"statement kind {stmt.kind!r} is not supported yet")
 
@@ -2012,20 +2037,6 @@ class _Compiler:
         arg = self._templates.trigger_ref.clone()
         arg.value = child_index
         return arg
-
-    # -- declare (validated, no-op) ------------------------------------------------------------
-
-    def _compile_declare(self, stmt) -> None:
-        if stmt.scope not in _POOL_SIZES:
-            raise UnsupportedConstruct(f"declare scope {stmt.scope!r} is not supported yet")
-        pool_size = _POOL_SIZES[stmt.scope].get(stmt.type)
-        if pool_size is None or not (0 <= stmt.index < pool_size):
-            raise UnsupportedConstruct(
-                f"declare {stmt.scope}.{stmt.type}[{stmt.index}] is out of range (pool size {pool_size})"
-            )
-        # Real Megalo semantics for `declare` are compile-time-only bookkeeping (network replication
-        # priority/initial-value hints) -- see module docstring's own "declare" bullet for why this
-        # is deliberately a no-op beyond validation, not a partial implementation.
 
     # -- assignment -----------------------------------------------------------------------------
 

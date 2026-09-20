@@ -8,11 +8,29 @@ source, so the binary can be reproduced and reviewed.
 
 ## What was added to the bindings
 
-Committed in `mega-ide` as `5d0fe97` ("feat(native): bindings for building scripts from scratch, and
-script-defined tables"), which also commits the earlier construction bindings the compiler relies on
-(`clear_triggers`, `mark_trigger_*`, `set_scope_by_format`, `AnyVariable.wrap`, ...) that had only ever
-existed in that repo's working tree. This repo's `.pyd` was built from that commit (SHA-256 begins
-`f4355fdd5f762dc2`; the build before it began `be515cc6dd04aa83`). The script-defined-table group:
+Two groups. The first is committed in `mega-ide` as `5d0fe97` ("feat(native): bindings for building
+scripts from scratch, and script-defined tables"), which also commits the earlier construction bindings
+the compiler relies on (`clear_triggers`, `mark_trigger_*`, `set_scope_by_format`, `AnyVariable.wrap`,
+...) that had only ever existed in that repo's working tree. The second, variable declarations, is **not
+yet committed in `mega-ide`** -- it is an uncommitted change to `python-bindings/bindings.cpp` there
+(about 85 lines, inserted just above the `MultiplayerData` class). This repo's `.pyd` was built from
+`5d0fe97` plus that change (SHA-256 begins `987fff7304a4e898`; the build before it began
+`f4355fdd5f762dc2`, and the one before that `be515cc6dd04aa83`).
+
+### Variable declarations
+
+| Change | Why |
+|---|---|
+| `MultiplayerData.variable_declarations(scope)` | The `VariableDeclarationSet` for `VariableScope.global`/`player`/`object`/`team`; `ValueError` for any other scope. |
+| `VariableDeclarationSet.count(type)` / `get(type, i)` / `grow_to(type, n)` / `clear()` | Read and size the five per-type lists. `grow_to` never shrinks (the engine's `VariableDeclarationList::resize()` leaks the dropped entries when it does) and raises `IndexError` past the scope's own maximum; `clear()` deletes them properly. |
+| `VariableDeclaration.networking` (`VariableNetworkPriority.local`/`low`/`high`), `.has_network_type`, `.has_initial_value`, `.type`, `.initial_is_default()` | A timer has no network priority: setting one raises `RuntimeError`. |
+| `VariableDeclaration.initial_number`, `.initial_team` | A number/timer's initial value is a live `ScalarVariable` -- retarget it with the existing `set_scope_by_format()` (`"%i"` for a constant, `"script_option[%i]"`, or a built-in's own text such as `"game.loadout_cam_time"`). A team's is an int: -1 no team, 0-7 `team[N]`, 8 neutral. |
+
+These are what let the in-house compiler do what native `compile_script()` does with declarations --
+rebuild all four sets from the script text -- without calling it; see
+`src/in_reach/app/rvt/variable_declarations.py`.
+
+### Script-defined tables
 
 | Change | Why |
 |---|---|

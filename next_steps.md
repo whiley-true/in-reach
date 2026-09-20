@@ -39,26 +39,29 @@ tracked 2 MB binary).
 
 ## Priorities
 
-### 1. Make the in-house compiler honour `declare` -- correctness, do this first
+### 1. ~~Make the in-house compiler honour `declare`~~ -- done
 
-**Problem.** `declare global.number[0] with network priority high = 7` compiles to *nothing* in-house.
-Verified: native keeps both the priority and the initial value; the in-house build has no `declare` lines at
-all. The compiler validates `declare` and then ignores it (deliberate at the time -- see its module docstring
--- but its consequences are bigger than that note suggests):
+`declare global.number[0] with network priority high = 7` now compiles to exactly what native produces
+(`variable_declarations.py`; new native bindings, see `native/README.md`). Two findings beyond the original
+description:
 
-- A script written from scratch on a blank base loses every initial value and every network priority.
-- In a project from a real `.bin`, the base variant's *own* declarations survive (they live in the variant,
-  not in the script text), so it looks fine -- but **editing a `declare` line in `output.txt` does nothing**.
-- The corpus "100%" doesn't see this: it checks that compilation succeeds, not that the result matches.
+- **Variables a script merely *uses* weren't declared either.** Native implies a declaration for every
+  variable used (a list grows to `index + 1`, priority `low`, initial zero); in-house declared none, so a
+  script written on a blank base produced a variant with an empty declaration table. Fixed the same way.
+- **Native replaces the declaration table; in-house kept the base's.** That's why editing a `declare` line
+  in a real-`.bin` project did nothing, and why deleting one didn't either. In-house now replaces it too:
+  the script text is the whole truth.
 
-**Why first.** The module linker (item 3) allocates storage and needs to emit priorities (e.g. IR008: a
-widget-driven player number must be `high`). It can't be built on a compiler that drops them.
+Checked against the real corpus (`test_megalo_compiler_corpus.py`, opt-in): 373 of 373 distinct shipped
+scripts recompile to identical `declare` lines and identical forge-label/string/option/stat/trait/widget
+counts, and the 23 of them that compile in-house against a *blank* base (where nothing can be inherited)
+get identical declarations. Coverage is unchanged (419/419; pool-only 373/373). An owner the resolver can't
+classify, a repeated `declare`, or an unsupported initial value falls back to native.
 
-**Work.** Find how native stores a declaration (variable initial value + `network priority` per slot) and
-what the binding exposes; add bindings if it doesn't (a native rebuild -- the toolchain is set up, see
-`native/README.md`). Then implement in `_compile_declare`. Also add a **fidelity check** to the corpus test:
-recompiled `declare` lines and trigger/condition/action counts must equal the original's, so "compiles"
-can't hide a loss again. Size: M.
+**Not what the original item asked for:** trigger/condition/action counts are *not* asserted equal to the
+original's. They can't be -- the compiler inlines, so it builds 15,154 triggers where the shipped variants
+have 29,624, and 42 of 373 scripts need a few more actions. The corpus test checks what has exactly one
+right answer (declarations and the script tables) instead.
 
 ### 2. Close the round trip with RVT
 
@@ -124,7 +127,8 @@ Right now a script is edited as plain text and errors come back in Apply's failu
 - **The `.pyd` has no source in this repo.** It's built from `mega-ide`'s tree and committed as a binary.
   Either vendor the C++ (mind the GPLv3 attribution gap `TO_IMPLEMENT` §10 already flags), reference it as a
   submodule, or build it in CI. Until then every native change means: edit `mega-ide`, rebuild, copy the
-  `.pyd`, commit a 2 MB blob.
+  `.pyd`, commit a 2 MB blob. **The declaration bindings are currently only an uncommitted edit to
+  `mega-ide`'s `bindings.cpp`** -- commit them there, or the shipped `.pyd` can't be reproduced.
 - **Multi-platform / multi-Python**: the binary is CPython 3.14, 64-bit Windows only. Unsolved by any prior
   prototype.
 - **CI can't run the corpus** (MCC files aren't redistributable). The 100% figures are a local measurement;

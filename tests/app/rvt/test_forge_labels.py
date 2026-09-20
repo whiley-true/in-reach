@@ -82,15 +82,15 @@ def test_a_label_a_script_names_is_created_in_house(rvt, blank) -> None:
     assert 'for each object with label "hill" do' in normalize_script_text(blank.decompile_script())
 
 
-def test_the_in_house_compiler_did_it_not_a_fallback_to_native(rvt, blank) -> None:
-    """Native declares every variable a script uses (``declare global.number[0] ...``); the in-house
-    compiler emits no declarations -- so a script that uses one tells the two apart."""
+def test_the_in_house_compiler_declares_a_variable_the_script_uses_as_native_does(rvt, blank) -> None:
+    """Native declares every variable a script uses (``declare global.number[0] ...``), and so does
+    the in-house compiler -- to the same network priority."""
     source = _loop("hill", "global.number[0] = 1")
     _compile(rvt, blank, source)
-    assert "declare " not in normalize_script_text(blank.decompile_script())
     native = rvt.load(str(resolve_blank_variant(firefight=False)))
     assert native.multiplayer.compile_script(source).success
-    assert "declare global.number[0]" in normalize_script_text(native.decompile_script())
+    assert "declare global.number[0] with network priority low" in normalize_script_text(native.decompile_script())
+    assert normalize_script_text(blank.decompile_script()) == normalize_script_text(native.decompile_script())
 
 
 def test_without_that_step_a_missing_label_is_unsupported(rvt, blank, monkeypatch) -> None:
@@ -380,7 +380,7 @@ def test_a_blank_project_whose_script_names_a_label_now_builds(tmp_path: Path) -
     assert result.success is True, compile_module.format_build_result(result)
     compiled = rvt_bridge.get_rvt().load(str(result.output_path))
     assert _label_names(rvt_bridge.get_rvt(), compiled) == ["hill"]
-    assert "declare " not in compiled.decompile_script()  # in-house: native would declare global.number[0]
+    assert "declare global.number[0] with network priority low" in compiled.decompile_script()
 
 
 def test_the_new_label_and_its_name_are_written_back_into_settings(tmp_path: Path) -> None:

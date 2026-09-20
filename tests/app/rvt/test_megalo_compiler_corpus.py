@@ -145,3 +145,102 @@ def test_real_variant_corpus_coverage_stays_above_the_floor() -> None:
     for name, reason in sorted(failures.items()):
         print(f"  unsupported: {name}: {reason[:140]}")
     assert coverage >= _MIN_CORPUS_COVERAGE
+
+
+#: Every table a script can create or grow. Unlike triggers/conditions/actions -- which the compiler
+#: legitimately builds differently (it inlines, so far fewer triggers; measured 29,624 -> 15,154 over
+#: the shipped corpus, with 42 of 373 scripts needing a few more actions) -- these have exactly one
+#: right answer, so a recompile must reproduce them exactly.
+_TABLE_COUNTS = ("forge_labels", "strings", "script_options", "script_stats", "script_traits", "script_widgets")
+
+
+def _declare_lines(variant) -> list[str]:
+    return [line for line in variant.decompile_script().splitlines() if line.startswith("declare ")]
+
+
+@pytest.mark.skipif(not _corpus_bins(), reason="IN_REACH_CORPUS_DIRS not set (or names no .bin files)")
+def test_recompiling_the_real_corpus_reproduces_every_declaration_and_table() -> None:
+    """Fidelity, not just coverage: "it compiles" said nothing when ``declare`` lines were being
+    silently dropped. Recompiling each script must give back the same ``declare`` lines (every
+    network priority and initial value) and the same number of forge labels, strings, options, stats,
+    trait sets and widgets."""
+    rvt = rvt_bridge.get_rvt()
+    lost: dict[str, str] = {}
+    total = 0
+    seen: set[str] = set()
+    for path in _corpus_bins():
+        if path.name in seen:  # the same file shipped in more than one folder
+            continue
+        seen.add(path.name)
+        try:
+            variant = rvt.load(str(path))
+        except RuntimeError:
+            continue
+        if variant.multiplayer is None:
+            continue
+        declares_before = _declare_lines(variant)
+        tables_before = variant.multiplayer.get_full_size_data().counts
+        try:
+            megalo_compiler.compile_script(rvt, variant, normalize_script_text(variant.decompile_script()))
+        except megalo_compiler.UnsupportedConstruct:
+            continue  # falling back to native is test_real_variant_corpus_coverage_stays_above_the_floor's concern
+        total += 1
+        if _declare_lines(variant) != declares_before:
+            lost[path.name] = "declare lines differ"
+            continue
+        tables_after = variant.multiplayer.get_full_size_data().counts
+        changed = [name for name in _TABLE_COUNTS if tables_after[name] != tables_before[name]]
+        if changed:
+            lost[path.name] = f"{changed} differ"
+    assert total, "the corpus folders held no multiplayer game variants"
+    print(f"\nfidelity: {total - len(lost)}/{total} scripts recompile to the same declarations and tables")
+    for name, reason in sorted(lost.items()):
+        print(f"  changed: {name}: {reason}")
+    assert not lost
+
+
+#: Measured 23 when this was written. Most real scripts refer to forge labels by an index a blank base
+#: doesn't have and so fall back to native -- a separate, known limit; this just keeps the comparison
+#: from passing on an empty set.
+_MIN_BLANK_BASE_COMPARISONS = 10
+
+
+@pytest.mark.skipif(not _corpus_bins(), reason="IN_REACH_CORPUS_DIRS not set (or names no .bin files)")
+def test_a_real_script_compiled_onto_a_blank_base_gets_the_declarations_it_had() -> None:
+    """The case the test above can't see: a variant compiled against *itself* keeps its own
+    declarations whatever the compiler does. A blank base has none, so every ``declare`` line (and every
+    variable implied by mere use) has to come from the compiler."""
+    from in_reach.app.blank_variant import resolve_blank_variant
+
+    rvt = rvt_bridge.get_rvt()
+    differing: list[str] = []
+    compared = 0
+    seen: set[str] = set()
+    for path in _corpus_bins():
+        if path.name in seen:
+            continue
+        seen.add(path.name)
+        try:
+            original = rvt.load(str(path))
+        except RuntimeError:
+            continue
+        if original.multiplayer is None:
+            continue
+        blank = rvt.load(str(resolve_blank_variant(firefight=False)))
+        try:
+            megalo_compiler.compile_script(
+                rvt,
+                blank,
+                normalize_script_text(original.decompile_script()),
+                template_pool=lambda: template_source.build_variants(rvt),
+            )
+        except megalo_compiler.UnsupportedConstruct:
+            continue
+        compared += 1
+        if _declare_lines(blank) != _declare_lines(original):
+            differing.append(path.name)
+    print(f"\nblank base: {compared - len(differing)}/{compared} compiled scripts got identical declarations")
+    for name in sorted(differing):
+        print(f"  differs: {name}")
+    assert compared >= _MIN_BLANK_BASE_COMPARISONS
+    assert not differing
