@@ -63,3 +63,36 @@ def test_the_library_does_not_import_the_ide_package() -> None:
     ]
 
     assert offenders == []  # cli.py reaches it through importlib, by name, only when asked to run it
+
+
+# -- system detection belongs to within-reach ---------------------------------------------------------------------------
+
+
+def test_this_package_has_no_copy_of_the_system_detection() -> None:
+    import importlib.util
+
+    assert importlib.util.find_spec("in_reach.app.system_verify") is None
+    assert importlib.util.find_spec("in_reach.app.vdf") is None  # only the detection ever read Steam's config files
+
+
+def test_the_dependency_on_within_reach_is_declared() -> None:
+    import pathlib
+
+    pyproject = (pathlib.Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"within-reach>=0.2.0,<0.3"' in pyproject
+
+
+def test_verify_reports_what_within_reach_says_is_verified(tmp_path, monkeypatch) -> None:
+    import json
+
+    from click.testing import CliRunner
+    from within_reach import system_verify
+
+    from in_reach.cli import main
+
+    monkeypatch.setattr(system_verify, "verified_keys", lambda project_dir: {"STEAM_INSTALL_LOC": True, "TESSERACT_LOC": False})
+
+    result = CliRunner().invoke(main, ["verify", "--root", str(tmp_path), "--format", "json"])
+
+    assert json.loads(result.output)["verified"] == {"STEAM_INSTALL_LOC": True, "TESSERACT_LOC": False}

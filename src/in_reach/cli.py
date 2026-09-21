@@ -450,7 +450,7 @@ def export_cmd(folder: Path, out: Path, fmt: str) -> None:
 @_format_option
 def verify_cmd(root: Path, fmt: str) -> None:
     """Recheck the workspace's .in-reach/.env and report which install locations are verified."""
-    from in_reach.app import system_verify
+    from within_reach import system_verify
 
     project_dir = api.prepare_workspace(root.resolve())
     keys = system_verify.verified_keys(project_dir)

@@ -176,7 +176,7 @@ def list_variants(folder: Path) -> list[tuple[str, Path]]:
 
     Args:
         folder: A game-variants folder -- one of the standard/hopper/personal locations resolved by
-            :mod:`in_reach.app.system_verify`.
+            :mod:`within_reach.system_verify`.
 
     Returns:
         Every ``.bin`` directly inside ``folder``. Empty if it doesn't exist or holds none.
