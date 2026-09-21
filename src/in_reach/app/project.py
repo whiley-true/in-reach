@@ -20,6 +20,8 @@ _TEMPLATE_ENV_NAME = "example.env"
 _ENV_NAME = ".env"
 _GITIGNORE_NAME = ".gitignore"
 _GITIGNORE_CONTENT = "*\n"
+_README_NAME = "README.md"
+_README_CONTENT = "# in-reach\n\nStub README -- more to come.\n"
 
 
 def get_project_dir(root: Path | None = None) -> Path:
@@ -89,3 +91,21 @@ def ensure_gitignore(project_dir: Path) -> None:
     path = project_dir / _GITIGNORE_NAME
     if not path.exists():
         path.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
+
+
+def ensure_readme(project_dir: Path) -> None:
+    """Writes ``<project_dir>/README.md`` (a stub) if it doesn't already exist.
+
+    Called on every ``in-reach run``, same as :func:`ensure_gitignore` -- ``project_dir`` is the
+    ``.in-reach`` project folder itself (PROMPT.md: "please move the generated README.md file to
+    be in generated .in-reach folder"), not the repo root a `.in-reach` folder gets created under.
+    A gametype project's own folder gets its own separate stub README too, see
+    :func:`~in_reach.app.new_project.create_gametype_project`. An existing README here (the user's
+    own, or a real one that later replaces this stub) is left alone.
+
+    Args:
+        project_dir: The project's ``.in-reach`` folder, as returned by :func:`get_project_dir`.
+    """
+    path = project_dir / _README_NAME
+    if not path.exists():
+        path.write_text(_README_CONTENT, encoding="utf-8")

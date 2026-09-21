@@ -86,7 +86,7 @@ class Meta(BaseModel):
         # Accepts the name string dump_game_settings() itself writes ("none", "juggernaut", ...)
         # -- without this, on-disk settings.json can't be read back through this same model at all
         # (the schema-validation save-check in the text editor needs exactly this round-trip; see
-        # in_reach.ide.schema_check). Re-raised as ValueError, not left as KeyError -- a bare
+        # in_reach_ide.schema_check). Re-raised as ValueError, not left as KeyError -- a bare
         # KeyError isn't one of the exception types pydantic itself wraps into a ValidationError,
         # so an unrecognized name would otherwise crash the caller instead of reporting a clean
         # validation failure.

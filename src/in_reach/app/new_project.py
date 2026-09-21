@@ -5,14 +5,20 @@ free text now (any characters, since nothing needs to be a legal Windows name on
 also a folder name), read back from ``settings/settings.json``'s own ``meta.title`` instead (there
 used to be a per-project ``README.md`` carrying a copy of it for display, removed per PROMPT.md:
 "please remove the README.md file completely" -- ``settings.json`` was always the authoritative
-copy anyway, see :func:`read_project_title`). Everything else about the shape is carried over from
+copy anyway, see :func:`read_project_title`). A README.md has since come back as a plain,
+title-free stub (PROMPT.md: "please also add a second stubbed README.md file in the generated
+project folder") -- it carries no project data of its own to keep in sync, so none of the earlier
+reasoning for removing it applies. Everything else about the shape is carried over from
 the v2 prototype's ``inreach init``, restructured per several PROMPT.md passes into:
 
 - ``script/output.txt`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
   as a starting point, then never auto-touched again.
 - ``settings/`` -- a live, always-in-sync mirror of the source ``.bin``'s own settings (edited
   through RVT's own GUI, not by hand here) -- ``settings.json``/``script_settings.json``/
-  ``strings.json``.
+  ``strings.json``. The one thing that writes to them after creation is a successful Apply, and only
+  to keep them matching what the script itself created: a forge label it names, or a string it uses,
+  gets an entry appended (and one it stopped using, if untouched, gets dropped) -- see
+  :func:`~in_reach.app.rvt.settings_writer.reconcile_forge_labels`.
 - ``schemas/`` -- the JSON Schema files those three validate against (PROMPT.md: "move
   settings/schemas into schemas" -- a project-root folder of their own, not nested under
   ``settings/``), regenerated fresh on every decompile/resync.
@@ -37,12 +43,15 @@ alone once written.
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
-import uuid
+import string
 from pathlib import Path
 
-from in_reach.app import env_file, maps_io
+from in_reach.app import env_file, logging_setup, maps_io
 from in_reach.app.categories import EngineCategory, EngineIcon, default_icon_for, mismatch_warning
+
+_logger = logging_setup.get_logger(__name__)
 
 PROJECT_DIR_KEY = "PROJECT_DIR"
 
@@ -52,31 +61,92 @@ PROJECT_DIR_KEY = "PROJECT_DIR"
 #: a project, a flat folder now rather than nested under a no-longer-meaningful "rvt" subdirectory.
 SCRIPT_DIRNAME = "script"
 SETTINGS_DIRNAME = "settings"
+#: Build profiles for the script (see :mod:`in_reach.app.script_preprocess`): ``script/env/<name>.env``,
+#: the active one's name in ``script/env/active_profile.txt``. Named here, not there, so a new project
+#: can be given its starter profiles without this module importing that one (which imports this).
+ENV_DIRNAME = "env"
+ENV_SUFFIX = ".env"
+ACTIVE_PROFILE_FILENAME = "active_profile.txt"
+#: The profile a new project starts on -- development is the normal state, and a release is something
+#: you switch to deliberately.
+DEFAULT_PROFILE = "dev"
+_ENV_HEADER = (
+    '# Build profile "{name}" -- one of the environments script/output.txt can be built for.\n'
+    "# The active profile is named in active_profile.txt; pick one from the command palette\n"
+    '# ("Select Build Profile"). Add another by dropping in a <name>.env file.\n'
+    "#\n"
+    "# FLAGS switches on the `-- @if NAME` ... `-- @end` blocks in the script (`-- @else` and\n"
+    "# `-- @if !NAME` work too). NAME=value lines fill in ${{NAME}} wherever it appears in the script:\n"
+    '# a number, a percentage like -100%, a name, or a "quoted string".\n'
+)
+#: Starter profile text by name. Both are inert for a script that uses neither feature.
+STARTER_PROFILES = {
+    "dev": _ENV_HEADER.format(name="dev") + "\nFLAGS=DEV\n# SCORE_TO_WIN=5\n",
+    "release": _ENV_HEADER.format(name="release") + "\nFLAGS=\n# SCORE_TO_WIN=50\n",
+}
 #: PROMPT.md: "move settings/schemas into schemas" -- a project-root folder of its own, not nested
 #: under SETTINGS_DIRNAME (see :mod:`in_reach.app.rvt.decompile`, which writes into it).
 SCHEMA_DIRNAME = "schemas"
 BUILD_DIRNAME = "build"
 BUILD_DIST_SUBDIR = "dist"
 INIT_GAMETYPE_DIRNAME = "init_gametype"
-#: PROMPT.md: "please also add a Notes.txt (with first line Use this space for free form notes)".
+#: PROMPT.md: "please also add a Notes.txt" -- since then the backing file of the Dashboard's
+#: "Notepad" box (see :mod:`in_reach_ide.notepad`), whose own placeholder text is what a fresh
+#: project shows, so it starts empty (an earlier "Use this space for free form notes." first line
+#: would have hidden that placeholder).
 NOTES_FILENAME = "Notes.txt"
-_NOTES_TEMPLATE = "Use this space for free form notes.\n"
+NOTES_TEMPLATE = ""
+#: PROMPT.md: "please also add a second stubbed README.md file in the generated project folder"
+#: -- distinct from (and, unlike the old one this module's docstring mentions removing, carries no
+#: copy of) the title: a plain stub, same treatment as the .in-reach-level one (see
+#: :func:`~in_reach.app.project.ensure_readme`).
+README_FILENAME = "README.md"
+_README_TEMPLATE = "# Gametype Project\n\nStub README -- more to come.\n"
 
 MAX_TITLE_LENGTH = 32
 MAX_DESCRIPTION_LENGTH = 137
 
-#: How many hex characters of a uuid4 the project folder name uses -- short enough to type/read in
-#: a path, long enough that a collision inside one ``root_dir`` is not worth handling as anything
-#: but "try again" (see :func:`_generate_project_id`).
-PROJECT_ID_LENGTH = 8
+#: How many collision retries :func:`_generate_project_id` allows before giving up -- a collision
+#: at :data:`PROJECT_ID_LENGTH` characters of real randomness is practically impossible; this loop
+#: exists purely so a freak one fails into "try another id" rather than
+#: :func:`create_gametype_project` raising :class:`FileExistsError` for a reason that has nothing
+#: to do with the caller's own title.
 _MAX_ID_ATTEMPTS = 20
+
+#: How many characters :func:`_random_token` draws from :data:`_PROJECT_ID_ALPHABET` -- see
+#: :func:`_generate_project_id`'s own docstring for why plain alphanumeric rather than base64url.
+PROJECT_ID_LENGTH = 8
+
+#: PROMPT.md: "please dont have hyphens in uuids for file names" -- plain alphanumeric only, no
+#: ``-``/``_`` separator characters that a base64url alphabet would otherwise include (see
+#: :func:`_generate_project_id`'s own docstring).
+_PROJECT_ID_ALPHABET = string.ascii_letters + string.digits
 
 _ENV_NAME = ".env"
 _VARIANT_SUFFIX = ".bin"
 
-# build/ is rebuildable on demand from edit/, so it's ignored via its own self-contained
-# .gitignore rather than an entry in the user's repo-level one.
-_BUILD_GITIGNORE = "*\n!.gitignore\n"
+# build/ is rebuildable on demand from settings/, so it's ignored via its own self-contained
+# .gitignore rather than an entry in the user's repo-level one -- except for the handful of
+# generated files PROMPT.md asked to keep trackable (the Compiled.txt view, the four
+# *.autogenerated.json snapshots, and valid_maps.json), so a diff of those stays visible in
+# review even though they're wholly regenerated on every compile/resync. build/dist/*.bin/*.mglo
+# (the actual compiled output) stays ignored.
+#
+# The four non-valid_maps filenames below are spelled out literally rather than imported from
+# their own owning modules (in_reach.app.output_view.VIEW_FILENAME, in_reach.app.rvt.decompile's
+# own GENERATED_*_FILENAME constants) -- both of those modules import this one, so importing them
+# back here would be a circular import. in_reach.app.maps_io doesn't have that problem, so
+# VALID_MAPS_FILENAME is referenced directly instead of also being spelled out.
+_BUILD_GITIGNORE = (
+    "*\n"
+    "!.gitignore\n"
+    "!Compiled.txt\n"
+    "!settings.autogenerated.json\n"
+    "!script_settings.autogenerated.json\n"
+    "!strings.autogenerated.json\n"
+    "!stats.autogenerated.json\n"
+    f"!{maps_io.VALID_MAPS_FILENAME}\n"
+)
 
 
 
@@ -126,7 +196,7 @@ def source_variant_path(project_dir: Path, gametype_folder: Path) -> Path:
     :func:`~in_reach.app.rvt.compile.run_compile`'s own docstring for why a compile always rebuilds
     from this exact fixed base rather than incrementally re-using ``build/``'s own prior output).
 
-    Not what :meth:`in_reach.ide.main_window.MainWindow.launch_rvt` opens RVT against -- that's
+    Not what :meth:`in_reach_ide.main_window.MainWindow.launch_rvt` opens RVT against -- that's
     :func:`compiled_variant_path`, the freshly-*built* gametype (this project's own hand-edited
     settings/script actually baked in), not this untouched original.
 
@@ -147,7 +217,7 @@ def compiled_variant_path(folder: Path) -> Path:
     ``build/dist/<folder.name>.bin``.
 
     PROMPT.md: "when clicking into rvt, it seems to be showing blank gametype and description not
-    the contents from the saved settings" -- :meth:`~in_reach.ide.main_window.MainWindow.launch_rvt`
+    the contents from the saved settings" -- :meth:`~in_reach_ide.main_window.MainWindow.launch_rvt`
     used to hand RVT :func:`source_variant_path` instead (the project's original, never-touched
     starting point, per its own docstring), so RVT always opened onto whatever the source ``.bin``
     happened to look like at creation time, never anything the user had actually saved into
@@ -177,7 +247,7 @@ def is_generated_file(path: Path) -> bool:
     build/resync/decompile overwrites it wholesale (schema files: "regenerated fresh whenever a
     project is (re)decompiled", see :mod:`in_reach.app.rvt.schema_io`). PROMPT.md: "schema files
     should be non-editable (by hand)". The IDE opens one read-only rather than letting an edit
-    silently vanish on the next one (see :meth:`in_reach.ide.tabs.TabPane.open_file`).
+    silently vanish on the next one (see :meth:`in_reach_ide.tabs.TabPane.open_file`).
 
     Args:
         path: Any file path -- doesn't have to point inside a real project, or even exist.
@@ -266,20 +336,52 @@ def _decompile_source_variant(
             description=description,
         )
     except Exception as exc:  # noqa: BLE001 -- native/pydantic code can raise almost anything
+        _logger.exception("couldn't decompile %s into %s", bin_path, folder)
         return f"Couldn't decompile {bin_path.name} into this project:\n{exc}"
     return None
 
 
-def _generate_project_id(root: Path) -> str:
-    """A short id that doesn't already name a folder under ``root``.
+def _random_token() -> str:
+    """:data:`PROJECT_ID_LENGTH` characters drawn from :data:`_PROJECT_ID_ALPHABET`. Its own
+    function purely as a test seam (same reasoning as e.g. ``MainWindow.ask_open_folder``), so
+    :func:`_generate_project_id`'s collision-retry tests can monkeypatch a fixed sequence of
+    candidates without needing them to actually be :data:`PROJECT_ID_LENGTH` characters long."""
+    return "".join(secrets.choice(_PROJECT_ID_ALPHABET) for _ in range(PROJECT_ID_LENGTH))
 
-    A collision is practically impossible at :data:`PROJECT_ID_LENGTH` hex characters -- this loop
-    exists purely so a freak collision fails into "try another id" rather than
-    :func:`create_gametype_project` raising :class:`FileExistsError` for a reason that has nothing
-    to do with the caller's own title.
+
+def _generate_project_id(root: Path) -> str:
+    """A short, random id that doesn't already name a folder under ``root`` -- 8 plain
+    alphanumeric characters (PROMPT.md: "can it be a short uuid").
+
+    A full, un-truncated uuid4 was tried first (per an earlier PROMPT.md pass: "please use a uuid
+    that is just a different uuid scheme the[n] used by dulwich" -- this repo is getting its own
+    embedded VCS (Dulwich), whose own object ids are 40-character SHA-1 hex digests with no
+    separators, so a folder name must never be mistakable for one of those), but that read as too
+    long for everyday use. Shortening it back down to a hex fragment would have reintroduced the
+    exact problem an earlier PROMPT.md pass already flagged once (a short hex id reads too much
+    like a truncated git hash -- the reason a brief random-animal-name scheme existed in between).
+    ``secrets.token_urlsafe`` was tried next -- short, and its base64url alphabet makes an
+    all-hex-digit result astronomically unlikely, so it can't be mistaken for a hash of any
+    length, truncated or not -- but that alphabet (``A-Za-z0-9-_``) can itself render with a
+    leading/embedded ``-``, which a later PROMPT.md pass flagged as an unwanted character in a
+    file/folder name: "please dont have hyphens in uuids for file names". Drawing straight from
+    :data:`_PROJECT_ID_ALPHABET` (plain letters and digits, via :func:`_random_token`) sidesteps
+    that too, at the same length and comparable entropy (62 possibilities per character vs.
+    base64url's 64).
+
+    Args:
+        root: The folder new project folders are created directly under.
+
+    Returns:
+        A :data:`PROJECT_ID_LENGTH`-character alphanumeric token not already used as a folder name
+        under ``root``.
+
+    Raises:
+        FileExistsError: In the practically-impossible case that :data:`_MAX_ID_ATTEMPTS`
+            freshly-generated tokens in a row all collide with an existing folder under ``root``.
     """
     for _ in range(_MAX_ID_ATTEMPTS):
-        candidate = uuid.uuid4().hex[:PROJECT_ID_LENGTH]
+        candidate = _random_token()
         if not (root / candidate).exists():
             return candidate
     raise FileExistsError(f"Could not find a free project id under {root} after {_MAX_ID_ATTEMPTS} attempts.")
@@ -343,13 +445,19 @@ def create_gametype_project(
     folder = root / project_id
 
     (folder / SCRIPT_DIRNAME).mkdir(parents=True)
+    env_dir = folder / SCRIPT_DIRNAME / ENV_DIRNAME
+    env_dir.mkdir()
+    for profile_name, profile_text in STARTER_PROFILES.items():
+        (env_dir / f"{profile_name}{ENV_SUFFIX}").write_text(profile_text, encoding="utf-8")
+    (env_dir / ACTIVE_PROFILE_FILENAME).write_text(DEFAULT_PROFILE + "\n", encoding="utf-8")
     (folder / SETTINGS_DIRNAME).mkdir(parents=True)
 
     build_dir = folder / BUILD_DIRNAME
     (build_dir / BUILD_DIST_SUBDIR).mkdir(parents=True)
     (build_dir / ".gitignore").write_text(_BUILD_GITIGNORE, encoding="utf-8")
 
-    (folder / NOTES_FILENAME).write_text(_NOTES_TEMPLATE, encoding="utf-8")
+    (folder / NOTES_FILENAME).write_text(NOTES_TEMPLATE, encoding="utf-8")
+    (folder / README_FILENAME).write_text(_README_TEMPLATE, encoding="utf-8")
 
     resolved_icon = category_icon if category_icon is not None else (default_icon_for(category) or EngineIcon.capture_the_flag)
     warning = mismatch_warning(category, resolved_icon)
@@ -378,4 +486,15 @@ def create_gametype_project(
         warning = f"{warning}\n\n{decompile_warning}" if warning else decompile_warning
 
     env_file.update_env_value(project_dir / _ENV_NAME, PROJECT_DIR_KEY, str(folder))
+
+    # PROMPT.md: "vcs should be started when a new blank project (either blank or from template)"
+    # -- local import to avoid a cycle (in_reach.app.vcs imports is_generated_file from this
+    # module). Runs last, once every file a new project starts with actually exists, so the very
+    # first snapshot captures the whole thing rather than a partially-written folder.
+    from in_reach.app import vcs
+
+    # PROMPT.md: "when a gametype is innited it should be stamped with commit 'gametype init'".
+    vcs.init(folder, stamp_message="gametype init")
+
+    _logger.info("created gametype project %r at %s", title, folder)
     return folder, warning

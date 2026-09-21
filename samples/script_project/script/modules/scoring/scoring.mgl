@@ -1,0 +1,12 @@
+-- A per-player timer. You never pick its slot: the linker allocates one and declares it.
+-- @ptimer p_second default=1
+
+-- A fragment is a loop body a module adds to a block (here the TICK block, which the
+-- modules create between them). Two fragments with the same loop are fused into one trigger.
+-- @fragment TICK.score
+-- @loop player
+current_player.p_second.set_rate(-100%)
+if current_player.p_second.is_zero() then
+   current_player.score += 1
+   current_player.p_second = 1
+end

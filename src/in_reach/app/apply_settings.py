@@ -21,10 +21,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from in_reach.app import new_project
+from in_reach.app import logging_setup, new_project
 from in_reach.app.rvt import decompile
 from in_reach.app.rvt.compile import BuildResult, run_compile
 from in_reach.app.rvt.strings_io import LANGUAGES as _LANGUAGE_CODES
+from in_reach.app.script_project import is_linked, link
+
+_logger = logging_setup.get_logger(__name__)
 
 _LANGUAGE_CODE_SET = frozenset(_LANGUAGE_CODES)
 
@@ -51,71 +54,116 @@ _FLOAT_COMPARISON_PRECISION = 3
 
 #: ``settings/strings.json``'s own ``StringTableEntry``/``TeamNameEntry`` shape (see
 #: :mod:`in_reach.app.rvt.models.strings`) is ``{"index": int, "text" | "name": LocalizedText}`` --
-#: this pair of key names is what :func:`_normalize_for_comparison` uses to recognize a
-#: ``LocalizedText`` value worth :func:`_normalize_localized_text`-ing, since a bare string or dict
+#: this pair of key names is what :func:`_is_localized_text_field` uses to recognize a
+#: ``LocalizedText`` value worth :func:`_localized_text_changed`-ing, since a bare string or dict
 #: value alone carries no shape information of its own to key off.
 _LOCALIZED_TEXT_KEYS = ("text", "name")
 
 
-def _normalize_localized_text(value: dict | str | None) -> dict[str, str]:
-    """Normalizes one ``LocalizedText`` value -- ``None``, a bare string (shorthand for
-    ``{"english": value}``, see ``models/strings.py``'s own docstring), or a partial dict -- to a
-    full per-language dict with every language present, every omitted or ``None`` one filled in
-    with ``""``. That's what a freshly-*compiled* entry always reads back as once any language on
-    it has real content (a newly-created native string-table entry has no way to leave an
-    individual language slot truly unset -- see :mod:`in_reach.app.rvt.strings_writer`'s own module
-    docstring for the ``None``-vs-``""`` distinction this collapses), where hand-edited input
-    commonly only ever provides English at all (the normal, expected way to type a team/string
-    name) -- without this, editing one hits :func:`settings_have_unapplied_changes`'s "stuck
-    reading as unapplied no matter how many more times Apply is clicked" bug on literally every
-    such field (PROMPT.md: "we're having to double click apply for apply to work")."""
-    if value is None:
-        value = {}
-    elif isinstance(value, str):
-        value = {"english": value}
-    return {language: (value.get(language) or "") for language in _LANGUAGE_CODE_SET}
+def _localized_text_changed(settings_value: dict | str | None, build_value: object) -> bool:
+    """Whether a ``LocalizedText`` field (``settings/``'s own hand-editable value vs ``build/``'s
+    freshly re-extracted counterpart) differs in a way that actually matters.
 
+    PROMPT.md: editing an in-built (professionally localized) gametype's own script string via the
+    documented bare-string shorthand ("Renamed" instead of a full 12-language dict, see
+    ``models/strings.py``'s own docstring) left Apply permanently stuck reading "unapplied" no
+    matter how many more times it was clicked -- "when making changes to json from in-built game
+    variant the apply changes button doesn't work". The previous approach independently normalized
+    *both* sides to a full per-language dict, filling in every language the value didn't mention
+    with ``""`` -- which can never match ``build/``'s own real translation for a language the edit
+    never touched (the compiler only ever overwrites the language(s) actually specified, per
+    ``settings_writer.py``, leaving every other language's existing translation untouched). Only
+    the language(s) ``settings_value`` *actually specifies* are compared at all; every other
+    language is build/'s own business, not settings/'s, and is never even looked at -- so a
+    same-language-only edit can always resolve, exactly once, regardless of what any other
+    language's real content looks like.
 
-def _normalize_for_comparison(value):
-    """Recursively normalizes a parsed JSON value so :func:`settings_have_unapplied_changes`'s
-    comparison tolerates harmless round-trip differences a real compile introduces (PROMPT.md:
-    "we're having to double click apply for apply to work" -- each one otherwise leaves the Apply
-    button stuck permanently "enabled" after an otherwise fully successful Apply, however many more
-    times it's clicked, since neither ever resolves by re-comparing the exact same two values):
-
-    - A float rounded to :data:`_FLOAT_COMPARISON_PRECISION` places -- see that constant's own
-      docstring.
-    - Any ``"text"``/``"name"`` value on a dict that also has an ``"index"`` key (a
-      ``StringTableEntry``/``TeamNameEntry`` -- see :data:`_LOCALIZED_TEXT_KEYS`) run through
-      :func:`_normalize_localized_text`.
-    - ``None`` treated as equal to ``""`` everywhere else.
+    A personal/Forge-made variant's own strings are typically English-only to begin with (every
+    other language already reads "" on both sides), which is why this bug was easy to miss there --
+    "when making changes to copy of a personal game variant it works but has to be clicked many
+    times" is the same root cause, just usually finitely-many-but-more-than-one instead of forever,
+    whenever *some* field on that copy happens to carry real non-English content too.
     """
-    if value is None:
-        return ""
-    if isinstance(value, float):
-        return round(value, _FLOAT_COMPARISON_PRECISION)
-    if isinstance(value, dict):
-        is_string_table_entry = "index" in value
-        normalized = {}
-        for key, entry_value in value.items():
-            if is_string_table_entry and key in _LOCALIZED_TEXT_KEYS:
-                normalized[key] = _normalize_localized_text(entry_value)
-            else:
-                normalized[key] = _normalize_for_comparison(entry_value)
-        return normalized
-    if isinstance(value, list):
-        return [_normalize_for_comparison(v) for v in value]
-    return value
+    if settings_value is None or isinstance(settings_value, str):
+        explicit = {"english": settings_value or ""}
+    elif isinstance(settings_value, dict):
+        explicit = {language: (value or "") for language, value in settings_value.items()}
+    else:
+        explicit = {}
+
+    build_dict = build_value if isinstance(build_value, dict) else {}
+    return any(value != (build_dict.get(language) or "") for language, value in explicit.items())
 
 
-def _normalized_json(path: Path) -> object:
-    """``path``'s parsed content with ``$schema``/``_comment``/``meta.generated_at`` stripped, and
-    the rest passed through :func:`_normalize_for_comparison` -- ``settings/*.json`` always embeds
-    a ``$schema`` key (see :mod:`in_reach.app.rvt.schema_io`) that ``build/*.autogenerated.json``
+def _is_localized_text_field(key: str, container: object) -> bool:
+    """Whether ``key`` (a value found in ``container``, one of the two sides being compared for
+    it) names a ``LocalizedText`` field -- a ``"text"``/``"name"`` value on a dict that also has an
+    ``"index"`` key (a ``StringTableEntry``/``TeamNameEntry``, see :data:`_LOCALIZED_TEXT_KEYS`)."""
+    return key in _LOCALIZED_TEXT_KEYS and isinstance(container, dict) and "index" in container
+
+
+def _values_changed(settings_value, build_value, *, localized_text: bool = False) -> bool:
+    """Recursively compares ``settings/``'s own (hand-editable) value against ``build/``'s freshly
+    re-extracted counterpart, ``True`` if there's a difference :func:`settings_have_unapplied_changes`
+    should actually enable Apply over.
+
+    Walks both trees together, rather than normalizing each independently and then comparing the
+    results for structural equality (the previous approach) -- specifically so a ``LocalizedText``
+    field can be compared asymmetrically via :func:`_localized_text_changed`, which needs to see
+    both sides at once to know which languages ``settings/`` actually expressed an opinion about.
+
+    Tolerates the same harmless round-trip differences a real compile introduces as before
+    (PROMPT.md: "we're having to double click apply for apply to work"):
+
+    - A float compared at :data:`_FLOAT_COMPARISON_PRECISION` decimal places -- see that constant's
+      own docstring.
+    - ``None`` treated as equal to ``""``.
+    - A ``LocalizedText`` field via :func:`_localized_text_changed`.
+    """
+    if localized_text:
+        return _localized_text_changed(settings_value, build_value)
+
+    if isinstance(settings_value, float) or isinstance(build_value, float):
+        try:
+            if round(float(settings_value), _FLOAT_COMPARISON_PRECISION) == round(
+                float(build_value), _FLOAT_COMPARISON_PRECISION
+            ):
+                return False
+        except (TypeError, ValueError):
+            pass  # not actually comparable as numbers -- fall through to the generic cases below
+        else:
+            return True
+
+    if settings_value is None:
+        settings_value = ""
+    if build_value is None:
+        build_value = ""
+
+    if isinstance(settings_value, dict) and isinstance(build_value, dict):
+        for key in settings_value.keys() | build_value.keys():
+            child_is_localized = _is_localized_text_field(key, settings_value) or _is_localized_text_field(
+                key, build_value
+            )
+            if _values_changed(settings_value.get(key), build_value.get(key), localized_text=child_is_localized):
+                return True
+        return False
+
+    if isinstance(settings_value, list) and isinstance(build_value, list):
+        if len(settings_value) != len(build_value):
+            return True
+        return any(_values_changed(a, b) for a, b in zip(settings_value, build_value))
+
+    return settings_value != build_value
+
+
+def _load_stripped_json(path: Path) -> object:
+    """``path``'s parsed content with ``$schema``/``_comment``/``meta.generated_at`` and the
+    various never-applied mirror fields below stripped -- ``settings/*.json`` always embeds a
+    ``$schema`` key (see :mod:`in_reach.app.rvt.schema_io`) that ``build/*.autogenerated.json``
     deliberately never does (build/ is disposable output no editor tooling needs to validate
     against), so a *raw text* comparison between the two would always differ even right after a
-    successful compile -- comparing parsed-and-stripped content instead is what actually answers
-    "is there a real settings difference here."
+    successful compile -- comparing parsed-and-stripped content instead (via :func:`_values_changed`)
+    is what actually answers "is there a real settings difference here."
 
     ``meta.generated_at`` needs the same treatment for a subtler reason: it's stamped fresh with
     ``datetime.now()`` on *every* extraction (see :func:`~in_reach.app.rvt.extraction._extract_meta`),
@@ -149,6 +197,14 @@ def _normalized_json(path: Path) -> object:
     ``meta.description[0]`` does), leaving settings.json's copy permanently stale relative to
     build's snapshot the moment it's edited that way, the same as the fields above.
 
+    ``multiplayer.game_settings.metadata.category`` is stripped for the same reason again -- per
+    ``settings_writer.py``'s own module docstring, it's "deliberately NOT applied here (confirmed
+    by direct testing against a real .bin that writing it has no observable effect anywhere)", the
+    one field from that docstring's list this function didn't yet strip (PROMPT.md: "also sometimes
+    compile buttons seems to need pushing twice" -- a project whose category was ever hand-edited in
+    ``settings.json`` left Apply reading "unapplied" forever after, the exact same class of bug as
+    every field above).
+
     Returns ``None`` if ``path`` doesn't exist or isn't valid JSON, distinct from any real
     (dict/list) value.
     """
@@ -164,7 +220,7 @@ def _normalized_json(path: Path) -> object:
             meta.pop("generated_at", None)
         _strip_never_applied_multiplayer_mirrors(data)
         _strip_never_applied_script_settings_text(data)
-    return _normalize_for_comparison(data)
+    return data
 
 
 def _strip_never_applied_multiplayer_mirrors(data: dict) -> None:
@@ -184,6 +240,7 @@ def _strip_never_applied_multiplayer_mirrors(data: dict) -> None:
         return
     if isinstance(metadata, dict):
         metadata.pop("description_string", None)
+        metadata.pop("category", None)
 
 
 def _strip_never_applied_script_settings_text(data: dict) -> None:
@@ -218,6 +275,10 @@ def _strip_never_applied_script_settings_text(data: dict) -> None:
                 continue
             option.pop("name", None)
             option.pop("desc", None)
+            if option.get("is_range"):
+                # A range option's enum values mean nothing: a freshly created one has a single placeholder, a saved and
+                # reloaded one has none, and neither is anything to apply (see settings_writer._apply_scripted_option).
+                option.pop("values", None)
             values = option.get("values")
             if isinstance(values, list):
                 for value in values:
@@ -267,9 +328,32 @@ def settings_have_unapplied_changes(folder: Path) -> bool:
         if not settings_path.is_file():
             continue
         generated_path = build_dir / generated_name
-        if _normalized_json(settings_path) != _normalized_json(generated_path):
+        if _values_changed(_load_stripped_json(settings_path), _load_stripped_json(generated_path)):
             return True
     return False
+
+
+def script_has_unapplied_changes(folder: Path) -> bool:
+    """Whether a *linked* project (``script/project.toml``) has script changes Apply hasn't built yet: nothing built at
+    all, the link no longer matches the ``build/Compiled.txt`` the last build started from, the link would add settings,
+    a link that fails (Apply reports why), or a link the last build never finished (``Compiled.txt`` newer than the
+    ``.bin``). ``False`` for any other project -- a single-file script's edits are picked up by the next Apply or launch
+    regardless, and were never what enabled the button."""
+    if not is_linked(folder):
+        return False
+    built = new_project.compiled_variant_path(folder)
+    compiled_path = folder / new_project.BUILD_DIRNAME / "Compiled.txt"
+    if not built.is_file() or not compiled_path.is_file():
+        return True
+    linked = link(folder, write=False)
+    if not linked.ok or linked.settings_changed:
+        return True
+    try:
+        if compiled_path.read_text(encoding="utf-8") != linked.compiled:
+            return True
+        return compiled_path.stat().st_mtime_ns > built.stat().st_mtime_ns
+    except OSError:
+        return True
 
 
 def apply_settings_changes(project_dir: Path, folder: Path) -> BuildResult:
@@ -290,4 +374,9 @@ def apply_settings_changes(project_dir: Path, folder: Path) -> BuildResult:
         (PROMPT.md: "raise errors in text window") and blocks ``build/`` from changing when it
         does, simply by virtue of ``run_compile`` never having written anything on a failure.
     """
-    return run_compile(project_dir, folder, save=True)
+    result = run_compile(project_dir, folder, save=True)
+    if result.success:
+        _logger.info("applied settings for %s", folder)
+    else:
+        _logger.warning("apply failed for %s: %s", folder, result.failure)
+    return result

@@ -477,7 +477,7 @@ REQUIREMENT_FLAGS = {
 }
 
 
-def _extract_forge_label(rvt, fl, teams: list[Team]) -> ForgeLabel:
+def extract_forge_label(rvt, fl, teams: list[Team]) -> ForgeLabel:
     flags = _unpack_flags(fl.requirements, REQUIREMENT_FLAGS)
     required_object_type = _optional_index(fl.required_object_type)
     required_team = _enum(rvt.ConstTeam, E.ConstTeam, fl.required_team)
@@ -497,7 +497,7 @@ def _extract_scripted_option_value(v) -> ScriptedOptionValue:
     return ScriptedOptionValue(name=_text_or_empty(v.name), desc=_text_or_empty(v.desc), value=v.value)
 
 
-def _extract_scripted_option(o) -> ScriptedOption:
+def extract_scripted_option(o) -> ScriptedOption:
     values = [_extract_scripted_option_value(o.value(i)) for i in range(o.value_count)]
     return ScriptedOption(
         name=_text_or_empty(o.name),
@@ -513,14 +513,14 @@ def _extract_scripted_option(o) -> ScriptedOption:
     )
 
 
-def _extract_scripted_player_trait(rvt, t) -> ScriptedPlayerTraits:
+def extract_scripted_player_trait(rvt, t) -> ScriptedPlayerTraits:
     # t is a ScriptedPlayerTraits (bindings.cpp registers it with ReachPlayerTraits as its pybind11
     # base), so it exposes .defense/.offense/.movement/.appearance/.sensors directly -- reuse
     # _extract_player_traits() by passing it straight through.
     return ScriptedPlayerTraits(name=_text_or_empty(t.name), desc=_text_or_empty(t.desc), traits=_extract_player_traits(rvt, t))
 
 
-def _extract_scripted_stat(t) -> ScriptedStat:
+def extract_scripted_stat(t) -> ScriptedStat:
     # format/sort_order are plain (non-bitnumber) enum members in the engine, so they come
     # through as real pybind11 enum objects already -- no _enum() int-reconstruction step needed --
     # but still go through _enum_by_name() for its reserved/unmapped-value fallback (same
@@ -534,7 +534,7 @@ def _extract_scripted_stat(t) -> ScriptedStat:
     )
 
 
-def _extract_scripted_hud_widget(w) -> ScriptedHUDWidget:
+def extract_scripted_hud_widget(w) -> ScriptedHUDWidget:
     return ScriptedHUDWidget(position=w.position)
 
 
@@ -543,7 +543,7 @@ def _extract_script_settings(rvt, mp, teams: list[Team]) -> ScriptSettings:
     prp = mp.player_rating_params
     object_type_indices = list(mp.used_object_type_indices)
     return ScriptSettings(
-        forge_labels=[_extract_forge_label(rvt, mp.forge_label(i), teams) for i in range(mp.forge_label_count)],
+        forge_labels=[extract_forge_label(rvt, mp.forge_label(i), teams) for i in range(mp.forge_label_count)],
         map_permissions=MapPermissions(
             map_ids=list(mperm.map_ids),
             type=_enum(rvt.MapPermissionType, E.MapPermissionType, mperm.type),
@@ -556,12 +556,12 @@ def _extract_script_settings(rvt, mp, teams: list[Team]) -> ScriptSettings:
             object_type_indices=object_type_indices,
             object_type_names=[rvt.object_type_name(i) for i in object_type_indices],
         ),
-        scripted_options=[_extract_scripted_option(mp.scripted_option(i)) for i in range(mp.scripted_option_count)],
+        scripted_options=[extract_scripted_option(mp.scripted_option(i)) for i in range(mp.scripted_option_count)],
         scripted_player_traits=[
-            _extract_scripted_player_trait(rvt, mp.scripted_player_trait(i)) for i in range(mp.scripted_player_trait_count)
+            extract_scripted_player_trait(rvt, mp.scripted_player_trait(i)) for i in range(mp.scripted_player_trait_count)
         ],
-        scripted_stats=[_extract_scripted_stat(mp.scripted_stat(i)) for i in range(mp.scripted_stat_count)],
-        scripted_hud_widgets=[_extract_scripted_hud_widget(mp.scripted_hud_widget(i)) for i in range(mp.scripted_hud_widget_count)],
+        scripted_stats=[extract_scripted_stat(mp.scripted_stat(i)) for i in range(mp.scripted_stat_count)],
+        scripted_hud_widgets=[extract_scripted_hud_widget(mp.scripted_hud_widget(i)) for i in range(mp.scripted_hud_widget_count)],
     )
 
 

@@ -90,10 +90,10 @@ def get_rvt():
 def is_available() -> bool:
     """Whether the bundled native extension can actually be loaded on this machine.
 
-    It's a prebuilt, ABI-locked Windows ``.pyd`` (see this module's own docstring) -- there's no
-    Linux/macOS build, so this is ``False`` there (notably on CI's Linux runners, see
-    ``.github/workflows/tests.yml``) even though every fixture ``.bin`` a test might load is
-    checked into git and always present regardless of platform. Tests that exercise the real
+    It's an ABI-locked Windows ``.pyd`` (see this module's own docstring), built by ``native/build.py`` (or shipped
+    in the wheel) -- there's no Linux/macOS build, and a source checkout has none until it is built, so this is
+    ``False`` there (notably on CI's Linux runners, see ``.github/workflows/tests.yml``) even though every fixture
+    ``.bin`` a test might load is checked into git and always present regardless of platform. Tests that exercise the real
     native extension should skip on this rather than (or in addition to) a fixture file's own
     existence -- checking only the fixture leaves them failing outright, not skipping, on any
     platform without a matching build.

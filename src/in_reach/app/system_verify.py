@@ -8,7 +8,7 @@ First, nothing here talks to the user. The v2 checklist printed straight to stdo
 ``input()``/``msvcrt.getch()`` in the middle of a check; this one only ever *reports* what a step
 resolved to -- :class:`Outcome` says whether it found one answer, needs the user to pick between
 several, or found nothing at all -- and leaves every prompt to whatever is driving it (see
-:mod:`in_reach.ide.verify_dialog`). That's also what makes the whole checklist testable without a
+:mod:`in_reach_ide.verify_dialog`). That's also what makes the whole checklist testable without a
 Steam install, a running MCC, or a terminal.
 
 Second, each location's default path is derived here in code, from the step before it, rather than
@@ -30,7 +30,7 @@ from in_reach.app import env_file, vdf
 
 _ENV_NAME = ".env"
 
-# The twelve checklist entries, each keyed by the ``.env`` key it fills in.
+# The thirteen checklist entries, each keyed by the ``.env`` key it fills in.
 TESSERACT_KEY = "TESSERACT_LOC"
 STEAM_KEY = "STEAM_INSTALL_LOC"
 HALO_MCC_KEY = "HALO_MCC_INSTALL_LOC"
@@ -43,6 +43,12 @@ HOPPER_MAP_VARIANTS_KEY = "HOPPER_MAP_VARIANTS_LOC"
 STEAM_ACCOUNT_KEY = "USER_STEAM_LOC_INT"
 PERSONAL_VARIANTS_KEY = "PERSONAL_VARIANTS_LOC"
 PERSONAL_MAPS_KEY = "PERSONAL_MAPS_LOC"
+#: PROMPT.md: "a button for In-Reach maps (which should be added to settings and quick launch
+#: built-in buttons) ... it should point to .in-reach maps" -- in-reach's own maps folder, a
+#: ``maps/`` folder inside the project-root ``.in-reach`` (see :func:`inreach_maps_dir`), unlike
+#: every other location here a folder in-reach itself owns rather than one Halo/Steam does.
+INREACH_MAPS_KEY = "INREACH_MAPS_LOC"
+INREACH_MAPS_DIRNAME = "maps"
 
 # Supporting keys the checklist fills in alongside the twelve above, but which aren't themselves
 # checklist entries -- they're details of an entry that already has its own checkbox.
@@ -144,9 +150,10 @@ STEPS: tuple[VerifyStep, ...] = (
     VerifyStep(STEAM_ACCOUNT_KEY, "Steam Account Uuid (and user)", MANUAL_STEAM_ACCOUNT, STEAM_ACCOUNT_HINT),
     VerifyStep(PERSONAL_VARIANTS_KEY, "Personal Game Variants Folder", MANUAL_DIR, PERSONAL_VARIANTS_HINT),
     VerifyStep(PERSONAL_MAPS_KEY, "Personal Map Variants Folder", MANUAL_DIR),
+    VerifyStep(INREACH_MAPS_KEY, "In-Reach Maps Folder", MANUAL_DIR),
 )
 
-#: Everything "Clear Entries" blanks: the twelve checklist keys plus the supporting values a run
+#: Everything "Clear Entries" blanks: the thirteen checklist keys plus the supporting values a run
 #: fills in as a side effect of them, so clearing really does put the checklist back to untouched
 #: rather than leaving a stale Steam persona/Reach folder name behind.
 CLEARED_KEYS: tuple[str, ...] = tuple(step.env_key for step in STEPS) + (
@@ -187,6 +194,19 @@ def clear_entries(project_dir: Path) -> None:
     env_path = env_path_for(project_dir)
     for key in CLEARED_KEYS:
         env_file.update_env_value(env_path, key, "")
+
+
+def inreach_maps_dir(project_dir: Path) -> Path:
+    """The in-reach maps folder for ``project_dir`` (the project-root ``.in-reach`` folder) -- the
+    verified :data:`INREACH_MAPS_KEY` value if the checklist has set one, else its default,
+    ``<project_dir>/maps``. Created if missing, so callers can hand it straight to a file explorer:
+    unlike Halo's own folders this one is in-reach's to create, and there's nothing to be gained
+    by making a fresh install run the checklist before a plain empty folder can be opened.
+    """
+    stored = env_file.get_env_values(env_path_for(project_dir)).get(INREACH_MAPS_KEY, "")
+    path = Path(stored) if stored else Path(project_dir) / INREACH_MAPS_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def steam_userdata_dir(steam_install: Path) -> Path:
@@ -308,6 +328,8 @@ class VerifyRun:
             return self._resolved(REACH_KEY) / "map_variants"
         if key == HOPPER_MAP_VARIANTS_KEY:
             return self._resolved(REACH_KEY) / "hopper_map_variants"
+        if key == INREACH_MAPS_KEY:
+            return self.project_dir / INREACH_MAPS_DIRNAME
         return Path("")
 
     def local_files_dir(self) -> Path:
@@ -335,6 +357,8 @@ class VerifyRun:
             return self._check_personal_variants(step)
         if step.env_key == PERSONAL_MAPS_KEY:
             return self._check_personal_maps(step)
+        if step.env_key == INREACH_MAPS_KEY:
+            return self._check_inreach_maps(step)
         return self._check_location(step)
 
     def _check_tesseract(self, step: VerifyStep) -> StepResult:
@@ -451,6 +475,17 @@ class VerifyRun:
             return StepResult(step, Outcome.FOUND, str(path), detail)
         return StepResult(step, Outcome.MISSING, detail=f"Not found at {path}", suggestion=str(path.parent))
 
+    def _check_inreach_maps(self, step: VerifyStep) -> StepResult:
+        stored = self._stored(INREACH_MAPS_KEY)
+        if stored and Path(stored).is_dir():
+            return StepResult(step, Outcome.FOUND, stored, f"Already set: {stored}")
+
+        # Always resolvable -- it's a folder in-reach owns, so unlike the Halo ones there's nothing
+        # to go and find; accept() just creates it, same as the personal maps folder.
+        path = self.default_for(INREACH_MAPS_KEY)
+        detail = f"Found at {path}" if path.is_dir() else f"Will be created at {path}"
+        return StepResult(step, Outcome.FOUND, str(path), detail)
+
     # -- accepting -----------------------------------------------------------------------------
 
     def accept(self, step: VerifyStep, value: str) -> None:
@@ -476,7 +511,7 @@ class VerifyRun:
             if path.parts[-2:] == _GAMETYPE_SUBPATH.parts:
                 env_file.update_env_value(self.env_path, USER_REACH_STRING_KEY, path.parent.parent.name)
                 env_file.update_env_value(self.env_path, LOCAL_FILES_KEY, str(path.parent.parent.parent))
-        elif step.env_key == PERSONAL_MAPS_KEY:
+        elif step.env_key in (PERSONAL_MAPS_KEY, INREACH_MAPS_KEY):
             Path(value).mkdir(parents=True, exist_ok=True)
 
         env_file.update_env_value(self.env_path, step.env_key, value)

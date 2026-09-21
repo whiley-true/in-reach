@@ -16,16 +16,22 @@ all 8 ScriptSettings subsystems (apply_script_settings(), a separate top-level e
 its own docstring for why it isn't folded into apply_multiplayer_settings()), plus meta.title/
 description and metadata's description_string/author/editor/categorization_icon/engine_category
 (see apply_multiplayer_settings()'s docstring) -- i.e. everything that's a direct field assignment
-on an already-writable engine object.
+on an already-writable engine object. apply_firefight_settings() is the Firefight-variant
+equivalent of apply_multiplayer_settings() (a separate top-level entry point for the same reason as
+apply_script_settings() -- Firefight.options isn't a field of MultiplayerGameSettings) -- see its
+own docstring for the one thing it can't yet apply (FirefightWave.squads, a native-extension
+binding gap, not a choice made here).
 
 Every list field applied here (team entries, loadout palette entries, forge labels, scripted
 options/traits/stats/HUD widgets) is matched positionally against the already-loaded variant's own
-list and must be the exact same length -- these lists are either fixed-size engine arrays (8
-teams, 6 palettes x 5 loadouts each) or determined by the compiled Megalo script (forge label/
-scripted-option/etc. counts), never resized from settings alone, so a length mismatch means the
-settings.json being applied is stale relative to the just-compiled script -- raises ValueError
-rather than silently truncating/padding. :mod:`in_reach.app.rvt.compile` wraps every apply_*() call
-from this module (and strings_writer's) so this never escapes as an unhandled crash.
+list and must be the exact same length, or apply_*() raises ValueError rather than silently
+truncating/padding. Some of those lists are fixed-size engine arrays (8 teams, 6 palettes x 5
+loadouts each); the rest are decided by the compiled script, or by settings/ itself, and are made to
+agree *before* this module applies anything -- :func:`reconcile_forge_labels` (only a script can
+create a label) and :func:`reconcile_script_tables` (options/traits/stats/widgets can be created from
+either side) -- so a mismatch that reaches apply_*() means an entry a user edited would otherwise
+have been discarded. :mod:`in_reach.app.rvt.compile` wraps every apply_*() call from this module (and
+strings_writer's) so this never escapes as an unhandled crash.
 
 Text fields (ForgeLabel.name, ScriptedOption[Value].name/desc, ScriptedStat.name,
 ScriptedPlayerTraits.name/desc) are deliberately NOT applied by this module at all, script_settings
@@ -54,8 +60,12 @@ classification, added after this module's v2 ancestor was written) -- unrelated 
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from . import strings_writer
 from .extraction import (
+    FIREFIGHT_SCENARIO_FLAGS,
+    FIREFIGHT_SKULL_FLAGS,
     GENERAL_FLAGS,
     LOADOUT_FLAGS,
     MAP_FLAGS,
@@ -65,8 +75,19 @@ from .extraction import (
     SOCIAL_FLAGS,
     TEAM_DATA_FLAGS,
     TU1_FLAGS,
+    extract_forge_label,
+    extract_scripted_hud_widget,
+    extract_scripted_option,
+    extract_scripted_player_trait,
+    extract_scripted_stat,
 )
 from .models.game_settings import (
+    Firefight,
+    FirefightCustomSkull,
+    FirefightGeneralSettings,
+    FirefightRound,
+    FirefightWave,
+    FirefightWaveTraits,
     GeneralSettings,
     MapAndGameSettings,
     MultiplayerGameSettings,
@@ -341,6 +362,106 @@ def apply_multiplayer_settings(mp, content_header, settings: MultiplayerGameSett
     return [warning] if warning is not None else []
 
 
+def _apply_firefight_general(options, general: FirefightGeneralSettings) -> None:
+    """Same idea as ``_apply_general`` above, minus ``fireteams_enabled``/``score_to_win`` (those
+    are sourced from ``GameVariantDataMultiplayer`` directly there -- see
+    :class:`~in_reach.app.rvt.models.game_settings.FirefightGeneralSettings`'s own docstring for why
+    a Firefight variant's options tree has no equivalent of either)."""
+    g = options.general
+    g.flags = _pack_flags(general, GENERAL_FLAGS)
+    g.time_limit = general.time_limit
+    g.round_limit = general.round_limit
+    g.rounds_to_win = general.rounds_to_win
+    g.sudden_death_time = general.sudden_death_time
+    g.grace_period = general.grace_period
+    options.team.species = general.player_species
+
+
+def apply_firefight_settings(ff, firefight: Firefight) -> None:
+    """Apply everything in scope (see below) from ``firefight`` onto ``ff`` (a loaded variant's
+    ``.firefight``). Mirrors :func:`apply_multiplayer_settings` -- ``ff.options`` is the exact same
+    ``ReachCustomGameOptions`` C++ type/shape as a multiplayer variant's own ``mp.options``
+    (confirmed by ``extraction.py``'s own ``_extract_firefight_options`` reusing
+    ``_extract_respawn``/``_extract_social``/``_extract_map``/``_extract_team``/``_extract_loadout``
+    verbatim), so this reuses those same ``_apply_*`` helpers rather than duplicating them.
+
+    Does NOT write wave squad compositions (``FirefightWave.squads``) -- confirmed, by direct
+    introspection of the bundled ``_reachvarianttool`` extension, that ``FirefightWave.squad(i)`` is
+    a read-only *method* (no setter of any kind exists in the native bindings), unlike every other
+    per-index accessor this module writes through (``team(i)``, ``loadout(i)``, etc., which return a
+    mutable object/expose a real setter). That's a genuine gap in the prebuilt native extension
+    itself, not something fixable from this side -- editing ``settings/settings.json``'s
+    ``firefight.rounds[].wave_*.squads``/``bonus_wave.squads`` currently has no effect on compile,
+    the same "never applied" situation as the text fields this module's own docstring already
+    documents, just for a different underlying reason (an engine binding gap, not a
+    routed-through-strings-instead design choice). Every other wave field
+    (``uses_dropship``/``ordered_squads``/``squad_count``) IS applied.
+    """
+    rvt = get_rvt()
+    ff.scenario_flags = _pack_flags(firefight, FIREFIGHT_SCENARIO_FLAGS)
+    ff.wave_limit = firefight.wave_limit
+    ff.bonus_target = firefight.bonus_target
+    ff.elite_kill_bonus = firefight.elite_kill_bonus
+    ff.starting_lives_spartan = firefight.starting_lives_spartan
+    ff.starting_lives_elite = firefight.starting_lives_elite
+    ff.max_spartan_extra_lives = firefight.max_spartan_extra_lives
+    ff.generator_count = firefight.generator_count
+    ff.bonus_wave_duration = firefight.bonus_wave_duration
+    _apply_player_traits(rvt, ff.base_traits_spartan, firefight.base_traits_spartan)
+    _apply_player_traits(rvt, ff.base_traits_elite, firefight.base_traits_elite)
+    _apply_firefight_wave_traits(rvt, ff.base_traits_wave, firefight.base_traits_wave)
+    _apply_respawn(rvt, ff.elite_respawn_options, firefight.elite_respawn_options)
+
+    options = ff.options
+    _apply_firefight_general(options, firefight.options.general_settings)
+    _apply_respawn(rvt, options.respawn, firefight.options.respawn_settings)
+    _apply_social(rvt, options, firefight.options.social_settings)
+    _apply_map(rvt, options, firefight.options.map_and_game_settings)
+    _apply_team(rvt, options, firefight.options.team_settings)
+    _apply_loadout(rvt, options.loadouts, firefight.options.loadout_settings)
+
+    for i, custom_skull in enumerate(firefight.custom_skulls):
+        _apply_firefight_custom_skull(rvt, ff.custom_skull(i), custom_skull)
+    for i, round_ in enumerate(firefight.rounds):
+        _apply_firefight_round(rvt, ff.round(i), round_)
+    _apply_firefight_wave(ff.bonus_wave, firefight.bonus_wave)
+    ff.bonus_wave_skulls = _pack_flags(firefight.bonus_wave_skulls, FIREFIGHT_SKULL_FLAGS)
+
+
+def _apply_firefight_wave_traits(rvt, wt, traits: FirefightWaveTraits) -> None:
+    wt.vision = _raw(rvt.AIVision, traits.vision)
+    wt.hearing = _raw(rvt.AIHearing, traits.hearing)
+    wt.luck = _raw(rvt.AILuck, traits.luck)
+    wt.shootiness = _raw(rvt.AIShootiness, traits.shootiness)
+    wt.grenades = _raw(rvt.AIGrenades, traits.grenades)
+    wt.dont_drop_equipment = _raw(rvt.BoolTrait, traits.dont_drop_equipment)
+    wt.assassin_immunity = _raw(rvt.BoolTrait, traits.assassin_immunity)
+    wt.headshot_immunity = _raw(rvt.BoolTrait, traits.headshot_immunity)
+    wt.damage_resist = _raw(rvt.DamageResist, traits.damage_resist)
+    wt.damage_mult = _raw(rvt.DamageMultiplier, traits.damage_mult)
+
+
+def _apply_firefight_wave(wave_obj, wave: FirefightWave) -> None:
+    """``squads`` is deliberately not applied -- see :func:`apply_firefight_settings`'s own
+    docstring for why (a native-extension binding gap, not an oversight here)."""
+    wave_obj.uses_dropship = wave.uses_dropship
+    wave_obj.ordered_squads = wave.ordered_squads
+    wave_obj.squad_count = wave.squad_count
+
+
+def _apply_firefight_round(rvt, round_obj, round_: FirefightRound) -> None:
+    round_obj.skulls = _pack_flags(round_.skulls, FIREFIGHT_SKULL_FLAGS)
+    _apply_firefight_wave(round_obj.wave_initial, round_.wave_initial)
+    _apply_firefight_wave(round_obj.wave_main, round_.wave_main)
+    _apply_firefight_wave(round_obj.wave_boss, round_.wave_boss)
+
+
+def _apply_firefight_custom_skull(rvt, skull_obj, skull: FirefightCustomSkull) -> None:
+    _apply_player_traits(rvt, skull_obj.traits_spartan, skull.traits_spartan)
+    _apply_player_traits(rvt, skull_obj.traits_elite, skull.traits_elite)
+    _apply_firefight_wave_traits(rvt, skull_obj.traits_wave, skull.traits_wave)
+
+
 def _apply_forge_label(rvt, fl, label: ForgeLabel) -> None:
     """Everything except `name` -- see module docstring's "text fields" note."""
     fl.requirements = _pack_flags(label, REQUIREMENT_FLAGS)
@@ -372,10 +493,13 @@ def _apply_scripted_option_value(v_obj, value: ScriptedOptionValue) -> None:
 def _apply_scripted_option(o_obj, option: ScriptedOption) -> None:
     """Everything except `name`/`desc` (own and each value's) -- see module docstring's "text
     fields" note."""
-    if len(option.values) != o_obj.value_count:
+    # A range option's enum values are meaningless, and a saved-and-reloaded one has none while a freshly created one has a
+    # single placeholder, so only an enum option's have to agree.
+    if not option.is_range and len(option.values) != o_obj.value_count:
         raise ValueError(f"scripted_options value count mismatch: settings has {len(option.values)}, variant has {o_obj.value_count}")
-    for i, value in enumerate(option.values):
-        _apply_scripted_option_value(o_obj.value(i), value)
+    if not option.is_range:
+        for i, value in enumerate(option.values):
+            _apply_scripted_option_value(o_obj.value(i), value)
     o_obj.is_range = option.is_range
     for model_val, engine_ref, field_name in (
         (option.range_default, o_obj.range_default, "range_default"),
@@ -408,6 +532,163 @@ def _apply_scripted_stat(rvt, s_obj, stat: ScriptedStat) -> None:
 
 def _apply_scripted_hud_widget(w_obj, widget: ScriptedHUDWidget) -> None:
     w_obj.position = widget.position
+
+
+@dataclass
+class LabelReconciliation:
+    """What :func:`reconcile_forge_labels` did: ``script_settings`` is the (possibly extended or
+    trimmed) copy to apply, ``added``/``removed`` the label names that changed."""
+
+    script_settings: ScriptSettings
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed)
+
+
+def _is_pristine_forge_label(label: ForgeLabel) -> bool:
+    """A label with no requirements set -- i.e. nothing a user would lose by dropping it. Its name is
+    ignored: that's a display copy of what the script itself named the label, not something edited."""
+    return label.model_copy(update={"name": ""}) == ForgeLabel()
+
+
+def reconcile_forge_labels(rvt, mp, script_settings: ScriptSettings, teams: list[Team]) -> LabelReconciliation:
+    """Makes ``script_settings.forge_labels`` the same length as ``mp``'s own label list, which is the
+    one thing :func:`apply_script_settings` insists on.
+
+    The *script* defines how many labels a variant has (naming one in ``for each object with label
+    "hill"`` creates it -- nothing in ``settings/`` can, and the native binding has no add-label call),
+    while ``settings/script_settings.json`` only holds each label's editable properties, matched by
+    position. So when the script has produced labels the settings don't list yet, this fills them in
+    from the compiled variant (their real defaults, name included) instead of failing the whole Apply
+    -- which is exactly what a project started from a blank variant hit the first time its script
+    named a label.
+
+    Going the other way, trailing entries the script no longer needs are dropped, but only if they're
+    still untouched defaults: an entry with any requirement set is the user's own work, so it's left
+    alone and :func:`apply_script_settings` reports the mismatch as it always has, rather than this
+    silently discarding it.
+
+    Args:
+        rvt: The native extension module.
+        mp: The just-compiled variant's ``MultiplayerData``.
+        script_settings: The project's current ``settings/script_settings.json`` contents.
+        teams: The project's team settings, for resolving a label's required-team name.
+
+    Returns:
+        A :class:`LabelReconciliation`; ``script_settings`` on it is the input itself if nothing
+        needed changing. The caller decides whether to write it back to ``settings/``.
+    """
+    entries = list(script_settings.forge_labels)
+    count = mp.forge_label_count
+    added: list[str] = []
+    removed: list[str] = []
+    while len(entries) > count and _is_pristine_forge_label(entries[-1]):
+        removed.append(entries.pop().name)
+    for i in range(len(entries), count):
+        label = extract_forge_label(rvt, mp.forge_label(i), teams)
+        entries.append(label)
+        added.append(label.name)
+    if not (added or removed):
+        return LabelReconciliation(script_settings)
+    return LabelReconciliation(script_settings.model_copy(update={"forge_labels": entries}), added, removed)
+
+
+#: The four script-defined tables besides forge labels, as ``(ScriptSettings field, count attribute on
+#: the variant, method that appends one, accessor, extractor of one entry's settings)``.
+_SCRIPT_TABLES = (
+    ("scripted_options", "scripted_option_count", "add_scripted_option", "scripted_option",
+     lambda rvt, entry: extract_scripted_option(entry)),
+    ("scripted_player_traits", "scripted_player_trait_count", "add_scripted_player_traits", "scripted_player_trait",
+     lambda rvt, entry: extract_scripted_player_trait(rvt, entry)),
+    ("scripted_stats", "scripted_stat_count", "add_scripted_stat", "scripted_stat",
+     lambda rvt, entry: extract_scripted_stat(entry)),
+    ("scripted_hud_widgets", "scripted_hud_widget_count", "add_scripted_hud_widget", "scripted_hud_widget",
+     lambda rvt, entry: extract_scripted_hud_widget(entry)),
+)
+
+
+@dataclass
+class TableReconciliation:
+    """What :func:`reconcile_script_tables` did. ``script_settings`` is the copy to apply (and, if
+    ``changed``, to write back); ``added`` maps each table's settings field to how many entries the
+    *script* created that settings now lists; ``created`` maps it to how many entries *settings*
+    defined that the variant didn't have yet."""
+
+    script_settings: ScriptSettings
+    added: dict[str, int] = field(default_factory=dict)
+    created: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def changed(self) -> bool:
+        """Whether ``settings/`` needs rewriting. (``created`` only changes the variant.)"""
+        return bool(self.added)
+
+
+def _grow_options(mp, entries: list) -> None:
+    """Gives each variant option the shape its settings entry has: a new option is created with a single enum value and no
+    range, so an entry listing more values, or a range, needs them added. Only ever grows -- nothing is removed."""
+    for i, entry in enumerate(entries):
+        option = mp.scripted_option(i)
+        if entry.is_range:
+            if option.range_default is None:
+                option.make_range()
+        else:
+            while option.value_count < len(entry.values):
+                option.add_value()
+
+
+def reconcile_script_tables(rvt, mp, script_settings: ScriptSettings) -> TableReconciliation:
+    """Makes each of the variant's scripted options, player-trait sets, stats and HUD widgets and its
+    ``script_settings`` list agree, from whichever side has more.
+
+    Unlike forge labels (which only a script can create -- see :func:`reconcile_forge_labels`), these
+    can be created either way: the script by referring to ``script_widget[2]`` (the compiler makes sure
+    entries 0-2 exist), or ``settings/script_settings.json`` by listing an entry, exactly as adding one
+    in RVT's script editor does. So the settings list sets a *minimum* -- the variant is grown to match
+    it -- and anything the script created beyond that is appended to it with its real defaults.
+
+    Nothing is ever dropped. An entry is either one the user listed or one a script still refers to, so
+    unlike a label there's no "no longer needed, and untouched" case to guard against losing work.
+
+    Args:
+        rvt: The native extension module.
+        mp: The just-compiled variant's ``MultiplayerData``. Grown in place where settings lists more.
+        script_settings: The project's current ``settings/script_settings.json`` contents.
+
+    Returns:
+        A :class:`TableReconciliation`; its ``script_settings`` is the input itself if nothing needed
+        appending.
+
+    Raises:
+        ValueError: A settings list is longer than the engine allows for that table.
+    """
+    updates: dict[str, list] = {}
+    added: dict[str, int] = {}
+    created: dict[str, int] = {}
+    for settings_field, count_attr, add_method, accessor, extract in _SCRIPT_TABLES:
+        entries = list(getattr(script_settings, settings_field))
+        made = 0
+        while getattr(mp, count_attr) < len(entries):
+            try:
+                getattr(mp, add_method)()
+            except RuntimeError as exc:
+                raise ValueError(f"script_settings.{settings_field} lists {len(entries)} entries, but {exc}") from exc
+            made += 1
+        if made:
+            created[settings_field] = made
+        if settings_field == "scripted_options":
+            _grow_options(mp, entries)
+        count = getattr(mp, count_attr)
+        appended = [extract(rvt, getattr(mp, accessor)(i)) for i in range(len(entries), count)]
+        if appended:
+            updates[settings_field] = entries + appended
+            added[settings_field] = len(appended)
+    if not updates:
+        return TableReconciliation(script_settings, {}, created)
+    return TableReconciliation(script_settings.model_copy(update=updates), added, created)
 
 
 def apply_script_settings(mp, script_settings: ScriptSettings) -> None:

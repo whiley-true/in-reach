@@ -1,0 +1,107 @@
+name: Native extension
+
+# Builds `_reachvarianttool` (the ReachVariantTool engine, vendored under native/) from source on Windows,
+# runs the whole test suite against the module it just built -- the Ubuntu jobs in tests.yml skip every test
+# that needs it -- and produces platform-tagged wheels that contain it.
+#
+# This workflow only *builds, tests and uploads artifacts* (`wheel-py<version>`). Publishing is publish.yml,
+# which calls this workflow (`workflow_call`) so a release is built and tested with exactly these steps, then
+# uploads those wheels.
+
+on:
+  workflow_call:
+  # Every push to main (a release merge), not only ones touching the paths below: a release-tag run can restore
+  # caches only from the default branch, so this is what leaves the vcpkg Qt5 cache where a release can find it
+  # instead of compiling Qt from source in the middle of publishing.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [development, main]
+    paths:
+      - "native/**"
+      - "src/in_reach/app/rvt/**"
+      - "tests/app/rvt/**"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Python ${{ matrix.python-version }}
+    runs-on: windows-2022
+    # Qt5 is compiled from source by vcpkg the first time (well over half an hour); the binary cache below
+    # makes every later run skip that.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+      # No QT_QPA_PLATFORM=offscreen here (the Linux jobs need it): this is the platform the IDE ships on, and
+      # offscreen on Windows has no emoji font, so the Explorer's icons all render as the same missing-glyph box.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          # Only the vcpkg checkout on the runner image and the port being built decide what's in it.
+          key: vcpkg-qt5-base-x64-windows-${{ runner.os }}-v1
+
+      - name: Install Qt5 (vcpkg)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install qt5-base:x64-windows
+
+      # Editable, so `import in_reach` is this checkout -- the one native/build.py installs the module into. A
+      # regular install would put a copy in site-packages (with the committed cp314 module, and no other
+      # version's), and the tests would skip or run against that instead of the module just built.
+      - name: Install build and test dependencies
+        run: python -m pip install pybind11 build -e ".[dev]"
+
+      - name: Build _reachvarianttool
+        run: python native/build.py --vcpkg-root "$env:VCPKG_INSTALLATION_ROOT"
+
+      - name: Check the module just built is the one being tested
+        run: python native/verify.py
+
+      - name: Run the whole test suite against it
+        run: python -m pytest -q -rs
+
+      - name: Build the wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Check the wheel is tagged for this Python and platform
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          Write-Host $wheel.Name
+          $tag = "cp$('${{ matrix.python-version }}'.Replace('.', ''))-cp$('${{ matrix.python-version }}'.Replace('.', ''))-win_amd64"
+          if ($wheel.Name -notlike "*-$tag.whl") { throw "expected a $tag wheel, got $($wheel.Name)" }
+
+      # What a user gets: the wheel, installed into an empty environment, run from outside the checkout. The
+      # tests above import the source tree, so only this proves the wheel itself carries a loadable module.
+      - name: Smoke-test the wheel in a clean environment
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "smoke"
+          python -m venv $venv
+          & "$venv\Scripts\python.exe" -m pip install (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if ($LASTEXITCODE -ne 0) { throw "installing the wheel failed" }
+          Push-Location $env:RUNNER_TEMP
+          & "$venv\Scripts\python.exe" -c "import in_reach; from in_reach.app.rvt import rvt_bridge; assert 'site-packages' in in_reach.__file__, in_reach.__file__; assert rvt_bridge.is_available(), 'the wheel has no loadable native module'; print(rvt_bridge.get_rvt().__file__)"
+          if ($LASTEXITCODE -ne 0) { throw "the installed wheel doesn't work" }
+          Pop-Location
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python-version }}
+          path: dist/*.whl

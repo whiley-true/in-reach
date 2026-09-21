@@ -1,5 +1,12 @@
 name: Publish to PyPI
 
+# Runs when a GitHub Release is published (auto-release.yml does that on merging a release/vX.Y.Z PR into main).
+#
+# The wheels contain a compiled Windows module, so they are built on Windows: one per Python, by calling
+# native.yml -- the same steps that build and test them on every relevant pull request. Nothing is uploaded until
+# every wheel and the sdist exist and check_dist.py agrees that's exactly what a release should hold, because a
+# PyPI version can't be uploaded again after a partial publish.
+
 on:
   release:
     types: [published]
@@ -12,18 +19,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - name: Install Qt runtime libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install package and test dependencies
         run: python -m pip install -e ".[dev]"
       - name: Run tests
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
-  build:
+  # Builds _reachvarianttool, runs the whole suite against it and builds a cp3XX-win_amd64 wheel, for each
+  # supported Python; uploads them as the artifacts wheel-py3.12, wheel-py3.13, wheel-py3.14.
+  wheels:
+    needs: test
+    uses: ./.github/workflows/native.yml
+
+  sdist:
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -31,24 +38,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - name: Build package
+      - name: Build the source distribution
         run: |
           python -m pip install --upgrade build
-          python -m build
+          python -m build --sdist
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: sdist
+          path: dist/*.tar.gz
 
   publish:
-    needs: build
+    needs: [wheels, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: dist
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Collect the wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-py*
+          merge-multiple: true
           path: dist/
+      - name: Collect the sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+      - name: Check dist/ is exactly the release, before uploading anything
+        run: python .github/scripts/check_dist.py dist --tag "${{ github.event.release.tag_name }}"
       - uses: pypa/gh-action-pypi-publish@release/v1

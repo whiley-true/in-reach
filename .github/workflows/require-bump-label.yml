@@ -5,13 +5,29 @@ on:
     types: [opened, labeled, unlabeled, synchronize, reopened]
     branches: [main]
 
+# One check per PR at a time, the newest event winning. Cut Release opens its PR and adds the label a moment later, so an
+# `opened` run and a `labeled` run start together; without this the slower one can finish last and leave the required
+# check red on a PR that has its label.
+concurrency:
+  group: require-bump-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   check-bump-label:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     steps:
       - name: Require exactly one bump:major|minor|patch label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          # Ask GitHub for the PR's labels as they are now. The event payload (github.event.pull_request.labels) is a
+          # snapshot from the moment the event fired, so an `opened` run started before `gh pr create --label` had
+          # added the label sees none -- and re-running that job replays the same stale snapshot.
+          LABELS=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/labels" --jq '[.[].name]')
+          echo "Labels on #${PR_NUMBER}: ${LABELS}"
           COUNT=0
           for l in major minor patch; do
             if echo "$LABELS" | grep -q "\"bump:$l\""; then

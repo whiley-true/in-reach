@@ -35,3 +35,13 @@ def test_launch_rvt_uses_an_explicit_exe_path_override_instead_of_resolving(tmp_
     rvt_launcher.launch_rvt(exe_path=override, popen=lambda args: calls.append(args))
 
     assert calls == [[str(override)]]
+
+
+def test_launch_rvt_returns_whatever_popen_returns() -> None:
+    # PROMPT.md: "if project is closed in ide, if Reach Variant tool is open for that project it
+    # should be closed" -- MainWindow needs the process handle back to later terminate it.
+    sentinel = object()
+
+    result = rvt_launcher.launch_rvt(popen=lambda args: sentinel)
+
+    assert result is sentinel
