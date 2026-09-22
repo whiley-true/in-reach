@@ -853,9 +853,11 @@ worth tightening:
 - **IR007** (`true`/`false` where a Number is required) — confirmed relevant: the grammar has no
   boolean literal token at all (`lexer.py`'s token kinds are exactly
   `int | percent | string | ident | punct | comment | eof`), so `true`/`false` can only ever appear as
-  bare identifiers, which will either resolve to something else entirely or fail to resolve — this
-  rule should probably fire on `true`/`false` as identifiers *anywhere*, not just "where a Number is
-  required."
+  bare identifiers, which will either resolve to something else entirely or fail to resolve. **Corrected
+  by running it on real gametypes:** a *bare* `true`/`false` handed straight to a call is a legal yes/no
+  argument (`current_object.set_hidden(true)` is what the decompiler writes and the compiler accepts), so the rule
+  fires on them as a value only (`x = true`, `y == false`, `if true`), never as a call's own argument. And
+  IR010 is a warning, not an error: shipped scripts loop over every object and compile fine."
 - **New rule candidate**: flag `|=`/`&=`/bare binary `+`/`-`/`*`/`/` in emitted or hand-authored `.mgl`
   — none of those are real tokens the compiler accepts; catching this at lint time is strictly better
   than letting RVT's own compiler error surface it after a full link (see §4.3's `bit_set` correction

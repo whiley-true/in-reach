@@ -309,3 +309,48 @@ def test_a_diagnostic_with_a_hint_prints_it() -> None:
     text = str(ProjectDiagnostic(severity="error", code="IR007", message="m", file="a.mgl", line=2, hint="use 1 or 0"))
 
     assert text == "a.mgl:2: error: m [IR007] -- use 1 or 0"
+
+
+# -- false positives found on real, decompiled scripts ---------------------------------------------------------------------
+
+
+def test_ir007_leaves_a_yes_no_argument_alone(tmp_path: Path) -> None:
+    """The decompiler writes ``current_object.set_hidden(true)`` and the compiler takes it: it isn't a value."""
+    found = _lint(
+        tmp_path,
+        "-- @fragment PASS.f\n-- @loop player\ncurrent_object.set_hidden(true)\nscript_widget[0].set_visibility(current_player, false)\n",
+    )
+
+    assert _at(found, "IR007") == []
+
+
+def test_ir007_still_flags_true_as_a_value_next_to_an_argument(tmp_path: Path) -> None:
+    text = "-- @fragment PASS.f\n-- @loop player\nf(true)\nx = true\nif y == true then\n   z = 1\nend\nif true then\n   z = 2\nend\n"
+
+    found = _lint(tmp_path, text)
+
+    assert _at(found, "IR007") == [("modules/m/m.mgl", 4), ("modules/m/m.mgl", 5), ("modules/m/m.mgl", 8)]
+
+
+def test_ir007_flags_true_inside_an_expression_that_is_an_argument(tmp_path: Path) -> None:
+    found = _lint(tmp_path, "-- @fragment PASS.f\n-- @loop player\nf(x == true)\n")
+
+    assert _at(found, "IR007") == [("modules/m/m.mgl", 3)]  # only a *bare* true/false is the yes/no argument
+
+
+def test_ir010_is_a_warning_because_the_compiler_accepts_it_and_shipped_scripts_do_it(tmp_path: Path) -> None:
+    found = _lint(tmp_path, _FRAGMENT, blocks={"win": "for each object do\n   x = 1\nend\n"})
+
+    assert [(d.code, d.severity) for d in found if d.code == "IR010"] == [("IR010", "warning")]
+
+
+def test_the_loop_object_form_of_ir010_is_a_warning_too(tmp_path: Path) -> None:
+    found = _lint(tmp_path, "-- @fragment PASS.f\n-- @loop object\nx = 1\n")
+
+    assert [(d.code, d.severity) for d in found if d.code == "IR010"] == [("IR010", "warning")]
+
+
+def test_ir007_and_the_other_errors_are_still_errors(tmp_path: Path) -> None:
+    found = _lint(tmp_path, "-- @fragment PASS.f\n-- @loop player\nx = true\n")
+
+    assert [d.severity for d in found if d.code == "IR007"] == ["error"]

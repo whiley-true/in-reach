@@ -7,8 +7,10 @@ Implemented here:
 ======  =============================================================================================
 IR005   a timer declared with a network priority (``declare global.timer[0] with network priority ...``)
 IR006   a name declared twice -- across annotations, or the same ``declare`` slot twice
-IR007   ``true`` / ``false`` used as a value: the grammar has no boolean literal, so they are bare words
-IR010   an unlabelled ``for each object`` in something that runs every tick
+IR007   ``true`` / ``false`` used as a value (``x = true``, ``y == false``): the grammar has no boolean literal, so there
+        they are bare words the compiler can't resolve. As a call's *argument* they are fine -- a yes/no parameter takes
+        them, and the decompiler writes them (``current_object.set_hidden(true)``)
+IR010   (a warning) an unlabelled ``for each object`` in something that runs every tick
 IR011   a bitfield of more than 15 flags (bit 15 is reserved)
 IR016   ``@assumes BLOCK`` where BLOCK doesn't come before the block that assumes it
 ======  =============================================================================================
@@ -29,7 +31,7 @@ from dataclasses import dataclass
 
 from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, parse, walk
 from in_reach.app.rvt.megalo_ast.annotations import BitfieldAnnotation, StorageAnnotation
-from in_reach.app.rvt.megalo_ast.nodes import ForEach, Identifier, Script, VariableDeclaration
+from in_reach.app.rvt.megalo_ast.nodes import Call, ForEach, Identifier, Script, VariableDeclaration
 
 from .diagnostics import ProjectDiagnostic
 from .model import SemanticModel
@@ -111,8 +113,11 @@ class _Linter:
                 if id(statement) not in event_statements:
                     per_tick_nodes.update(id(node) for node in walk(statement))
 
+        # ``true``/``false`` handed straight to a call are a yes/no argument (the decompiler writes them, the compiler takes them);
+        # anywhere else -- an assignment, a comparison, a condition -- they are names nothing defines.
+        as_arguments = {id(arg) for node in walk(script) if isinstance(node, Call) for arg in node.args}
         for node in walk(script):
-            if isinstance(node, Identifier) and node.name in ("true", "false"):
+            if isinstance(node, Identifier) and node.name in ("true", "false") and id(node) not in as_arguments:
                 self.add(
                     "IR007", f"{node.name!r} is not a value in Megalo -- it is just an unknown name",
                     region.file, line_of(node), hint="use 1 or 0",
@@ -125,7 +130,7 @@ class _Linter:
             elif isinstance(node, ForEach) and node.selector == "object" and node.label is None and id(node) in per_tick_nodes:
                 self.add(
                     "IR010", "an unlabelled 'for each object' in something that runs every tick visits every object in the map",
-                    region.file, line_of(node), hint="give the objects a label and use 'with label ...'",
+                    region.file, line_of(node), hint="give the objects a label and use 'with label ...'", severity="warning",
                 )
 
     def _loop_annotations(self) -> None:
@@ -134,6 +139,7 @@ class _Linter:
                 self.add(
                     "IR010", f"fragment {fragment.id} loops over every object in the map every tick",
                     fragment.file, fragment.line, hint="loop over players and use 'for each object with label ...' inside",
+                    severity="warning",
                 )
 
     # -- declarations ---------------------------------------------------------------------------------

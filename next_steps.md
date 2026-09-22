@@ -143,7 +143,7 @@ Follow `TO_IMPLEMENT` milestones 1-3, after the corrections below. The pieces, r
    Found by the tests on the way: the cycle finder crashed when the lowest-ranked stuck block was only
    *downstream* of the cycle, which is exactly what a mistaken `before = ["SETUP"]` produces.
 3. ~~**Semantic model + linter**~~ Done for every rule that needs no engine catalog: `model.py` (fragments,
-   preambles, blocks, storage, resources) and `lint.py`: IR005, IR006, IR007, IR010, IR011, IR016; IR013/IR015
+   preambles, blocks, storage, resources) and `lint.py`: IR005, IR006, IR007 (as a value only), IR010 (a warning), IR011, IR016; IR013/IR015
    come from `load_project`, IR004 (temporaries over the cap, *post-fusion*), IR012 (a counter within 10% of its
    cap) and IR018 (a forced fusion the analysis would have declined) from the linker; IR017 is moot (decision 1).
    **Still not done, and why:** IR001-IR003, IR008, IR009, IR014 and IR006b need an engine catalog (dereference

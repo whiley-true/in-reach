@@ -13,6 +13,8 @@ order = ["SETUP", "TICK", "WIN_CHECK"]
 
 [[modules]]
 name = "scoring"
+enabled = false
 
 [[modules]]
 name = "speed_boost"
+enabled = false
