@@ -8,9 +8,9 @@ must neither be replaced nor be reported as undefined).
 """
 import pytest
 
-from in_reach.app.script_preprocess import PreprocessError, Profile, preprocess
+from in_reach.app.script_preprocess import PreprocessError, Env, preprocess
 
-_PROFILE = Profile("dev", frozenset({"DEV"}), {"N": "6", "LABEL": '"hill"', "RATE": "-100%"})
+_PROFILE = Env("dev", frozenset({"DEV"}), {"N": "6", "LABEL": '"hill"', "RATE": "-100%"})
 
 
 def test_an_annotations_arguments_are_substituted() -> None:
@@ -30,7 +30,7 @@ def test_a_note_after_a_second_dash_pair_is_left_alone() -> None:
 
 
 def test_a_doc_annotations_prose_is_left_alone() -> None:
-    text = "-- @doc waits ${N} seconds, or ${WHATEVER} the profile says\n"
+    text = "-- @doc waits ${N} seconds, or ${WHATEVER} the env says\n"
 
     assert preprocess(text, _PROFILE) == text
 

@@ -158,3 +158,39 @@ def test_a_module_needs_a_script_project_first(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="no script/project.toml"):
         create_module(folder, "a")
+
+
+# -- a backup before converting -----------------------------------------------------------------------------
+
+
+def test_backup_script_copies_script_outside_the_project(tmp_path: Path) -> None:
+    from in_reach import api
+
+    folder = tmp_path / "game"
+    (folder / "script" / "env").mkdir(parents=True)
+    (folder / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (folder / "script" / "env" / "dev.env").write_text("FLAGS=DEV\n", encoding="utf-8")
+
+    first = api.backup_script(folder)
+    second = api.backup_script(folder)
+
+    assert first.parent == tmp_path / ".in-reach" / "backups" / "game" and first.name.startswith("script-")
+    assert (first / "output.txt").read_text(encoding="utf-8") == "x = 1\n" and (first / "env" / "dev.env").is_file()
+    assert second != first  # two in the same second don't collide
+
+
+def test_create_project_with_backup_reports_where_the_copy_went(tmp_path: Path) -> None:
+    import json
+
+    from click.testing import CliRunner
+
+    from in_reach.cli import main
+
+    folder = tmp_path / "game"
+    (folder / "script").mkdir(parents=True)
+    (folder / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["create-project", str(folder), "--backup", "--format", "json"])
+
+    data = json.loads(result.output)
+    assert result.exit_code == 0 and Path(data["backup"]).is_dir() and (folder / "script" / "project.toml").is_file()

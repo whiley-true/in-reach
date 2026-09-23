@@ -1,4 +1,4 @@
-"""When a linked script project has changes Apply hasn't built (``apply_settings.script_has_unapplied_changes``)."""
+"""When a script has changes Apply hasn't built (``apply_settings.script_has_unapplied_changes``): a linked project, and a single file."""
 import os
 import sys
 from pathlib import Path
@@ -20,11 +20,51 @@ def _built(folder: Path) -> None:
     os.utime(binary, ns=(later, later))
 
 
-def test_a_single_file_project_is_never_reported_by_this_check(tmp_path: Path) -> None:
+def _single_built(folder: Path, text: str = "x = 1\n") -> Path:
+    (folder / "script").mkdir()
+    (folder / "script" / "output.txt").write_text(text, encoding="utf-8")
+    assert link(folder).ok
+    binary = new_project.compiled_variant_path(folder)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"bin")
+    later = (folder / "build" / "link_map.json").stat().st_mtime_ns + 1_000_000
+    os.utime(binary, ns=(later, later))
+    return folder
+
+
+def test_a_single_file_built_before_builds_recorded_their_script_is_not_reported(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
     (tmp_path / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
 
     assert apply_settings.script_has_unapplied_changes(tmp_path) is False
+
+
+def test_a_freshly_built_single_file_has_nothing_to_apply(tmp_path: Path) -> None:
+    assert apply_settings.script_has_unapplied_changes(_single_built(tmp_path)) is False
+
+
+def test_editing_a_single_file_makes_it_unapplied(tmp_path: Path) -> None:
+    folder = _single_built(tmp_path)
+    (folder / "script" / "output.txt").write_text("x = 2\n", encoding="utf-8")
+
+    assert apply_settings.script_has_unapplied_changes(folder) is True
+
+
+def test_a_comment_only_edit_to_a_single_file_is_still_unapplied(tmp_path: Path) -> None:
+    """A comment is part of what the compiler is given (and of skip-if-unchanged), so it is a change."""
+    folder = _single_built(tmp_path)
+    (folder / "script" / "output.txt").write_text("-- hi\nx = 1\n", encoding="utf-8")
+
+    assert apply_settings.script_has_unapplied_changes(folder) is True
+
+
+def test_a_single_file_whose_last_build_failed_is_unapplied(tmp_path: Path) -> None:
+    folder = _single_built(tmp_path)
+    binary = new_project.compiled_variant_path(folder)
+    older = (folder / "build" / "link_map.json").stat().st_mtime_ns - 5_000_000_000
+    os.utime(binary, ns=(older, older))
+
+    assert apply_settings.script_has_unapplied_changes(folder) is True
 
 
 def test_a_linked_project_nothing_has_built_is_unapplied(tmp_path: Path) -> None:

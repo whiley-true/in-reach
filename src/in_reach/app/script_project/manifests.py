@@ -36,7 +36,8 @@ class _Model(BaseModel):
 class ProjectSection(_Model):
     name: str | None = None
     dialect: Literal["mgl/1"] = "mgl/1"
-    profile: str | None = None  # the default profile; script/env/active_profile.txt (the IDE's switcher) wins
+    env: str | None = None  # the default env; script/env/active_env.txt (the IDE's switcher) wins
+    profile: str | None = None  # what `env` was called before in-reach 0.4: still read, with a warning
     bit_impl: Literal["and", "divmod"] = "and"
 
 
@@ -132,7 +133,7 @@ class ModuleManifest(_Model):
 # ("array", {keys})        -- an array of tables ([[modules]]) with these keys;
 # ("named", {keys})        -- a table of tables ([kinds.hill], [params.speed]), each with these keys.
 _PROJECT_SCHEMA: dict[str, tuple] = {
-    "project": ("table", {"name", "dialect", "profile", "bit_impl"}),
+    "project": ("table", {"name", "dialect", "env", "profile", "bit_impl"}),
     "blocks": ("table", {"order"}),
     "constants": ("any",),
     "pins": ("any",),

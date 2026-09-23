@@ -28,7 +28,7 @@ def test_help_prints_help_menu(runner: CliRunner) -> None:
 
     assert result.exit_code == 0
     assert "Usage:" in result.output
-    for command in ("run", "cfg", "build", "check", "link", "show", "verify", "vcs", "launch", "new-module", "profile"):
+    for command in ("run", "cfg", "build", "check", "link", "show", "verify", "vcs", "launch", "new-module", "env"):
         assert command in result.output
 
 
@@ -143,7 +143,7 @@ def test_check_json_is_versioned_and_carries_located_diagnostics(runner: CliRunn
     result = runner.invoke(main, ["check", str(folder), "--format", "json"])
 
     data = json.loads(result.output)
-    assert result.exit_code == 1 and data["schema"] == 1 and data["ok"] is False
+    assert result.exit_code == 1 and data["schema"] == api.SCHEMA_VERSION and data["ok"] is False
     [problem] = [d for d in data["diagnostics"] if d["code"] == "IR006"]
     assert set(problem) == {"severity", "code", "message", "file", "line", "column", "hint"}
     assert (problem["severity"], problem["file"], problem["line"], problem["column"]) == ("error", "blocks/setup.mgl", 2, 1)
@@ -158,11 +158,11 @@ def test_check_json_of_a_clean_project_has_the_link_map(runner: CliRunner, tmp_p
     assert data["ok"] is True and data["link_map"]["order"] == ["SETUP", "HILL_PASS", "WIN_CHECK"]
 
 
-def test_a_folder_that_is_not_a_script_project_exits_1_in_either_format(runner: CliRunner, tmp_path: Path) -> None:
+def test_a_folder_with_no_script_exits_1_in_either_format(runner: CliRunner, tmp_path: Path) -> None:
     text = runner.invoke(main, ["check", str(tmp_path)])
     data = runner.invoke(main, ["check", str(tmp_path), "--format", "json"])
 
-    assert text.exit_code == 1 and "not a script project" in text.output
+    assert text.exit_code == 1 and "has no script" in text.output
     assert data.exit_code == 1 and json.loads(data.output)["ok"] is False
 
 
@@ -185,13 +185,13 @@ def test_build_reports_a_missing_native_module_as_exit_2(runner: CliRunner, tmp_
 def test_build_passes_its_options_to_the_api_and_exits_by_the_result(runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
-    def fake_build(folder, *, profile=None, dry_run=False):
-        calls.append((folder, profile, dry_run))
+    def fake_build(folder, *, env=None, dry_run=False):
+        calls.append((folder, env, dry_run))
         return api.BuildOutcome(False, [api.Diagnostic("error", "X1", "boom", "blocks/a.mgl", 3, 4)], "Megalo compile failed")
 
     monkeypatch.setattr(api, "build", fake_build)
 
-    text = runner.invoke(main, ["build", str(tmp_path), "--profile", "release", "--dry-run"])
+    text = runner.invoke(main, ["build", str(tmp_path), "--env", "release", "--dry-run"])
     data = json.loads(runner.invoke(main, ["build", str(tmp_path), "--format", "json"]).output)
 
     assert calls[0] == (tmp_path, "release", True) and text.exit_code == 1
@@ -254,7 +254,7 @@ def test_show_needs_a_view(runner: CliRunner, tmp_path: Path) -> None:
     assert runner.invoke(main, ["show", str(tmp_path)]).exit_code == 2  # click's usage error
 
 
-# -- scaffolding and profiles -------------------------------------------------------------------------------------
+# -- scaffolding and envs -------------------------------------------------------------------------------------
 
 
 def test_create_project_and_new_module_scaffold_a_script_project(runner: CliRunner, tmp_path: Path) -> None:
@@ -280,26 +280,26 @@ def test_profiles_are_listed_and_chosen(runner: CliRunner, tmp_path: Path) -> No
     folder = _hill_rush(tmp_path / "proj")
     (folder / "script" / "env" / "release.env").write_text("FLAGS=RELEASE\nSCORE_TO_WIN=50\n", encoding="utf-8")
 
-    listed = json.loads(runner.invoke(main, ["profile", "list", str(folder), "--format", "json"]).output)
-    chosen = runner.invoke(main, ["profile", "set", "release", "--folder", str(folder)])
-    cleared = runner.invoke(main, ["profile", "set", "--none", "--folder", str(folder), "--format", "json"])
+    listed = json.loads(runner.invoke(main, ["env", "list", str(folder), "--format", "json"]).output)
+    chosen = runner.invoke(main, ["env", "set", "release", "--folder", str(folder)])
+    cleared = runner.invoke(main, ["env", "set", "--none", "--folder", str(folder), "--format", "json"])
 
-    assert listed["profiles"] == ["dev", "release"]
-    assert "active profile: release" in chosen.output
+    assert listed["envs"] == ["dev", "release"]
+    assert "active env: release" in chosen.output
     assert json.loads(cleared.output)["active"] is None
 
 
 def test_choosing_a_profile_that_does_not_exist_is_refused(runner: CliRunner, tmp_path: Path) -> None:
     folder = _hill_rush(tmp_path / "proj")
 
-    result = runner.invoke(main, ["profile", "set", "nope", "--folder", str(folder)])
+    result = runner.invoke(main, ["env", "set", "nope", "--folder", str(folder)])
 
-    assert result.exit_code == 1 and "no profile named" in result.output
+    assert result.exit_code == 1 and "no env named" in result.output
 
 
 def test_profile_set_needs_a_name_or_none(runner: CliRunner, tmp_path: Path) -> None:
-    assert runner.invoke(main, ["profile", "set", "--folder", str(tmp_path)]).exit_code == 2
-    assert runner.invoke(main, ["profile", "set", "dev", "--none", "--folder", str(tmp_path)]).exit_code == 2
+    assert runner.invoke(main, ["env", "set", "--folder", str(tmp_path)]).exit_code == 2
+    assert runner.invoke(main, ["env", "set", "dev", "--none", "--folder", str(tmp_path)]).exit_code == 2
 
 
 # -- launch -------------------------------------------------------------------------------------------------------
@@ -413,8 +413,25 @@ def test_new_creates_a_gametype_project_from_a_bin(runner: CliRunner, tmp_path: 
     result = runner.invoke(main, ["new", "My Game", "--from", str(source), "--root", str(tmp_path), "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    folder = Path(json.loads(result.output)["folder"])
+    data = json.loads(result.output)
+    folder = Path(data["folder"])
     assert (folder / "settings" / "settings.json").is_file() and (folder / "script").is_dir()
+    assert data["built"] is True and (folder / "build" / "docs" / "overview.md").is_file()  # built once straight away
+
+
+def test_new_with_no_build_leaves_it_unbuilt(runner: CliRunner, tmp_path: Path) -> None:
+    from in_reach.app import new_project
+    from in_reach.app.rvt import rvt_bridge
+
+    source = Path(__file__).parent / "app" / "rvt" / "resources" / "juggernaut" / "juggernaut.bin"
+    if not (source.is_file() and rvt_bridge.is_available()):
+        pytest.skip("fixture .bin or native module not available")
+
+    result = runner.invoke(main, ["new", "My Game", "--from", str(source), "--root", str(tmp_path), "--no-build", "--format", "json"])
+
+    folder = Path(json.loads(result.output)["folder"])
+    assert result.exit_code == 0 and json.loads(result.output)["built"] is False
+    assert not new_project.compiled_variant_path(folder).exists()
 
 
 # -- script projects ------------------------------------------------------------------------------------
@@ -460,10 +477,10 @@ def test_lint_defaults_to_the_current_directory(runner: CliRunner, hill: Path, m
     assert result.exit_code == 0 and "0 errors" in result.output
 
 
-def test_lint_of_a_folder_that_is_not_a_script_project_says_so(runner: CliRunner, tmp_path: Path) -> None:
+def test_lint_of_a_folder_with_no_script_says_so(runner: CliRunner, tmp_path: Path) -> None:
     result = runner.invoke(main, ["lint", str(tmp_path)])
 
-    assert result.exit_code != 0 and "not a script project" in result.output
+    assert result.exit_code != 0 and "has no script" in result.output
 
 
 def test_link_writes_the_build_and_reports_what_it_did(runner: CliRunner, hill: Path) -> None:

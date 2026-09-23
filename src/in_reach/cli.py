@@ -97,7 +97,8 @@ def run() -> None:
 @_folder_argument
 @_format_option
 def check_cmd(folder: Path, fmt: str) -> None:
-    """Check a script project for problems, writing nothing. Exits 1 if anything is an error."""
+    """Check the script (a script project, or script/output.txt) for problems, writing nothing. Exits 1 if anything is an
+    error."""
     try:
         result = api.check(folder)
     except api.ApiError as exc:
@@ -114,14 +115,35 @@ def check_cmd(folder: Path, fmt: str) -> None:
 main.add_command(check_cmd, name="lint")  # the name this command had first
 
 
+@main.command(name="docs")
+@_folder_argument
+@click.option("--no-write", is_flag=True, help="Print the overview, but don't write build/docs/.")
+@_format_option
+def docs_cmd(folder: Path, no_write: bool, fmt: str) -> None:
+    """Generate the script's documentation: build/docs/overview.md and overview.json.
+
+    Made from the script itself: -- @doc notes, -- @tags, script/README.md (and, in a script project, blocks/<name>.md
+    and each module's README.md), and what the linker decided (slots, resources, budget, fusion)."""
+    try:
+        result = api.docs(folder, write=not no_write)
+    except api.ApiError as exc:
+        _fail(exc, fmt)
+    if fmt == "json":
+        _emit_json(result.to_dict())
+    else:
+        click.echo(result.markdown, nl=False)
+        for path in result.written:
+            click.echo(f"wrote    {path}", err=True)
+
+
 @main.command(name="link")
 @_folder_argument
 @click.option("--dry-run", is_flag=True, help="Check and report, but write nothing.")
 @_format_option
 def link_cmd(folder: Path, dry_run: bool, fmt: str) -> None:
-    """Link a script project: write build/Compiled.txt and its link map (no compile).
+    """Link the script: write its link map, and build/Compiled.txt for a script project (no compile).
 
-    Adds any trait sets, options and widgets the project declares to settings/script_settings.json."""
+    Adds any trait sets, options and widgets the script declares to settings/script_settings.json."""
     try:
         result = api.link(folder, write=not dry_run)
     except api.ApiError as exc:
@@ -152,13 +174,13 @@ def link_cmd(folder: Path, dry_run: bool, fmt: str) -> None:
 
 @main.command(name="build")
 @_folder_argument
-@click.option("--profile", default=None, help="Build with this profile (for this build only).")
+@click.option("--env", default=None, help="Build with this env (for this build only).")
 @click.option("--dry-run", is_flag=True, help="Compile and report everything, but save nothing.")
 @_format_option
-def build_cmd(folder: Path, profile: str | None, dry_run: bool, fmt: str) -> None:
+def build_cmd(folder: Path, env: str | None, dry_run: bool, fmt: str) -> None:
     """Build the project's gametype .bin (build/dist/<name>.bin). Exits 1 if it doesn't build, 2 without the native module."""
     try:
-        outcome = api.build(folder, profile=profile, dry_run=dry_run)
+        outcome = api.build(folder, env=env, dry_run=dry_run)
     except api.ApiError as exc:
         _fail(exc, fmt)
     if fmt == "json":
@@ -176,10 +198,10 @@ def build_cmd(folder: Path, profile: str | None, dry_run: bool, fmt: str) -> Non
 
 @main.command(name="show")
 @_folder_argument
-@click.option("--view", type=click.Choice(list(api.VIEWS)), required=True, help="rvt: the built .bin decompiled; rvt+: the script with the profile applied; megalo: the source as written.")
+@click.option("--view", type=click.Choice(list(api.VIEWS)), required=True, help="rvt: the built .bin decompiled; rvt+: the script with the env applied; megalo: the source as written.")
 @_format_option
 def show_cmd(folder: Path, view: str, fmt: str) -> None:
-    """Print the project's script as RVT shows it, with the profile applied, or as written."""
+    """Print the project's script as RVT shows it, with the env applied, or as written."""
     try:
         result = api.show(folder, view)
     except api.ApiError as exc:
@@ -192,16 +214,24 @@ def show_cmd(folder: Path, view: str, fmt: str) -> None:
 
 @main.command(name="create-project")
 @_folder_argument
+@click.option("--backup", is_flag=True, help="Copy script/ to .in-reach/backups/ first.")
 @_format_option
-def create_project_cmd(folder: Path, fmt: str) -> None:
-    """Turn a single-script project into a script project (script/project.toml + blocks/main.mgl)."""
+def create_project_cmd(folder: Path, backup: bool, fmt: str) -> None:
+    """Convert a single-file script into a script project (script/project.toml + blocks/main.mgl).
+
+    Experimental, and one-way: from then on script/output.txt is no longer compiled. --backup keeps a copy first."""
+    backup_path = None
     try:
+        if backup:
+            backup_path = api.backup_script(folder)
         written = api.create_script_project(folder)
     except api.ApiError as exc:
         _fail(exc, fmt)
     if fmt == "json":
-        _emit_json({"schema": api.SCHEMA_VERSION, "ok": True, "written": written})
+        _emit_json({"schema": api.SCHEMA_VERSION, "ok": True, "written": written, "backup": str(backup_path) if backup_path else None})
     else:
+        if backup_path is not None:
+            click.echo(f"backup   {backup_path}")
         for path in written:
             click.echo(f"wrote    {path}")
 
@@ -223,45 +253,88 @@ def new_module_cmd(name: str, folder: Path, fmt: str) -> None:
             click.echo(f"wrote    {path}")
 
 
-@main.group(name="profile")
-def profile_group() -> None:
-    """List and choose the build profile (script/env/<name>.env)."""
+@main.group(name="env")
+def env_group() -> None:
+    """List, choose, add and remove envs (script/env/<name>.env: FLAGS for -- @if blocks, NAME=value for ${NAME})."""
 
 
-@profile_group.command(name="list")
+def _print_envs(info: api.EnvInfo) -> None:
+    for details in info.details:
+        mark = "*" if details.name == info.active else " "
+        if details.error:
+            click.echo(f"{mark} {details.name}  (invalid: {details.error})")
+            continue
+        flags = ",".join(details.flags) or "-"
+        constants = " ".join(f"{k}={v}" for k, v in details.constants.items())
+        click.echo(f"{mark} {details.name}  flags={flags}" + (f"  {constants}" if constants else ""))
+    if not info.names:
+        click.echo("no envs")
+
+
+@env_group.command(name="list")
 @_folder_argument
 @_format_option
-def profile_list(folder: Path, fmt: str) -> None:
-    """List the project's profiles; the active one is marked."""
-    info = api.profiles(folder)
+def env_list(folder: Path, fmt: str) -> None:
+    """List the project's envs with their flags and constants; the active one is marked."""
+    info = api.envs(folder)
     if fmt == "json":
         _emit_json(info.to_dict())
     else:
-        for name in info.names:
-            click.echo(f"{'*' if name == info.active else ' '} {name}")
-        if not info.names:
-            click.echo("no profiles")
+        _print_envs(info)
 
 
-@profile_group.command(name="set")
-@click.argument("name", required=False)
-@click.option("--none", "clear", is_flag=True, help="Build with no profile.")
+@env_group.command(name="new")
+@click.argument("name")
+@click.option("--copy-from", default=None, help="Start as a copy of this env.")
 @click.option("--folder", type=_FOLDER, default=".", help="The project folder.")
 @_format_option
-def profile_set(name: str | None, clear: bool, folder: Path, fmt: str) -> None:
-    """Choose the profile NAME to build with (or --none)."""
-    if (name is None) == (not clear):
-        raise click.UsageError("give a profile NAME, or --none")
-    if name is not None and name not in api.profiles(folder).names:
-        _fail(api.ApiError(f"there is no profile named {name!r}"), fmt)
+def env_new(name: str, copy_from: str | None, folder: Path, fmt: str) -> None:
+    """Add env NAME (empty, or a copy of --copy-from). It isn't made active."""
     try:
-        info = api.set_profile(folder, None if clear else name)
+        info = api.new_env(folder, name, copy_from=copy_from)
     except api.ApiError as exc:
         _fail(exc, fmt)
     if fmt == "json":
         _emit_json(info.to_dict())
     else:
-        click.echo(f"active profile: {info.active or 'none'}")
+        click.echo(f"added    script/env/{name}.env")
+
+
+@env_group.command(name="delete")
+@click.argument("name")
+@click.option("--folder", type=_FOLDER, default=".", help="The project folder.")
+@_format_option
+def env_delete(name: str, folder: Path, fmt: str) -> None:
+    """Remove env NAME (deleting the active env leaves none active)."""
+    try:
+        info = api.delete_env(folder, name)
+    except api.ApiError as exc:
+        _fail(exc, fmt)
+    if fmt == "json":
+        _emit_json(info.to_dict())
+    else:
+        click.echo(f"removed  script/env/{name}.env")
+
+
+@env_group.command(name="set")
+@click.argument("name", required=False)
+@click.option("--none", "clear", is_flag=True, help="Build with no env.")
+@click.option("--folder", type=_FOLDER, default=".", help="The project folder.")
+@_format_option
+def env_set(name: str | None, clear: bool, folder: Path, fmt: str) -> None:
+    """Choose the env NAME to build with (or --none)."""
+    if (name is None) == (not clear):
+        raise click.UsageError("give an env NAME, or --none")
+    if name is not None and name not in api.envs(folder).names:
+        _fail(api.ApiError(f"there is no env named {name!r}"), fmt)
+    try:
+        info = api.set_env(folder, None if clear else name)
+    except api.ApiError as exc:
+        _fail(exc, fmt)
+    if fmt == "json":
+        _emit_json(info.to_dict())
+    else:
+        click.echo(f"active env: {info.active or 'none'}")
 
 
 @main.group(name="module")
@@ -413,17 +486,23 @@ def move_fragment_cmd(fragment: str, block: str, folder: Path, fmt: str) -> None
 @click.option("--from", "source", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Start from this game variant (.bin).")
 @click.option("--description", default="", help="The project's description.")
 @click.option("--root", type=click.Path(file_okay=False, path_type=Path), default=".", help="Where the .in-reach folder is (or goes).")
+@click.option("--no-build", is_flag=True, help="Don't build the new project once straight away.")
 @_format_option
-def new_cmd(title: str, source: Path | None, description: str, root: Path, fmt: str) -> None:
-    """Create a new gametype project called TITLE."""
+def new_cmd(title: str, source: Path | None, description: str, root: Path, no_build: bool, fmt: str) -> None:
+    """Create a new gametype project called TITLE, and build it once (so it has a .bin and a decompiled view)."""
     try:
-        folder = api.new_gametype_project(root, title, source_variant=source, description=description)
+        folder = api.new_gametype_project(root, title, source_variant=source, description=description, build=not no_build)
     except api.ApiError as exc:
         _fail(exc, fmt)
+    from in_reach.app import new_project
+
+    built = new_project.compiled_variant_path(folder).is_file()
     if fmt == "json":
-        _emit_json({"schema": api.SCHEMA_VERSION, "ok": True, "folder": str(folder)})
+        _emit_json({"schema": api.SCHEMA_VERSION, "ok": True, "folder": str(folder), "built": built})
     else:
         click.echo(str(folder))
+        if not no_build and not built:
+            click.echo("warning: the first build failed -- run `in-reach build` to see why", err=True)
 
 
 @main.command(name="export")

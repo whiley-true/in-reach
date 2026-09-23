@@ -31,7 +31,7 @@ def test_the_hill_rush_example_links_to_the_expected_script(tmp_path: Path) -> N
 
     assert result.ok and result.diagnostics == []
     assert result.compiled == "\n".join([
-        "-- in-reach build: hill_rush  profile=dev  flags=DEV",
+        "-- in-reach build: hill_rush  env=dev  flags=DEV",
         "-- Auto-generated and non-editable. Edit script/ and rebuild.",
         "",
         "declare global.number[1] with network priority low",
@@ -78,13 +78,13 @@ def test_annotation_lines_and_directives_never_reach_the_compiler(tmp_path: Path
 def test_the_profile_decides_which_conditional_code_is_built(tmp_path: Path) -> None:
     hill_rush(tmp_path)
     (tmp_path / "script" / "env" / "release.env").write_text("FLAGS=RELEASE\nSCORE_TO_WIN=50\n", encoding="utf-8")
-    toml = (tmp_path / "script" / "project.toml").read_text(encoding="utf-8").replace('profile = "dev"', 'profile = "release"')
+    toml = (tmp_path / "script" / "project.toml").read_text(encoding="utf-8").replace('env = "dev"', 'env = "release"')
     (tmp_path / "script" / "project.toml").write_text(toml, encoding="utf-8")
 
     result = link(tmp_path)
 
     assert result.ok and "y = 1" not in result.compiled and "global.number[0] == 50" in result.compiled
-    assert result.link_map["profile"] == "release"
+    assert result.link_map["env"] == "release"
 
 
 # -- what is written --------------------------------------------------------------------------------------
@@ -314,7 +314,7 @@ def test_the_link_map_records_owners_pool_usage_and_order(tmp_path: Path) -> Non
     assert link_map["budget"]["global.number"] == {"cap": 12, "used": 2}
     assert link_map["budget"]["traits"] == {"cap": 16, "used": 1}
     assert link_map["order"] == ["SETUP", "HILL_PASS", "WIN_CHECK"]
-    assert link_map["profile"] == "dev" and link_map["flags"] == ["DEV"]
+    assert link_map["env"] == "dev" and link_map["flags"] == ["DEV"]
 
 
 def test_source_lines_point_every_verbatim_line_back_at_its_file(tmp_path: Path) -> None:

@@ -61,26 +61,35 @@ PROJECT_DIR_KEY = "PROJECT_DIR"
 #: a project, a flat folder now rather than nested under a no-longer-meaningful "rvt" subdirectory.
 SCRIPT_DIRNAME = "script"
 SETTINGS_DIRNAME = "settings"
-#: Build profiles for the script (see :mod:`in_reach.app.script_preprocess`): ``script/env/<name>.env``,
-#: the active one's name in ``script/env/active_profile.txt``. Named here, not there, so a new project
-#: can be given its starter profiles without this module importing that one (which imports this).
+#: Envs for the script (see :mod:`in_reach.app.script_preprocess`): ``script/env/<name>.env``,
+#: the active one's name in ``script/env/active_env.txt``. Named here, not there, so a new project
+#: can be given its starter envs without this module importing that one (which imports this).
 ENV_DIRNAME = "env"
 ENV_SUFFIX = ".env"
-ACTIVE_PROFILE_FILENAME = "active_profile.txt"
-#: The profile a new project starts on -- development is the normal state, and a release is something
+ACTIVE_ENV_FILENAME = "active_env.txt"
+#: The env a new project starts on -- development is the normal state, and a release is something
 #: you switch to deliberately.
-DEFAULT_PROFILE = "dev"
+DEFAULT_ENV = "dev"
 _ENV_HEADER = (
-    '# Build profile "{name}" -- one of the environments script/output.txt can be built for.\n'
-    "# The active profile is named in active_profile.txt; pick one from the command palette\n"
-    '# ("Select Build Profile"). Add another by dropping in a <name>.env file.\n'
+    '# Env "{name}" -- one of the environments script/output.txt can be built for.\n'
+    "# The active env is named in active_env.txt; pick one in the IDE's Envs section (or\n"
+    "# `in-reach env set NAME`). Add one there, with `in-reach env new NAME`, or by dropping in a <name>.env file.\n"
     "#\n"
     "# FLAGS switches on the `-- @if NAME` ... `-- @end` blocks in the script (`-- @else` and\n"
     "# `-- @if !NAME` work too). NAME=value lines fill in ${{NAME}} wherever it appears in the script:\n"
     '# a number, a percentage like -100%, a name, or a "quoted string".\n'
 )
-#: Starter profile text by name. Both are inert for a script that uses neither feature.
-STARTER_PROFILES = {
+#: What in-reach 0.3 called ACTIVE_ENV_FILENAME: still read when there is no new one, removed when an env is chosen.
+LEGACY_ACTIVE_ENV_FILENAME = "active_profile.txt"
+
+
+def env_file_text(name: str, body: str = "\nFLAGS=\n") -> str:
+    """A new env file: the explanatory header, then ``body``."""
+    return _ENV_HEADER.format(name=name) + body
+
+
+#: Starter env text by name. Both are inert for a script that uses neither feature.
+STARTER_ENVS = {
     "dev": _ENV_HEADER.format(name="dev") + "\nFLAGS=DEV\n# SCORE_TO_WIN=5\n",
     "release": _ENV_HEADER.format(name="release") + "\nFLAGS=\n# SCORE_TO_WIN=50\n",
 }
@@ -447,9 +456,9 @@ def create_gametype_project(
     (folder / SCRIPT_DIRNAME).mkdir(parents=True)
     env_dir = folder / SCRIPT_DIRNAME / ENV_DIRNAME
     env_dir.mkdir()
-    for profile_name, profile_text in STARTER_PROFILES.items():
-        (env_dir / f"{profile_name}{ENV_SUFFIX}").write_text(profile_text, encoding="utf-8")
-    (env_dir / ACTIVE_PROFILE_FILENAME).write_text(DEFAULT_PROFILE + "\n", encoding="utf-8")
+    for env_name, env_text in STARTER_ENVS.items():
+        (env_dir / f"{env_name}{ENV_SUFFIX}").write_text(env_text, encoding="utf-8")
+    (env_dir / ACTIVE_ENV_FILENAME).write_text(DEFAULT_ENV + "\n", encoding="utf-8")
     (folder / SETTINGS_DIRNAME).mkdir(parents=True)
 
     build_dir = folder / BUILD_DIRNAME

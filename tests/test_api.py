@@ -1,4 +1,4 @@
-"""``in_reach.api`` directly (the CLI tests cover it through the command line): shapes, errors and the profile handling."""
+"""``in_reach.api`` directly (the CLI tests cover it through the command line): shapes, errors and the env handling."""
 import json
 import sys
 from pathlib import Path
@@ -31,7 +31,7 @@ def test_a_diagnostic_prints_like_a_compiler_message() -> None:
 def test_every_result_serialises_to_versioned_json(tmp_path: Path) -> None:
     folder = hill_rush(tmp_path / "p")
 
-    for result in (api.check(folder), api.link(folder, write=False), api.profiles(folder), api.show(folder, "megalo")):
+    for result in (api.check(folder), api.link(folder, write=False), api.envs(folder), api.show(folder, "megalo")):
         data = json.loads(json.dumps(result.to_dict()))
         assert data["schema"] == api.SCHEMA_VERSION
 
@@ -112,29 +112,29 @@ def test_the_decompiled_view_of_a_real_build_shows_the_built_script(tmp_path: Pa
 def test_build_uses_a_profile_for_that_build_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     folder = hill_rush(tmp_path / "p")
     (folder / "script" / "env" / "release.env").write_text("FLAGS=RELEASE\n", encoding="utf-8")
-    script_preprocess.set_active_profile(folder, "dev")
+    script_preprocess.set_active_env(folder, "dev")
     seen = []
 
     class Result:
         success, fatal_errors, errors, warnings, notices, failure, output_path = True, [], [], [], [], None, None
 
     def fake_run_compile(project_dir, f, *, save):
-        seen.append((script_preprocess.active_profile_name(f), save))
+        seen.append((script_preprocess.active_env_name(f), save))
         return Result()
 
     monkeypatch.setattr("in_reach.app.rvt.rvt_bridge.is_available", lambda: True)
     monkeypatch.setattr("in_reach.app.rvt.compile.run_compile", fake_run_compile)
 
-    outcome = api.build(folder, profile="release", dry_run=True)
+    outcome = api.build(folder, env="release", dry_run=True)
 
     assert outcome.success and seen == [("release", False)]
-    assert script_preprocess.active_profile_name(folder) == "dev"  # put back
+    assert script_preprocess.active_env_name(folder) == "dev"  # put back
 
 
 def test_build_restores_the_profile_even_when_the_compile_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     folder = hill_rush(tmp_path / "p")
     (folder / "script" / "env" / "release.env").write_text("FLAGS=RELEASE\n", encoding="utf-8")
-    script_preprocess.set_active_profile(folder, "dev")
+    script_preprocess.set_active_env(folder, "dev")
     monkeypatch.setattr("in_reach.app.rvt.rvt_bridge.is_available", lambda: True)
 
     def boom(*a, **k):
@@ -143,17 +143,17 @@ def test_build_restores_the_profile_even_when_the_compile_raises(tmp_path: Path,
     monkeypatch.setattr("in_reach.app.rvt.compile.run_compile", boom)
 
     with pytest.raises(RuntimeError):
-        api.build(folder, profile="release")
+        api.build(folder, env="release")
 
-    assert script_preprocess.active_profile_name(folder) == "dev"
+    assert script_preprocess.active_env_name(folder) == "dev"
 
 
 def test_build_with_an_unknown_profile_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     folder = hill_rush(tmp_path / "p")
     monkeypatch.setattr("in_reach.app.rvt.rvt_bridge.is_available", lambda: True)
 
-    with pytest.raises(api.ApiError, match="no profile named 'nope'"):
-        api.build(folder, profile="nope")
+    with pytest.raises(api.ApiError, match="no env named 'nope'"):
+        api.build(folder, env="nope")
 
 
 def test_build_merges_every_message_kind_into_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,8 +186,8 @@ def test_the_in_reach_folder_goes_with_the_project_next_to_it(tmp_path: Path) ->
 def test_set_profile_reports_the_new_state(tmp_path: Path) -> None:
     folder = hill_rush(tmp_path / "p")
 
-    assert api.set_profile(folder, "dev").active == "dev"
-    assert api.set_profile(folder, None).active is None
+    assert api.set_env(folder, "dev").active == "dev"
+    assert api.set_env(folder, None).active is None
 
 
 def test_new_gametype_project_without_the_native_module_is_an_environment_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,3 +208,19 @@ def test_new_gametype_project_makes_the_workspace_when_it_is_missing(tmp_path: P
     folder = api.new_gametype_project(tmp_path, "Fresh", source_variant=_JUGGERNAUT)
 
     assert (tmp_path / ".in-reach").is_dir() and folder.parent == tmp_path and (folder / "settings" / "settings.json").is_file()
+
+
+def test_a_new_project_is_built_once_so_its_decompiled_view_exists(tmp_path: Path) -> None:
+    from in_reach.app import apply_settings, new_project, vcs
+    from in_reach.app.rvt import rvt_bridge
+
+    if not (_JUGGERNAUT.is_file() and rvt_bridge.is_available()):
+        pytest.skip("fixture .bin or native module not available")
+
+    folder = api.new_gametype_project(tmp_path, "Fresh", source_variant=_JUGGERNAUT)
+
+    assert new_project.compiled_variant_path(folder).is_file()
+    assert api.show(folder, "rvt").text  # no "nothing has been built yet"
+    assert not apply_settings.settings_have_unapplied_changes(folder)
+    assert not apply_settings.script_has_unapplied_changes(folder)
+    assert vcs.uncommitted_changes(folder) == []  # the build is generated output, not a change to commit

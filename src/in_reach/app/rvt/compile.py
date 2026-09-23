@@ -60,10 +60,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from in_reach.app import logging_setup, new_project, script_preprocess
+from in_reach.app import logging_setup, new_project
 from in_reach.app.blank_variant import resolve_blank_variant
 
 from in_reach.app.script_project import ProjectDiagnostic, is_linked, link, record_counters
+from in_reach.app.script_project import docs as script_docs
 
 from . import decompile, megalo_compiler, resource_text, settings_io, settings_writer, strings_io, strings_writer, template_source
 from .decompile import write_build_snapshot
@@ -218,19 +219,6 @@ def _run_compile_isolated(project_dir: Path, folder: Path, *, save: bool) -> Bui
         result_path.unlink(missing_ok=True)
 
 
-def _preprocess_failure(exc: script_preprocess.PreprocessError) -> BuildResult:
-    """A :class:`BuildResult` for a script or profile the preprocessor rejected. A problem in the script
-    is reported like any compiler error (with its line and column, which preprocessing never shifts); one
-    in an env file names that file, since its line numbers mean nothing to the script's editor."""
-    if exc.path is None:
-        return BuildResult(
-            success=False,
-            errors=[BuildMessage(line=exc.line, col=exc.col + 1, text=exc.message)],  # col: 0- -> 1-based
-            failure="The script couldn't be preprocessed -- see the errors.",
-        )
-    return BuildResult(success=False, failure=f"{exc.path.name}, line {exc.line}: {exc.message}")
-
-
 def _diagnostic_message(diagnostic: ProjectDiagnostic) -> BuildMessage:
     hint = f" ({diagnostic.hint})" if diagnostic.hint else ""
     return BuildMessage(
@@ -240,12 +228,13 @@ def _diagnostic_message(diagnostic: ProjectDiagnostic) -> BuildMessage:
 
 
 def _link_failure(linked) -> BuildResult:
-    """A :class:`BuildResult` for a linked project that couldn't be linked: every problem, located in its file."""
+    """A :class:`BuildResult` for a script that couldn't be linked: every problem, located in its file."""
+    what = "The project couldn't be linked" if is_linked(linked.project.folder) else "The script has errors"
     return BuildResult(
         success=False,
         errors=[_diagnostic_message(d) for d in linked.diagnostics if d.severity == "error"],
         warnings=[_diagnostic_message(d) for d in linked.diagnostics if d.severity == "warning"],
-        failure="The project couldn't be linked -- see the errors.",
+        failure=f"{what} -- see the errors.",
     )
 
 
@@ -272,16 +261,15 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     directly from the GUI process -- see this module's own docstring for why.
     """
     settings_dir = folder / new_project.SETTINGS_DIRNAME
-    script_dir = folder / new_project.SCRIPT_DIRNAME
     settings_path = settings_dir / "settings.json"
 
-    # A linked project (script/project.toml) is built from its blocks and modules: link them first -- the linker
-    # may add trait sets, options and widgets to settings/script_settings.json, which must be there before the
-    # settings are read and applied below.
-    linked = link(folder, write=True) if is_linked(folder) else None
-    if linked is not None and not linked.ok:
+    # Link first -- a script project's blocks and modules, or a single file's annotations (a file with none links to
+    # its preprocessed text unchanged). The linker may add trait sets, options and widgets to
+    # settings/script_settings.json, which must be there before the settings are read and applied below.
+    linked = link(folder, write=True)
+    if not linked.ok:
         return _link_failure(linked)
-    link_map = linked.link_map if linked is not None else None
+    link_map = linked.link_map
 
     try:
         settings = load_game_settings(settings_path)
@@ -301,22 +289,13 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
     mp = variant.multiplayer
     content_header = variant.content_header
     result = BuildResult(success=True)
-    if linked is not None:
-        result.warnings = [_diagnostic_message(d) for d in linked.diagnostics if d.severity == "warning"]
+    result.warnings = [_diagnostic_message(d) for d in linked.diagnostics if d.severity == "warning"]
 
     if mp is not None:
-        script_path = script_dir / decompile.SCRIPT_FILENAME
-        raw_source = script_path.read_text(encoding="utf-8") if script_path.is_file() else ""
-        # Apply the active environment profile (its ${CONSTANTS} and -- @if blocks) *first*: everything
-        # below -- the unchanged-since-decompile check, the in-house compiler, the native fallback -- must
-        # see the text that's actually being built, not the source with its directives still in.
-        if linked is not None:
-            source = linked.compiled  # the linker has already applied the profile to every file
-        else:
-            try:
-                source = script_preprocess.preprocess_project(folder, raw_source)
-            except script_preprocess.PreprocessError as exc:
-                return _preprocess_failure(exc)
+        # The linker has applied the active env (its ${CONSTANTS} and -- @if blocks): everything
+        # below -- the unchanged-since-decompile check, the in-house compiler, the native fallback -- sees the text
+        # that's actually being built, not the source with its directives still in.
+        source = linked.compiled
         # PROMPT.md: "we want to make sure when we compile or decompile a script it processes the
         # code correctly ... i want a working compiler/decompiler we can rely on" -- confirmed by
         # direct testing that mp.compile_script() is not a stable fixed point over its own
@@ -399,7 +378,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 variant = rvt.load(str(variant_source_path))
                 mp = variant.multiplayer
                 content_header = variant.content_header
-                if linked is not None:
+                if is_linked(folder) or link_map.get("resources"):
                     # The native compiler can't create a trait set, option or widget, only refer to one that's there
                     # -- and the linker has just written the ones the project declares. Grow the fresh variant to
                     # match first, or a mistake elsewhere in the script is reported next to a spurious "the maximum
@@ -462,7 +441,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         # A trait set or option a script project declares is named by strings of its own (see resource_text), made now so
         # the reconciliation below adds them to strings.json.
         owned_text: dict[int, str] = {}
-        if linked is not None:
+        if link_map.get("resources"):
             try:
                 owned_text = resource_text.assign_resource_text(
                     mp, resource_text.texts_from_link_map(link_map["resources"])
@@ -495,7 +474,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             except ValueError as exc:
                 return BuildResult(success=False, failure=f"Failed to apply settings: {exc}")
 
-    if linked is not None and mp is not None:
+    if mp is not None:
         # The engine's caps on triggers/conditions/actions are only measurable on the built variant. A dry run
         # reports how close the script is; a real build records the counts in the link map for the budget panel.
         counts = mp.get_full_size_data().counts
@@ -553,5 +532,11 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             result.success = False
             result.failure = f"Saved {out_path} but failed to write build/*.autogenerated.json: {exc}"
             return result
+
+        # The generated documentation follows every build, so build/docs/ always describes what was built.
+        try:
+            script_docs.write_docs(folder, script_docs.build_docs(folder, linked))
+        except Exception:  # noqa: BLE001 -- documentation is never a reason to fail a build that saved
+            _logger.warning("couldn't write build/docs for %s", folder, exc_info=True)
 
     return result

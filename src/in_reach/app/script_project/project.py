@@ -8,7 +8,7 @@
       modules/hill_score/
         module.toml
         hill_score.mgl             a module: any number of .mgl files
-      env/dev.env                  the build profiles (see in_reach.app.script_preprocess)
+      env/dev.env                  the envs (see in_reach.app.script_preprocess)
 
 :func:`load_project` reads all of it and reports every problem it finds -- in a manifest, in a constant, in a
 file's preprocessing or annotations, in the block order -- as a located diagnostic, without stopping at the first.
@@ -90,7 +90,7 @@ class MergedKind:
 class ScriptProject:
     folder: Path
     manifest: ProjectManifest | None = None
-    profile: script_preprocess.Profile | None = None
+    env: script_preprocess.Env | None = None
     constants: dict[str, str] = field(default_factory=dict)
     modules: list[LoadedModule] = field(default_factory=list)
     disabled_modules: list[str] = field(default_factory=list)  # listed with enabled = false: kept, not built
@@ -124,10 +124,11 @@ def is_linked(folder: Path) -> bool:
 
 
 class _Loader:
-    def __init__(self, folder: Path) -> None:
+    def __init__(self, folder: Path, overrides: dict[str, str] | None = None) -> None:
         self.folder = folder
         self.scripts = script_dir(folder)
         self.project = ScriptProject(folder=folder)
+        self.overrides = overrides or {}  # path relative to script/ -> text standing in for the file (an unsaved buffer)
 
     # -- reporting ------------------------------------------------------------------------------------
 
@@ -142,9 +143,15 @@ class _Loader:
     def warn(self, code: str, message: str, file: str, line: int = 0, col: int = 0) -> None:
         self.report("warning", code, message, file, line, col)
 
+    def raw(self, relative: str) -> str:
+        """``relative``'s text, or the override standing in for it. Raises ``OSError``/``UnicodeDecodeError``."""
+        if relative in self.overrides:
+            return self.overrides[relative]
+        return (self.scripts / relative).read_text(encoding="utf-8")
+
     def read(self, relative: str) -> str | None:
         try:
-            return (self.scripts / relative).read_text(encoding="utf-8")
+            return self.raw(relative)
         except FileNotFoundError:
             self.error("file-missing", f"{relative} doesn't exist", relative)
         except (OSError, UnicodeDecodeError) as exc:
@@ -167,7 +174,7 @@ class _Loader:
         self.project.manifest = manifest
         where = positions(text)
 
-        self._load_profile_and_constants(manifest, where)
+        self._load_env_and_constants(manifest, where)
         self._load_modules(manifest, where)
         self._load_blocks()
         self._collect_blocks(manifest, where)
@@ -184,27 +191,30 @@ class _Loader:
         if (self.scripts / packages.LOCK_FILENAME).is_file():
             self.project.diagnostics += packages.verify_modules(self.folder, severity="warning")
 
-    def _load_profile_and_constants(self, manifest: ProjectManifest, where: dict) -> None:
-        name = script_preprocess.active_profile_name(self.folder) or manifest.project.profile
-        profile = None
+    def _load_env_and_constants(self, manifest: ProjectManifest, where: dict) -> None:
+        if manifest.project.profile is not None:
+            line, col = locate(where, ("project", "profile"))
+            self.warn("env-key-renamed", "[project] profile is now called env: rename the key", PROJECT_FILENAME, line, col)
+        name = script_preprocess.active_env_name(self.folder) or manifest.project.env or manifest.project.profile
+        env = None
         if name:
             try:
-                profile = script_preprocess.load_profile(self.folder, name)
+                env = script_preprocess.load_env(self.folder, name)
             except script_preprocess.PreprocessError as exc:
                 file = f"{script_preprocess.ENV_DIRNAME}/{name}{script_preprocess.ENV_SUFFIX}"
-                self.error("profile-invalid", exc.message, file, exc.line, exc.col)
-        self.project.profile = profile
+                self.error("env-invalid", exc.message, file, exc.line, exc.col)
+        self.project.env = env
 
-        constants, problems = base_constants(manifest.constants, profile)
+        constants, problems = base_constants(manifest.constants, env)
         self.project.constants = constants
         for problem in problems:
             line, col = locate(where, ("constants", problem.name))
             self.error(problem.code, problem.message, PROJECT_FILENAME, line, col)
 
     def _process(self, relative: str, owner: str, text: str, constants: dict[str, str]) -> SourceFile:
-        flags = self.project.profile.flags if self.project.profile else frozenset()
+        flags = self.project.env.flags if self.project.env else frozenset()
         try:
-            processed: str | None = script_preprocess.preprocess(text, script_preprocess.Profile("", flags, constants))
+            processed: str | None = script_preprocess.preprocess(text, script_preprocess.Env("", flags, constants))
         except script_preprocess.PreprocessError as exc:
             self.error("preprocess", exc.message, relative, exc.line, exc.col)
             processed = None
@@ -353,7 +363,7 @@ class _Loader:
         for module in self.project.modules:
             order = module.manifest.order
             manifest_file = f"{MODULES_DIRNAME}/{module.name}/{MODULE_FILENAME}"
-            module_where = positions((self.scripts / manifest_file).read_text(encoding="utf-8"))
+            module_where = positions(self.raw(manifest_file))
             source = f"module {module.name} [order]"
             # Not when the module's files failed to load: their fragments are missing because of *that* problem.
             files_loaded = bool(module.files) and all(file.processed is not None for file in module.files)
@@ -405,19 +415,81 @@ class _Loader:
             add(kind_name, spec, "project.toml", PROJECT_FILENAME, where)
         for module in self.project.modules:
             manifest_file = f"{MODULES_DIRNAME}/{module.name}/{MODULE_FILENAME}"
-            module_where = positions((self.scripts / manifest_file).read_text(encoding="utf-8"))
+            module_where = positions(self.raw(manifest_file))
             for kind_name, spec in module.manifest.kinds.items():
                 add(kind_name, spec, f"module {module.name}", manifest_file, module_where)
 
 
-def load_project(folder: Path) -> ScriptProject:
+def load_project(folder: Path, overrides: dict[str, str] | None = None) -> ScriptProject:
     """Loads ``folder``'s script project (``folder`` is the gametype project, not ``script/``).
 
     Never raises for a problem in the project's files; they come back in :attr:`ScriptProject.diagnostics`. A
     folder with no ``script/project.toml`` yields a project with one ``project-missing`` error (check
-    :func:`is_linked` first to tell a single-file project from a broken linked one)."""
+    :func:`is_linked` first to tell a single-file project from a broken linked one, or use :func:`load_script`).
+    ``overrides`` maps a path relative to ``script/`` to text that stands in for that file (unsaved editor buffers)."""
     if not is_linked(folder):
         loader = _Loader(folder)
         loader.error("project-missing", "there is no script/project.toml", PROJECT_FILENAME)
         return loader.project
-    return _Loader(folder).load()
+    return _Loader(folder, overrides).load()
+
+
+SINGLE_FILE = "output.txt"
+SINGLE_BLOCK = "MAIN"
+#: What only a script project can express: how blocks and fragments are cut and ordered, and object kinds.
+_PROJECT_ONLY = frozenset(
+    {"block", "fragment", "loop", "gate", "guard", "guard_end", "preamble", "provides", "traits", "fusion", "assumes"}
+)
+
+
+def load_single_file(folder: Path, text: str | None = None) -> ScriptProject:
+    """``folder``'s ``script/output.txt`` as a project of one block, :data:`SINGLE_BLOCK`, so the model, the linter
+    and the allocator read it the same way they read a script project. ``text`` stands in for the file's content
+    (an unsaved editor buffer).
+
+    The file is preprocessed exactly as a single-file build always has been (the active env, nothing else). An
+    annotation only a project understands is an error; an *unknown* ``-- @name`` is a warning, since before a single
+    file's annotations were read it was just a comment."""
+    loader = _Loader(folder)
+    project = loader.project
+    project.manifest = ProjectManifest()
+    name = script_preprocess.active_env_name(folder)
+    if name:
+        try:
+            project.env = script_preprocess.load_env(folder, name)
+        except script_preprocess.PreprocessError as exc:
+            loader.error("env-invalid", exc.message, f"{script_preprocess.ENV_DIRNAME}/{name}{script_preprocess.ENV_SUFFIX}", exc.line, exc.col)
+            return project
+    if project.env is not None:
+        project.constants = dict(project.env.constants)
+
+    if text is None:
+        path = loader.scripts / SINGLE_FILE
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    try:
+        processed: str | None = script_preprocess.preprocess(text, project.env)
+    except script_preprocess.PreprocessError as exc:
+        loader.error("preprocess", exc.message, SINGLE_FILE, exc.line, exc.col)
+        processed = None
+    annotations = parse_annotations(processed) if processed is not None else Annotations()
+    for diagnostic in annotations.diagnostics:
+        severity = "warning" if diagnostic.message.startswith("unknown annotation") else "error"
+        loader.report(severity, "annotation", diagnostic.message, SINGLE_FILE, diagnostic.span.start_line, diagnostic.span.start_col)
+    for annotation in annotations.items:
+        if annotation.kind in _PROJECT_ONLY:
+            loader.error(
+                "project-only", f"@{annotation.kind.replace('_', '-')} belongs in a script project (Convert to Project to use it)",
+                SINGLE_FILE, annotation.span.start_line, annotation.span.start_col,
+            )
+    source = SourceFile(path=SINGLE_FILE, owner=f"block:{SINGLE_BLOCK}", text=text, processed=processed, annotations=annotations)
+    project.blocks[SINGLE_BLOCK] = LoadedBlock(name=SINGLE_BLOCK, file=source)
+    project.order = [SINGLE_BLOCK]
+    return project
+
+
+def load_script(folder: Path, overrides: dict[str, str] | None = None) -> ScriptProject:
+    """Whichever of the two ``folder`` is: its script project, or its single file as a one-block project. See
+    :func:`load_project` for ``overrides``."""
+    if is_linked(folder):
+        return load_project(folder, overrides)
+    return load_single_file(folder, (overrides or {}).get(SINGLE_FILE))

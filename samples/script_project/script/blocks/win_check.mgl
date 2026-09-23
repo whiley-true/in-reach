@@ -1,4 +1,5 @@
--- Ordinary Megalo, with a constant from project.toml.
+-- Ordinary Megalo, with a constant from project.toml. @doc lines are documentation: `in-reach docs` collects them.
+-- @doc Ends the round as soon as anyone reaches SCORE_TO_WIN points.
 for each player do
    if current_player.score >= ${SCORE_TO_WIN} then
       game.end_round()

@@ -116,7 +116,14 @@ def apply_description_string(rvt, mp, description_string: str) -> str | None:
     (GameSettings.meta.description) -- holds a gametype's real, human-readable description.
     Multi-language content still has to go through settings/strings.json -- this only ever writes
     English, matching ReachString.text/TeamData.name's own "convenience accessor" precedent.
-    Returns an over-budget-table warning, same convention as apply_strings()."""
+    Returns an over-budget-table warning, same convention as apply_strings().
+
+    A blank description never creates an entry: a variant with no description strings at all (a
+    personal variant saved without one) decompiles to an empty ``meta.description`` in
+    ``strings.json``, and giving it an entry of blank text here would make every build's snapshot
+    differ from ``settings/`` -- Apply would read "unapplied" however often it was clicked."""
+    if not description_string and len(mp.localized_desc) == 0:
+        return None
     return _apply_string_table(rvt, mp.localized_desc, [{"index": 0, "text": {"english": description_string}}], "metadata.description_string", grow=True)
 
 

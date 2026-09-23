@@ -2,7 +2,7 @@
 name = "sample"
 
 [constants]
-# Placeholders like ${SCORE_TO_WIN} are replaced everywhere in the script. A build profile
+# Placeholders like ${SCORE_TO_WIN} are replaced everywhere in the script. An env
 # (script/env/<name>.env) can override any of these -- put SCORE_TO_WIN=50 in release.env
 # and a release build wins at 50 while a dev build wins at 10.
 SCORE_TO_WIN = 10

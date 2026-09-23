@@ -23,6 +23,7 @@ ends the round at 10 points.
 | `blocks/setup.mgl` | a block file; `@number` storage the linker allocates a slot for |
 | `blocks/win_check.mgl` | plain Megalo using a constant (`${SCORE_TO_WIN}`) |
 | `modules/scoring/` | `@ptimer` storage, and a `@fragment` (a loop body added to a block) |
+| `README.md`, `-- @doc`, `-- @tags` | documentation: `in-reach docs` writes `build/docs/overview.md` from them |
 | `modules/speed_boost/` | `@trait` -- a trait set created and named for you -- and a second fragment that is fused with the first |
 
 ## Things to try
@@ -30,7 +31,7 @@ ends the round at 10 points.
 - Change `value_150` in `speed_boost.mgl` to `value_200` and Apply: the trait set in
   `settings/script_settings.json` follows.
 - Change `SCORE_TO_WIN` in `project.toml`, or put `SCORE_TO_WIN=50` in `script/env/release.env` and choose the
-  `release` profile ("Select Build Profile" in the command palette): the release build wins at 50.
+  `release` env (the Envs section of the Scripts view, or `in-reach env set release`): the release build wins at 50.
 - Add `-- @fusion never` under `-- @loop player` in one fragment: the Scripts view then shows them as two
   triggers, and says why.
 - Put a mistake in `win_check.mgl` (say `game.no_such_action()`): Apply reports it at that file and line.

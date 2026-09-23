@@ -57,6 +57,35 @@ def create_project(folder: Path) -> list[Path]:
     return [manifest_path, block]
 
 
+BACKUPS_DIRNAME = "backups"
+
+
+def backup_script(folder: Path, workspace: Path, *, stamp: str | None = None) -> Path:
+    """Copies ``folder``'s whole ``script/`` into ``<workspace>/backups/<project id>/script-<stamp>/`` and returns that
+    folder. ``workspace`` is the ``.in-reach`` folder beside the project -- outside the project, so the copy is in
+    neither the project's own history nor its search. ``stamp`` defaults to the current local time
+    (``YYYYmmdd-HHMMSS``); a copy that would land on an existing one gets a ``-2``, ``-3`` ... suffix.
+
+    Raises:
+        ValueError: The project has no ``script/`` folder."""
+    import shutil
+    from datetime import datetime
+
+    scripts = script_dir(folder)
+    if not scripts.is_dir():
+        raise ValueError("this project has no script/ folder")
+    stamp = stamp or datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = workspace / BACKUPS_DIRNAME / folder.name
+    target = base / f"script-{stamp}"
+    suffix = 2
+    while target.exists():
+        target = base / f"script-{stamp}-{suffix}"
+        suffix += 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(scripts, target)
+    return target
+
+
 def create_module(folder: Path, name: str) -> list[Path]:
     """Adds module ``name`` to ``folder``'s script project: ``modules/<name>/module.toml`` and ``<name>.mgl``, and a
     ``[[modules]]`` entry in ``project.toml`` (appended, so the rest of that file is untouched). Returns the files

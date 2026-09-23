@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from in_reach.app import script_preprocess
 from in_reach.app.new_project import BUILD_DIRNAME, SCRIPT_DIRNAME
 from in_reach.app.rvt.decompile import SCRIPT_FILENAME
 from in_reach.app.script_project import is_linked, link
@@ -63,15 +62,15 @@ def write_output_view(folder: Path) -> Path:
     except OSError:
         script_text = ""
 
-    # What the compiler is actually given: the active profile's constants and blocks applied. If the
-    # profile or script can't be preprocessed, show the source as written with the reason on top, rather
-    # than raising -- this is the view a user opens to find out what's wrong.
+    # What the compiler is actually given: the active env applied, and the declare/alias lines the file's
+    # annotations need (see the linker's "single file"). If it can't be linked, show the source as written with
+    # the reasons on top, rather than raising -- this is the view a user opens to find out what's wrong.
     banner = _BANNER
-    try:
-        script_text = script_preprocess.preprocess_project(folder, script_text)
-    except script_preprocess.PreprocessError as exc:
-        where = f"line {exc.line}" if exc.path is None else f"{exc.path.name}, line {exc.line}"
-        banner += f"-- NOT PREPROCESSED ({where}): {exc.message}\n\n"
+    linked = link(folder, write=False)
+    if linked.ok:
+        script_text = linked.compiled
+    else:
+        banner += "".join(f"-- NOT LINKED: {d.file}:{d.line}: {d.message} [{d.code}]\n" for d in linked.errors) + "\n"
 
     view_path = output_view_path(folder)
     view_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +99,7 @@ DECOMPILED_FILENAME = "Decompiled.txt"
 
 _DECOMPILED_BANNER = (
     "-- This file is auto-generated and non-editable: the script of the built .bin as RVT shows it -- no modules,\n"
-    "-- no profile, no annotations. It's provided for reference and debugging. Edit script/ and rebuild.\n\n"
+    "-- no env, no annotations. It's provided for reference and debugging. Edit script/ and rebuild.\n\n"
 )
 
 

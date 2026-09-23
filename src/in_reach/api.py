@@ -27,6 +27,7 @@ from pathlib import Path
 
 from in_reach.app import new_project, output_view, script_preprocess
 from in_reach.app import project as project_module
+from in_reach.app.script_project import docs as _docs
 from in_reach.app.script_project import edit as _edit
 from in_reach.app.script_project import packages as _packages
 from in_reach.app.script_project import (
@@ -38,9 +39,9 @@ from in_reach.app.script_project import (
     load_project,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 #: Bumped when a function here changes incompatibly; ``in-reach-ide`` states the range it works with.
-API_VERSION = 1
+API_VERSION = 2
 
 EXIT_OK = 0
 EXIT_PROJECT = 1
@@ -134,12 +135,24 @@ class ShowResult:
 
 
 @dataclass
-class ProfileInfo:
+class EnvDetails:
+    """One env file: its flags and constants, or -- if it doesn't parse -- ``error`` (and nothing else)."""
+
+    name: str
+    path: str  # relative to the project folder
+    flags: list[str] = field(default_factory=list)
+    constants: dict[str, str] = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass
+class EnvInfo:
     names: list[str]
     active: str | None
+    details: list[EnvDetails] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"schema": SCHEMA_VERSION, "profiles": self.names, "active": self.active}
+        return {"schema": SCHEMA_VERSION, "envs": self.names, "active": self.active, "details": [asdict(d) for d in self.details]}
 
 
 # -- conversions ---------------------------------------------------------------------------------------------
@@ -157,6 +170,14 @@ def _script_project(folder: Path) -> Path:
     folder = Path(folder)
     if not is_linked(folder):
         raise ApiError(f"{folder} is not a script project (there is no script/project.toml in it).")
+    return folder
+
+
+def _scripted(folder: Path) -> Path:
+    """``folder``, if it has a script to check: a script project, or a single ``script/output.txt``."""
+    folder = Path(folder)
+    if not is_linked(folder) and not (folder / new_project.SCRIPT_DIRNAME / "output.txt").is_file():
+        raise ApiError(f"{folder} has no script (neither script/project.toml nor script/output.txt).")
     return folder
 
 
@@ -186,41 +207,98 @@ def _link_outcome(folder: Path, write: bool) -> LinkOutcome:
 
 
 def check(folder: Path) -> CheckResult:
-    """Everything wrong with a script project (project model, lint, allocation, fusion), writing nothing."""
-    outcome = _link_outcome(_script_project(folder), write=False)
+    """Everything wrong with the project's script (annotations, lint, allocation; for a script project also its
+    modules and fusion), writing nothing. A single ``script/output.txt`` is checked as a project of one block."""
+    outcome = _link_outcome(_scripted(folder), write=False)
     return CheckResult(outcome.ok, outcome.diagnostics, outcome.link_map, outcome.link_result)
 
 
+def check_text(folder: Path, path: str | Path, text: str) -> CheckResult:
+    """:func:`check` with ``text`` standing in for the file at ``path`` -- an editor's unsaved buffer, for checking as you
+    type. ``path`` is relative to ``script/`` (``output.txt``, ``blocks/setup.mgl``) or absolute inside it. Writes nothing.
+
+    An env file (``env/<name>.env``) is checked on its own: whether it parses. Any other file is checked as part of the
+    whole script, so the result holds every diagnostic of the project, not only ``path``'s."""
+    folder = _scripted(folder)
+    scripts = folder / new_project.SCRIPT_DIRNAME
+    relative = Path(path)
+    if relative.is_absolute():
+        try:
+            relative = relative.resolve().relative_to(scripts.resolve())
+        except ValueError as exc:
+            raise ApiError(f"{path} isn't inside {scripts}") from exc
+    key = relative.as_posix()
+    if key.startswith(f"{script_preprocess.ENV_DIRNAME}/") and key.endswith(script_preprocess.ENV_SUFFIX):
+        try:
+            script_preprocess.parse_env(relative.stem, text)
+        except script_preprocess.PreprocessError as exc:
+            problem = Diagnostic("error", "env-invalid", exc.message, key, exc.line, exc.col + 1 if exc.line else 0)
+            return CheckResult(False, [problem])
+        return CheckResult(True)
+    result = _link(folder, write=False, overrides={key: text})
+    diagnostics = [_from_project_diagnostic(d) for d in result.diagnostics]
+    return CheckResult(result.ok, diagnostics, result.link_map, result)
+
+
 def link(folder: Path, *, write: bool = True) -> LinkOutcome:
-    """Assembles ``build/Compiled.txt`` and its link map (and any settings the project declares); no compile."""
-    return _link_outcome(_script_project(folder), write)
+    """Assembles the script the compiler is given and its link map (and any settings the script declares); no
+    compile. A script project's is written to ``build/Compiled.txt``; a single file's goes in the link map only,
+    ``Compiled.txt`` being :func:`show`'s ``rvt+`` view of it."""
+    return _link_outcome(_scripted(folder), write)
+
+
+# -- documentation -------------------------------------------------------------------------------------------
+
+
+@dataclass
+class DocsResult:
+    """The script's documentation (:class:`~in_reach.app.script_project.docs.Docs`), the Markdown overview made from
+    it, and the files written (relative to the project folder; empty when nothing changed or nothing was written)."""
+
+    docs: _docs.Docs
+    markdown: str
+    written: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"schema": SCHEMA_VERSION, "ok": True, "docs": self.docs.to_dict(), "written": self.written}
+
+
+def docs(folder: Path, *, write: bool = True, checked: CheckResult | None = None) -> DocsResult:
+    """The documentation of the project's script -- ``@doc`` notes, ``@tags``, READMEs, and what the linker decided --
+    and, with ``write``, ``build/docs/overview.md`` and ``overview.json``. Works for a single file and a script project
+    alike, and for a script that doesn't link right now (slots and budget then come from the last link). ``checked`` is
+    a :func:`check` of the same folder just made, to reuse rather than link again."""
+    folder = _scripted(folder)
+    gathered = _docs.build_docs(folder, checked.link_result if checked is not None else None)
+    written = _docs.write_docs(folder, gathered) if write else []
+    return DocsResult(gathered, _docs.render_markdown(gathered), [p.relative_to(folder).as_posix() for p in written])
 
 
 # -- building ------------------------------------------------------------------------------------------------
 
 
-def build(folder: Path, *, profile: str | None = None, dry_run: bool = False) -> BuildOutcome:
+def build(folder: Path, *, env: str | None = None, dry_run: bool = False) -> BuildOutcome:
     """Builds the project's gametype ``.bin`` (``build/dist/<name>.bin``); ``dry_run`` compiles and reports everything but
-    saves nothing. ``profile`` builds with that profile for this call only.
+    saves nothing. ``env`` builds with that env for this call only.
 
     Raises:
-        ApiError: The native extension isn't available (exit code 2), or the profile doesn't exist."""
+        ApiError: The native extension isn't available (exit code 2), or the env doesn't exist."""
     from in_reach.app.rvt import rvt_bridge
     from in_reach.app.rvt.compile import run_compile
 
     folder = Path(folder)
     if not rvt_bridge.is_available():
         raise ApiError("the native _reachvarianttool module isn't available for this Python", EXIT_ENVIRONMENT)
-    previous = script_preprocess.active_profile_name(folder)
-    if profile is not None:
-        if profile not in script_preprocess.list_profiles(folder):
-            raise ApiError(f"there is no profile named {profile!r} (have: {', '.join(script_preprocess.list_profiles(folder)) or 'none'})")
-        script_preprocess.set_active_profile(folder, profile)
+    previous = script_preprocess.active_env_name(folder)
+    if env is not None:
+        if env not in script_preprocess.list_envs(folder):
+            raise ApiError(f"there is no env named {env!r} (have: {', '.join(script_preprocess.list_envs(folder)) or 'none'})")
+        script_preprocess.set_active_env(folder, env)
     try:
         result = run_compile(_project_dir(folder), folder, save=not dry_run)
     finally:
-        if profile is not None and previous != profile:
-            script_preprocess.set_active_profile(folder, previous)
+        if env is not None and previous != env:
+            script_preprocess.set_active_env(folder, previous)
     diagnostics = [
         *(_from_build_message("error", m) for m in [*result.fatal_errors, *result.errors]),
         *(_from_build_message("warning", m) for m in result.warnings),
@@ -248,9 +326,9 @@ def export(folder: Path, out: Path) -> BuildOutcome:
 def show(folder: Path, view: str) -> ShowResult:
     """The project's script as one of :data:`VIEWS`:
 
-    * ``rvt`` -- what RVT shows: the built ``.bin`` decompiled, no modules, no profile (``build/Decompiled.txt``). Needs
+    * ``rvt`` -- what RVT shows: the built ``.bin`` decompiled, no modules, no env (``build/Decompiled.txt``). Needs
       a build and the native module.
-    * ``rvt+`` -- the same script before it is compiled, with the profile applied: ``build/Compiled.txt``.
+    * ``rvt+`` -- the same script before it is compiled, with the env applied: ``build/Compiled.txt``.
     * ``megalo`` -- the source as written: ``script/output.txt``, or every block and module file of a script project."""
     folder = Path(folder)
     if view not in VIEWS:
@@ -282,7 +360,7 @@ def _megalo_source(folder: Path) -> str:
     return "\n".join(parts)
 
 
-# -- scaffolding and profiles --------------------------------------------------------------------------------
+# -- scaffolding and envs --------------------------------------------------------------------------------
 
 
 def create_script_project(folder: Path) -> list[str]:
@@ -294,6 +372,18 @@ def create_script_project(folder: Path) -> list[str]:
     return [p.relative_to(folder).as_posix() for p in written]
 
 
+def backup_script(folder: Path) -> Path:
+    """Copies the project's ``script/`` to ``.in-reach/backups/<project id>/script-<time>/`` (beside the project, outside
+    its history) and returns where -- what a front end offers before :func:`create_script_project`, which is experimental."""
+    from in_reach.app.script_project.scaffold import backup_script as _backup
+
+    folder = Path(folder)
+    try:
+        return _backup(folder, _project_dir(folder))
+    except (ValueError, OSError) as exc:
+        raise ApiError(str(exc)) from exc
+
+
 def new_script_module(folder: Path, name: str) -> list[str]:
     """Adds module ``name`` to a script project; returns the files written (relative to ``folder``)."""
     try:
@@ -303,21 +393,57 @@ def new_script_module(folder: Path, name: str) -> list[str]:
     return [p.relative_to(folder).as_posix() for p in written]
 
 
-def profiles(folder: Path) -> ProfileInfo:
-    return ProfileInfo(script_preprocess.list_profiles(Path(folder)), script_preprocess.active_profile_name(Path(folder)))
+def envs(folder: Path) -> EnvInfo:
+    """The project's envs (``script/env/<name>.env``), which one is active, and what each holds."""
+    folder = Path(folder)
+    details = []
+    for name in script_preprocess.list_envs(folder):
+        path = script_preprocess.env_path(folder, name)
+        relative = path.relative_to(folder).as_posix()
+        try:
+            env = script_preprocess.load_env(folder, name)
+        except script_preprocess.PreprocessError as exc:
+            details.append(EnvDetails(name, relative, error=f"line {exc.line}: {exc.message}" if exc.line else exc.message))
+            continue
+        details.append(EnvDetails(name, relative, sorted(env.flags), dict(env.constants)))
+    return EnvInfo([d.name for d in details], script_preprocess.active_env_name(folder), details)
 
 
-def set_profile(folder: Path, name: str | None) -> ProfileInfo:
-    """Makes ``name`` (``None``: no profile) the profile the project builds with."""
+def new_env(folder: Path, name: str, *, copy_from: str | None = None) -> EnvInfo:
+    """Adds env ``name`` -- a copy of ``copy_from``, or empty (no flags, no constants) -- without making it active."""
     try:
-        script_preprocess.set_active_profile(Path(folder), name)
+        script_preprocess.create_env(Path(folder), name, copy_from=copy_from)
     except (ValueError, OSError) as exc:
         raise ApiError(str(exc)) from exc
-    return profiles(folder)
+    return envs(folder)
 
 
-def new_gametype_project(root: Path, title: str, *, source_variant: Path | None = None, description: str = "") -> Path:
+def delete_env(folder: Path, name: str) -> EnvInfo:
+    """Removes env ``name``; deleting the active env leaves none active."""
+    try:
+        script_preprocess.delete_env(Path(folder), name)
+    except (ValueError, OSError) as exc:
+        raise ApiError(str(exc)) from exc
+    return envs(folder)
+
+
+def set_env(folder: Path, name: str | None) -> EnvInfo:
+    """Makes ``name`` (``None``: no env) the env the project builds with."""
+    try:
+        script_preprocess.set_active_env(Path(folder), name)
+    except (ValueError, OSError) as exc:
+        raise ApiError(str(exc)) from exc
+    return envs(folder)
+
+
+def new_gametype_project(
+    root: Path, title: str, *, source_variant: Path | None = None, description: str = "", build: bool = True
+) -> Path:
     """Creates a gametype project at ``<root>/<id>`` (making ``<root>/.in-reach`` if it is missing); returns its folder.
+
+    With ``build`` (the default) the new project is built once straight away (:func:`initial_build`), so it starts with
+    a ``.bin``, its decompiled view and its documentation, like any project that has been applied. A build that fails
+    leaves the project as created (see :func:`initial_build`).
 
     Raises:
         ApiError: The native extension isn't available (exit code 2) -- a new project is made by decompiling a game
@@ -333,7 +459,25 @@ def new_gametype_project(root: Path, title: str, *, source_variant: Path | None 
         folder, _warning = new_project.create_gametype_project(project_dir, title, description, source_variant)
     except (ValueError, OSError) as exc:
         raise ApiError(str(exc)) from exc
+    if build:
+        initial_build(folder)
     return folder
+
+
+def initial_build(folder: Path) -> BuildOutcome:
+    """A new project's first build: what makes ``build/dist/<name>.bin`` -- and so the decompiled view, the build
+    snapshot and ``build/docs/`` -- exist from the start. An untouched script is recognised as unchanged, so this is
+    the base variant with the project's settings applied. Never raises for a failed build (the project is still
+    usable, and Apply reports the same problem); the outcome says what happened.
+
+    Raises:
+        ApiError: The native extension isn't available (exit code 2)."""
+    outcome = build(folder)
+    if not outcome.success:
+        import logging
+
+        logging.getLogger("in_reach").warning("the first build of %s failed: %s", folder, outcome.failure)
+    return outcome
 
 
 def prepare_workspace(root: Path | None = None) -> Path:

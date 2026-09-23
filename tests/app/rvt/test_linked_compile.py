@@ -298,9 +298,13 @@ def test_an_option_is_usable_from_the_script_by_its_alias(tmp_path: Path) -> Non
 def test_the_shipped_sample_project_builds_and_fuses_its_two_modules(tmp_path: Path) -> None:
     import shutil
 
+    from in_reach.app.script_project.edit import set_module_enabled
+
     sample = Path(__file__).parents[3] / "samples" / "script_project" / "script"
     project_dir, folder = _new_project(tmp_path)
     shutil.copytree(sample, folder / "script", dirs_exist_ok=True)
+    for module in ("scoring", "speed_boost"):  # the sample ships with them switched off
+        set_module_enabled(folder, module, True)
 
     result = compile_module._run_compile_in_process(project_dir, folder, save=True)
 

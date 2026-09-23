@@ -18,7 +18,7 @@ An annotation is a comment that *starts its line* (after indentation) with ``@``
 ordinary comment. Arguments are separated by whitespace; a ``"quoted string"`` or a ``{braced group}`` is one
 argument even with spaces inside. A second ``--`` starts a free-text **note** for the reader, kept on the
 annotation and otherwise ignored. (``TO_IMPLEMENT`` §4's examples put such prose straight after the arguments;
-here it needs the ``--``.) ``@if`` / ``@else`` / ``@end`` are not annotations -- they are build-profile
+here it needs the ``--``.) ``@if`` / ``@else`` / ``@end`` are not annotations -- they are env
 directives (:mod:`in_reach.app.script_preprocess`) and are skipped.
 
 What each one means
@@ -53,6 +53,8 @@ Fragments -- a loop body that the linker may merge with its neighbours (``TO_IMP
 Documentation:
 
 - ``@doc text ...`` (the whole rest of the line is text), ``@see TAG``, ``@assumes BLOCK``.
+- ``@tags a, b`` -- what the file is about (commas or spaces between tags; the same vocabulary as ``module.toml``'s
+  ``tags``).
 
 Errors
 ------
@@ -80,7 +82,7 @@ _LINE = re.compile(r"^(?P<indent>[ \t]*)--[ \t]*@(?P<name>[A-Za-z][A-Za-z0-9_-]*
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INT = re.compile(r"-?\d+")
 
-#: Build-profile directives, handled by ``script_preprocess`` -- not annotations.
+#: Env directives, handled by ``script_preprocess`` -- not annotations.
 _DIRECTIVES = frozenset({"if", "else", "end"})
 #: Words that can't be the name of something declared here, because it becomes an ``alias``.
 _KEYWORDS = RESERVED_NAMES | frozenset(
@@ -224,12 +226,19 @@ class AssumesAnnotation(_Annotation):
     block: str
 
 
+class TagsAnnotation(_Annotation):
+    """``@tags scoring, hud`` -- what the file is about, for finding, grouping and (later) checking it."""
+
+    kind: Literal["tags"] = "tags"
+    tags: list[str]
+
+
 Annotation = Annotated[
     Union[
         StorageAnnotation, BitfieldAnnotation, TraitAnnotation, OptionAnnotation, WidgetAnnotation, LabelAnnotation,
         BlockAnnotation, FragmentAnnotation, LoopAnnotation, GateAnnotation, GuardAnnotation, GuardEndAnnotation,
         PreambleAnnotation, ProvidesAnnotation, TraitsAnnotation, FusionAnnotation,
-        DocAnnotation, SeeAnnotation, AssumesAnnotation,
+        DocAnnotation, SeeAnnotation, AssumesAnnotation, TagsAnnotation,
     ],
     Field(discriminator="kind"),
 ]
@@ -677,9 +686,16 @@ def _doc(line: _Line) -> DocAnnotation:
     return DocAnnotation(span=line.span(line.name_col, line.line_end), text=text)
 
 
+_SEE_TARGET = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+
+
 def _see(line: _Line) -> SeeAnnotation:
-    _exactly(line, 1, "a tag")
-    return SeeAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, tag=_ident(line, line.tokens[0], "a tag"))
+    """``@see TARGET``: a tag, a block, a module, a fragment (``module.name``) or a declared name."""
+    _exactly(line, 1, "a tag, block, module, fragment or name")
+    token = line.tokens[0]
+    if token.kind != "word" or not _SEE_TARGET.fullmatch(token.text):
+        raise line.problem(f"{token.text!r} isn't something @see can point at", token)
+    return SeeAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, tag=token.text)
 
 
 def _assumes(line: _Line) -> AssumesAnnotation:
@@ -687,6 +703,25 @@ def _assumes(line: _Line) -> AssumesAnnotation:
     return AssumesAnnotation(
         span=line.span(line.name_col, line.line_end), note=line.note, block=_ident(line, line.tokens[0], "a block name")
     )
+
+
+_TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+
+
+def _tags(line: _Line) -> TagsAnnotation:
+    tags: list[str] = []
+    for token in line.tokens:
+        for part in token.text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if token.kind != "word" or not _TAG.fullmatch(part):
+                raise line.problem(f"{part!r} isn't a tag (letters, digits, '_' and '-')", token)
+            if part not in tags:
+                tags.append(part)
+    if not tags:
+        raise line.problem("@tags needs at least one tag: @tags scoring, hud")
+    return TagsAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, tags=tags)
 
 
 _INTERPRETERS = {
@@ -709,6 +744,7 @@ _INTERPRETERS = {
     "doc": _doc,
     "see": _see,
     "assumes": _assumes,
+    "tags": _tags,
 }
 
 #: Names whose whole remainder is prose or an expression, so ``--`` inside isn't a note delimiter.

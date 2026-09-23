@@ -129,14 +129,14 @@ def test_build_profile_directives_are_a_reason_to_ask(folder: Path) -> None:
 
     plan = script_sync.plan_pull(folder, before, after)
 
-    assert plan == script_sync.PullPlan(needed=True, reasons=(PullReason.PROFILE_DIRECTIVES,))
+    assert plan == script_sync.PullPlan(needed=True, reasons=(PullReason.ENV_DIRECTIVES,))
 
 
 def test_a_constant_placeholder_counts_as_a_directive(folder: Path) -> None:
     _write_script(folder, "global.number[0] = ${LIMIT}\n")
     before, after = _snapshots(folder, built="global.number[0] = 5\n", rvt="global.number[0] = 6\n")
 
-    assert PullReason.PROFILE_DIRECTIVES in script_sync.plan_pull(folder, before, after).reasons
+    assert PullReason.ENV_DIRECTIVES in script_sync.plan_pull(folder, before, after).reasons
 
 
 def test_comments_are_a_reason_to_ask(folder: Path) -> None:
@@ -163,7 +163,7 @@ def test_all_the_reasons_are_reported_together(folder: Path) -> None:
 
     reasons = script_sync.plan_pull(folder, before, after).reasons
 
-    assert reasons == (PullReason.UNAPPLIED_EDITS, PullReason.COMMENTS, PullReason.PROFILE_DIRECTIVES)
+    assert reasons == (PullReason.UNAPPLIED_EDITS, PullReason.COMMENTS, PullReason.ENV_DIRECTIVES)
 
 
 def test_output_txt_that_already_says_what_rvt_says_needs_no_pull(folder: Path) -> None:

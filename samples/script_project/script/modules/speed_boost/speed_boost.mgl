@@ -2,6 +2,7 @@
 -- alias for it in the built script. Change the value and rebuild: the entry follows.
 -- name and desc are what the game shows for it (leave them out and the name is "t_fast").
 -- @trait t_fast { name = "Fast", desc = "50% faster", movement_speed = "value_150" }
+-- @doc The traits every player has, all game.
 
 -- Same block and loop as scoring's fragment, so the two are fused into one trigger.
 -- @fragment TICK.boost

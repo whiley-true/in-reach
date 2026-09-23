@@ -1,5 +1,8 @@
 -- A block is a file in blocks/. This one runs once, when the game starts.
+-- @tags setup
+
 -- @number g_started priority=low
+-- @doc 1 once the game has started.
 on init: do
    g_started = 1
 end

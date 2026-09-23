@@ -538,56 +538,56 @@ def test_create_gametype_project_stamps_its_first_snapshot_as_gametype_init(proj
     assert snapshot.stamp_message == "gametype init"
 
 
-# -- starter build profiles (script/env) -----------------------------------------------------------------------
+# -- starter envs (script/env) -----------------------------------------------------------------------
 
 
 def test_a_new_project_starts_with_dev_and_release_profiles(project_dir: Path) -> None:
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
-    assert script_preprocess.list_profiles(folder) == ["dev", "release"]
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
+    assert script_preprocess.list_envs(folder) == ["dev", "release"]
 
 
 def test_a_new_project_starts_on_the_dev_profile(project_dir: Path) -> None:
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
-    assert script_preprocess.active_profile_name(folder) == new_project.DEFAULT_PROFILE == "dev"
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
+    assert script_preprocess.active_env_name(folder) == new_project.DEFAULT_ENV == "dev"
 
 
 def test_the_starter_profiles_are_valid_and_differ_only_in_their_flags(project_dir: Path) -> None:
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
-    dev = script_preprocess.load_profile(folder, "dev")
-    release = script_preprocess.load_profile(folder, "release")
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
+    dev = script_preprocess.load_env(folder, "dev")
+    release = script_preprocess.load_env(folder, "release")
     assert dev.flags == {"DEV"} and release.flags == frozenset()
     assert dev.constants == {} and release.constants == {}  # example constants are only commented out
 
 
 def test_the_starter_profiles_explain_themselves(project_dir: Path) -> None:
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
     text = (folder / "script" / "env" / "dev.env").read_text(encoding="utf-8")
-    assert "FLAGS" in text and "-- @if" in text and "${NAME}" in text and "Select Build Profile" in text
+    assert "FLAGS" in text and "-- @if" in text and "${NAME}" in text and "in-reach env set" in text
 
 
 def test_a_script_using_neither_feature_is_unaffected_by_the_starter_profiles(project_dir: Path) -> None:
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
     source = "if global.number[0] == 1 then\n   game.end_round()\nend\n"
     assert script_preprocess.preprocess_project(folder, source) == source
 
 
 def test_a_dev_block_works_in_a_new_project_without_any_setup(project_dir: Path) -> None:
     """The reason dev is the default: writing `-- @if DEV` in a fresh project must do something."""
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
     out = script_preprocess.preprocess_project(folder, "-- @if DEV\ndebug()\n-- @end\n")
     assert "debug()" in out
-    script_preprocess.set_active_profile(folder, "release")
+    script_preprocess.set_active_env(folder, "release")
     assert "debug()" not in script_preprocess.preprocess_project(folder, "-- @if DEV\ndebug()\n-- @end\n")
 
 
 def test_the_starter_profile_files_are_part_of_the_initial_snapshot(project_dir: Path) -> None:
     from in_reach.app import vcs
 
-    folder, _ = new_project.create_gametype_project(project_dir, "Profiles")
+    folder, _ = new_project.create_gametype_project(project_dir, "Envs")
     assert vcs.uncommitted_changes(folder) == []  # nothing left over: the env files went in with the rest
 
 
 def test_the_profile_names_this_module_scaffolds_are_the_ones_script_preprocess_reads() -> None:
     assert script_preprocess.ENV_DIRNAME == new_project.ENV_DIRNAME
     assert script_preprocess.ENV_SUFFIX == new_project.ENV_SUFFIX
-    assert script_preprocess.ACTIVE_PROFILE_FILENAME == new_project.ACTIVE_PROFILE_FILENAME
+    assert script_preprocess.ACTIVE_ENV_FILENAME == new_project.ACTIVE_ENV_FILENAME

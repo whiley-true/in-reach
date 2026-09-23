@@ -7,11 +7,17 @@ before it succeeded, so a broken project never leaves half a build behind.
 
 What ``Compiled.txt`` contains, in order:
 
-1. a header (project, profile, flags -- no timestamp, so an unchanged project rebuilds to identical bytes);
+1. a header (project, env, flags -- no timestamp, so an unchanged project rebuilds to identical bytes);
 2. ``declare`` lines for the slots that were asked to carry a priority or a default;
 3. ``alias`` lines: every storage name to its slot, every bitfield flag to its value, every resource to its table
    entry (``alias t_freeze = script_traits[0]``);
 4. each block, in :attr:`ScriptProject.order`: a block file's code as written, then each fragment as a trigger.
+
+A single file (no ``script/project.toml``) is linked too, as the one block :data:`~.project.SINGLE_BLOCK`
+(:func:`~.project.load_single_file`), so its annotations are checked and its storage names allocated. It is assembled
+*transparently*: no header, its lines kept exactly (annotations included), and above them only the ``declare`` and
+``alias`` lines its annotations need. A file with no annotations links to its preprocessed text byte for byte -- what
+a single-file build compiled before it was linked at all.
 
 A fragment becomes ``for each <loop> do ... end`` (inside an ``if <gate> then`` if it has a ``@gate``): the provided
 temporaries as aliases, its preamble with the fragment's body -- inside its ``@guard`` conditions -- inserted at the
@@ -26,6 +32,7 @@ from which source lines, to turn a compiler error back into a place in your file
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -33,7 +40,7 @@ from pathlib import Path
 
 from in_reach.app import new_project
 from in_reach.app.rvt import settings_io
-from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, parse, render_expr, walk
+from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, render_expr, walk
 from in_reach.app.rvt.megalo_ast.nodes import Index, VariableDeclaration
 from in_reach.app.rvt.megalo_compiler import _MAX_ACTIONS, _MAX_CONDITIONS, _SCRIPT_TABLES
 from in_reach.app.rvt.models.script_settings import ScriptSettings
@@ -44,7 +51,7 @@ from .diagnostics import ProjectDiagnostic
 from .fusion import plan_fusion
 from .lint import lint
 from .model import Fragment, PreambleDef, SemanticModel, build_model
-from .project import ScriptProject, load_project
+from .project import SINGLE_BLOCK, ScriptProject, is_linked, load_script
 from .resources import ResourcePlan, plan_resources
 
 COMPILED_FILENAME = "Compiled.txt"
@@ -248,7 +255,7 @@ def _hand_used_slots(model: SemanticModel) -> set[tuple[str, str, int]]:
     regions += [f.body for f in model.fragments] + [p.body for p in model.preambles.values()]
     for lines in regions:
         try:
-            script = parse("\n".join(lines))
+            script = model.parse(lines)
         except (MegaloLexError, MegaloParseError):
             continue
         for node in walk(script):
@@ -267,9 +274,14 @@ def _hand_used_slots(model: SemanticModel) -> set[tuple[str, str, int]]:
 # -- the link -------------------------------------------------------------------------------------------
 
 
-def link(folder: Path, *, write: bool = True) -> LinkResult:
-    """Links ``folder``'s script project. See the module docstring; with ``write=False`` nothing is touched."""
-    project = load_project(folder)
+def link(folder: Path, *, write: bool = True, overrides: dict[str, str] | None = None) -> LinkResult:
+    """Links ``folder``'s script: its script project, or its single ``script/output.txt`` (see the module docstring).
+    With ``write=False`` nothing is touched. ``overrides`` (unsaved editor buffers, by path relative to ``script/``)
+    stand in for those files; a link that reads one never writes."""
+    if overrides and write:
+        raise ValueError("a link of unsaved text can't write the build")
+    single = not is_linked(folder)
+    project = load_script(folder, overrides)
     result = LinkResult(ok=False, diagnostics=list(project.diagnostics), project=project)
     if project.errors:
         return result
@@ -292,20 +304,23 @@ def link(folder: Path, *, write: bool = True) -> LinkResult:
     if result.errors:
         return result
 
-    text, declarations, triggers, fusion = _assemble(project, model, allocation, plan, result)
+    assemble = _assemble_single if single else _assemble
+    text, declarations, triggers, fusion = assemble(project, model, allocation, plan, result)
     if result.errors:
         return result
 
     result.compiled = text.rendered
     result.declarations = declarations
     result.link_map = _link_map(project, allocation, plan, triggers, fusion, text)
+    if single:  # what the compiler is given, so "changed since the last build?" needs no Compiled.txt of the link's own
+        result.link_map["compiled_sha256"] = hashlib.sha256(result.compiled.encode("utf-8")).hexdigest()
     counters = previous_map.get("budget", {}).get("counters") if isinstance(previous_map.get("budget"), dict) else None
     if counters:  # measured on the built variant by the last compile (record_counters); a relink doesn't discard it
         result.link_map["budget"]["counters"] = counters
     result.settings_changed = plan.changed
     result.ok = True
     if write:
-        _write(folder, result, plan)
+        _write(folder, result, plan, compiled=not single)
     return result
 
 
@@ -341,17 +356,8 @@ class _Rendered(_Text):
         return "\n".join(self.lines).rstrip("\n") + "\n"
 
 
-def _assemble(
-    project: ScriptProject, model: SemanticModel, allocation: Allocation, plan: ResourcePlan, result: LinkResult
-) -> tuple[_Rendered, str, list[_Trigger], dict]:
-    text = _Rendered()
-    profile = project.profile
-    flags = ",".join(sorted(profile.flags)) if profile else ""
-    name = (project.manifest.project.name if project.manifest else None) or project.folder.name
-    text.add(f"-- in-reach build: {name}  profile={profile.name if profile else 'none'}  flags={flags or '-'}")
-    text.add("-- Auto-generated and non-editable. Edit script/ and rebuild.")
-    text.blank()
-
+def _declaration_lines(allocation: Allocation, plan: ResourcePlan) -> tuple[list[str], list[str]]:
+    """The ``declare`` lines the allocation asks for, and the ``alias`` lines naming every slot, flag and resource."""
     declaration_lines: list[str] = []
     for key in sorted(allocation.declarations, key=lambda k: (_SCOPE_ORDER[k[0]], _TYPE_ORDER[k[1]], k[2])):
         d = allocation.declarations[key]
@@ -368,13 +374,58 @@ def _assemble(
             alias_lines.append(f"alias {flag} = {value}")
     for name_, info in plan.resources.items():
         alias_lines.append(f"alias {name_} = {info.alias_value}")
+    return declaration_lines, alias_lines
 
+
+def _declarations_text(declaration_lines: list[str], alias_lines: list[str]) -> str:
+    return "\n".join([*declaration_lines, "", *alias_lines]).strip("\n") + "\n"
+
+
+class _Verbatim(_Text):
+    """A single file's output: its lines exactly, however it ends."""
+
+    @property
+    def rendered(self) -> str:
+        return "\n".join(self.lines)
+
+
+def _assemble_single(
+    project: ScriptProject, model: SemanticModel, allocation: Allocation, plan: ResourcePlan, result: LinkResult
+) -> tuple[_Verbatim, str, list[_Trigger], dict]:
+    """A single file, *transparently*: its preprocessed text line for line (annotations stay, as the comments they
+    are), with labels substituted, below the ``declare``/``alias`` lines its annotations need -- and nothing above it
+    at all when they need none, so a file that uses no annotations compiles exactly as written."""
+    text = _Verbatim()
+    declaration_lines, alias_lines = _declaration_lines(allocation, plan)
+    prefix = [*declaration_lines, *([""] if declaration_lines and alias_lines else []), *alias_lines]
+    for line in prefix:
+        text.add(line)
+    if prefix:
+        text.add("")
+    code = model.blocks[SINGLE_BLOCK]
+    for number, line in enumerate(code.lines, start=1):
+        text.add(_substitute_labels(line, plan.labels), (code.file, number))
+    return text, _declarations_text(declaration_lines, alias_lines), [], {"groups": [], "declined": []}
+
+
+def _assemble(
+    project: ScriptProject, model: SemanticModel, allocation: Allocation, plan: ResourcePlan, result: LinkResult
+) -> tuple[_Rendered, str, list[_Trigger], dict]:
+    text = _Rendered()
+    env = project.env
+    flags = ",".join(sorted(env.flags)) if env else ""
+    name = (project.manifest.project.name if project.manifest else None) or project.folder.name
+    text.add(f"-- in-reach build: {name}  env={env.name if env else 'none'}  flags={flags or '-'}")
+    text.add("-- Auto-generated and non-editable. Edit script/ and rebuild.")
+    text.blank()
+
+    declaration_lines, alias_lines = _declaration_lines(allocation, plan)
     for line in declaration_lines:
         text.add(line)
     text.blank()
     for line in alias_lines:
         text.add(line)
-    declarations = "\n".join([*declaration_lines, "", *alias_lines]).strip("\n") + "\n"
+    declarations = _declarations_text(declaration_lines, alias_lines)
 
     triggers: list[_Trigger] = []
     fusion_report: dict[str, list] = {"groups": [], "declined": []}
@@ -404,7 +455,7 @@ def _assemble(
 def _link_map(
     project: ScriptProject, allocation: Allocation, plan: ResourcePlan, triggers: list[_Trigger], fusion: dict, text: _Text
 ) -> dict:
-    profile = project.profile
+    env = project.env
     budget: dict[str, dict] = {}
     for (scope, type_), used in sorted(allocation.used.items(), key=lambda kv: (_SCOPE_ORDER[kv[0][0]], _TYPE_ORDER[kv[0][1]])):
         budget[f"{scope}.{type_}"] = {"cap": POOL_SIZES[scope][type_], "used": used}
@@ -416,8 +467,8 @@ def _link_map(
         budget["labels"] = {"cap": 16, "used": len(set(plan.labels.values()))}
 
     return {
-        "profile": profile.name if profile else None,
-        "flags": sorted(profile.flags) if profile else [],
+        "env": env.name if env else None,
+        "flags": sorted(env.flags) if env else [],
         "storage": {
             name: {
                 "slot": slot.concrete, "owner": allocation.owners[name],
@@ -447,14 +498,17 @@ def _resource_entry(info) -> dict:
     return entry
 
 
-def _write(folder: Path, result: LinkResult, plan: ResourcePlan) -> None:
+def _write(folder: Path, result: LinkResult, plan: ResourcePlan, *, compiled: bool = True) -> None:
+    """Writes what changed. ``compiled=False`` leaves ``Compiled.txt`` alone: a single file's is the output view's
+    (:mod:`in_reach.app.output_view`), which puts a banner on it."""
     build = folder / new_project.BUILD_DIRNAME
     build.mkdir(parents=True, exist_ok=True)
     outputs = {
-        build / COMPILED_FILENAME: result.compiled,
         build / DECLARATIONS_FILENAME: result.declarations,
         build / LINK_MAP_FILENAME: json.dumps(result.link_map, indent=2) + "\n",
     }
+    if compiled:
+        outputs[build / COMPILED_FILENAME] = result.compiled
     for path, content in outputs.items():
         if not path.is_file() or path.read_text(encoding="utf-8") != content:  # untouched if unchanged: no VCS churn
             path.write_text(content, encoding="utf-8")

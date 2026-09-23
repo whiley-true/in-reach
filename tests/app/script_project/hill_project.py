@@ -4,7 +4,7 @@ from pathlib import Path
 
 PROJECT_TOML = """[project]
 name = "hill_rush"
-profile = "dev"
+env = "dev"
 
 [constants]
 SCORE_INTERVAL = 1

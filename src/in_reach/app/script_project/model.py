@@ -47,6 +47,9 @@ from in_reach.app.rvt.megalo_ast.annotations import (
     WidgetAnnotation,
 )
 
+from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, parse
+from in_reach.app.rvt.megalo_ast.nodes import Script
+
 from .diagnostics import ProjectDiagnostic
 from .project import ScriptProject, SourceFile
 
@@ -124,9 +127,26 @@ class SemanticModel:
     bitfields: list[Declared] = field(default_factory=list)
     resources: list[Declared] = field(default_factory=list)  # traits, options, widgets, labels
     diagnostics: list[ProjectDiagnostic] = field(default_factory=list)
+    _parsed: dict[str, Script | MegaloLexError | MegaloParseError] = field(default_factory=dict, repr=False)
 
     def fragments_of(self, block: str) -> list[Fragment]:
         return [fragment for fragment in self.fragments if fragment.block == block]
+
+    def parse(self, lines: list[str]) -> Script:
+        """``lines`` parsed, once per distinct text however many checks ask (read-only: the tree is shared).
+
+        Raises:
+            MegaloLexError, MegaloParseError: The code doesn't parse."""
+        text = "\n".join(lines)
+        if text not in self._parsed:
+            try:
+                self._parsed[text] = parse(text)
+            except (MegaloLexError, MegaloParseError) as exc:
+                self._parsed[text] = exc
+        found = self._parsed[text]
+        if isinstance(found, Exception):
+            raise found
+        return found
 
 
 def _is_annotation_line(line: str) -> bool:

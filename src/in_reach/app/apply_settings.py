@@ -25,7 +25,7 @@ from in_reach.app import logging_setup, new_project
 from in_reach.app.rvt import decompile
 from in_reach.app.rvt.compile import BuildResult, run_compile
 from in_reach.app.rvt.strings_io import LANGUAGES as _LANGUAGE_CODES
-from in_reach.app.script_project import is_linked, link
+from in_reach.app.script_project import is_linked, link, read_link_map
 
 _logger = logging_setup.get_logger(__name__)
 
@@ -334,13 +334,29 @@ def settings_have_unapplied_changes(folder: Path) -> bool:
 
 
 def script_has_unapplied_changes(folder: Path) -> bool:
-    """Whether a *linked* project (``script/project.toml``) has script changes Apply hasn't built yet: nothing built at
-    all, the link no longer matches the ``build/Compiled.txt`` the last build started from, the link would add settings,
-    a link that fails (Apply reports why), or a link the last build never finished (``Compiled.txt`` newer than the
-    ``.bin``). ``False`` for any other project -- a single-file script's edits are picked up by the next Apply or launch
-    regardless, and were never what enabled the button."""
+    """Whether the script has changes Apply hasn't built yet.
+
+    A *linked* project (``script/project.toml``): nothing built at all, the link no longer matches the
+    ``build/Compiled.txt`` the last build started from, the link would add settings, a link that fails (Apply reports
+    why), or a link the last build never finished (``Compiled.txt`` newer than the ``.bin``).
+
+    A single file: its link (what the compiler would be given) differs from the one the last build recorded in
+    ``build/link_map.json``, the link fails, it would add settings, or the last build never finished (the link map
+    newer than the ``.bin``). A project built before builds recorded that -- no link map, or one without
+    ``compiled_sha256`` -- reports ``False``, as single files always did, until its next build."""
     if not is_linked(folder):
-        return False
+        built = new_project.compiled_variant_path(folder)
+        map_path = folder / new_project.BUILD_DIRNAME / "link_map.json"
+        recorded = read_link_map(folder).get("compiled_sha256")
+        if recorded is None or not built.is_file():
+            return False
+        linked = link(folder, write=False)
+        if not linked.ok or linked.settings_changed or linked.link_map["compiled_sha256"] != recorded:
+            return True
+        try:
+            return map_path.stat().st_mtime_ns > built.stat().st_mtime_ns
+        except OSError:
+            return True
     built = new_project.compiled_variant_path(folder)
     compiled_path = folder / new_project.BUILD_DIRNAME / "Compiled.txt"
     if not built.is_file() or not compiled_path.is_file():

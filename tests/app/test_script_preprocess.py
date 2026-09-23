@@ -1,4 +1,4 @@
-"""Coverage for :mod:`in_reach.app.script_preprocess` -- env profiles for a project's script.
+"""Coverage for :mod:`in_reach.app.script_preprocess` -- env envs for a project's script.
 
 The two properties the module promises beyond "it substitutes and strips", each pinned directly:
 line numbers never shift (the compiler's messages are a script author's only feedback), and text that
@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 
 from in_reach.app import script_preprocess as sp
-from in_reach.app.script_preprocess import PreprocessError, Profile, parse_profile, preprocess
+from in_reach.app.script_preprocess import PreprocessError, Env, parse_env, preprocess
 
 
-def _profile(text: str = "", name: str = "dev") -> Profile:
-    return parse_profile(name, text)
+def _profile(text: str = "", name: str = "dev") -> Env:
+    return parse_env(name, text)
 
 
 # -- values -----------------------------------------------------------------------------------------
@@ -49,27 +49,27 @@ def test_a_bad_value_names_what_is_allowed() -> None:
         sp.check_value("X", "1 + 2")
 
 
-# -- profiles -----------------------------------------------------------------------------------------
+# -- envs -----------------------------------------------------------------------------------------
 
 
 def test_a_profile_has_flags_and_constants() -> None:
-    profile = parse_profile("dev", "# a comment\n\nFLAGS=DEV, VERBOSE_HUD\nSCORE=5\nHILL=\"hill\"\n")
-    assert profile.name == "dev"
-    assert profile.flags == {"DEV", "VERBOSE_HUD"}
-    assert profile.constants == {"SCORE": "5", "HILL": '"hill"'}
+    env = parse_env("dev", "# a comment\n\nFLAGS=DEV, VERBOSE_HUD\nSCORE=5\nHILL=\"hill\"\n")
+    assert env.name == "dev"
+    assert env.flags == {"DEV", "VERBOSE_HUD"}
+    assert env.constants == {"SCORE": "5", "HILL": '"hill"'}
 
 
 def test_a_string_constant_keeps_its_quotes() -> None:
-    assert parse_profile("p", 'LABEL="hill"').constants["LABEL"] == '"hill"'
+    assert parse_env("p", 'LABEL="hill"').constants["LABEL"] == '"hill"'
 
 
 def test_an_empty_profile_is_fine() -> None:
-    profile = parse_profile("empty", "")
-    assert profile.flags == frozenset() and profile.constants == {}
+    env = parse_env("empty", "")
+    assert env.flags == frozenset() and env.constants == {}
 
 
 def test_flags_may_be_empty() -> None:
-    assert parse_profile("release", "FLAGS=\n").flags == frozenset()
+    assert parse_env("release", "FLAGS=\n").flags == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -87,7 +87,7 @@ def test_flags_may_be_empty() -> None:
 def test_a_malformed_profile_line_is_reported_at_its_own_line(text: str, line: int, message: str) -> None:
     path = Path("dev.env")
     with pytest.raises(PreprocessError, match=message) as excinfo:
-        parse_profile("dev", text, path)
+        parse_env("dev", text, path)
     assert excinfo.value.line == line and excinfo.value.path == path
 
 
@@ -141,7 +141,7 @@ def test_directives_disappear_along_with_the_dropped_block_they_sit_in() -> None
 
 
 def test_a_dropped_block_is_never_scanned_for_constants() -> None:
-    """So a dev-only block can use a constant only the dev profile defines."""
+    """So a dev-only block can use a constant only the dev env defines."""
     assert preprocess("-- @if DEV\nx = ${DEV_ONLY}\n-- @end\n", _profile("FLAGS=")).split("\n")[1] == ""
 
 
@@ -225,13 +225,13 @@ def test_an_escaped_quote_does_not_end_the_string() -> None:
 
 
 def test_a_constant_the_profile_lacks_is_an_error_naming_it_and_the_profile() -> None:
-    with pytest.raises(PreprocessError, match=r"'\$\{MISSING\}' isn't defined in the 'dev' profile") as excinfo:
+    with pytest.raises(PreprocessError, match=r"'\$\{MISSING\}' isn't defined in the 'dev' env") as excinfo:
         preprocess("a\nx = ${MISSING}\n", _profile("OTHER=1"))
     assert (excinfo.value.line, excinfo.value.col) == (2, 4)
 
 
 def test_with_no_profile_a_constant_says_none_is_active() -> None:
-    with pytest.raises(PreprocessError, match="no environment profile is active"):
+    with pytest.raises(PreprocessError, match="no env is active"):
         preprocess("x = ${A}\n")
 
 
@@ -277,7 +277,7 @@ def test_line_numbers_never_shift() -> None:
         assert out.split("\n")[0] == "a" and out.split("\n")[7] == "e = 1" and out.split("\n")[8] == "f"
 
 
-# -- profiles on disk ----------------------------------------------------------------------------------------
+# -- envs on disk ----------------------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -293,45 +293,45 @@ def _write_env(project: Path, name: str, text: str) -> None:
 def test_profiles_are_the_env_files_in_script_env_sorted(project: Path) -> None:
     _write_env(project, "release", "")
     _write_env(project, "dev", "")
-    (project / "script" / "env" / "notes.txt").write_text("not a profile")
-    assert sp.list_profiles(project) == ["dev", "release"]
+    (project / "script" / "env" / "notes.txt").write_text("not an env")
+    assert sp.list_envs(project) == ["dev", "release"]
 
 
 def test_a_project_with_no_env_folder_has_no_profiles(tmp_path: Path) -> None:
-    assert sp.list_profiles(tmp_path) == []
-    assert sp.active_profile_name(tmp_path) is None
+    assert sp.list_envs(tmp_path) == []
+    assert sp.active_env_name(tmp_path) is None
 
 
 def test_the_active_profile_round_trips_and_can_be_cleared(project: Path) -> None:
     _write_env(project, "dev", "")
-    sp.set_active_profile(project, "dev")
-    assert sp.active_profile_name(project) == "dev"
-    sp.set_active_profile(project, None)
-    assert sp.active_profile_name(project) is None
+    sp.set_active_env(project, "dev")
+    assert sp.active_env_name(project) == "dev"
+    sp.set_active_env(project, None)
+    assert sp.active_env_name(project) is None
 
 
 def test_clearing_when_nothing_is_active_is_fine(project: Path) -> None:
-    sp.set_active_profile(project, None)
+    sp.set_active_env(project, None)
 
 
 def test_choosing_a_profile_that_does_not_exist_is_an_error_listing_the_real_ones(project: Path) -> None:
     _write_env(project, "dev", "")
-    with pytest.raises(ValueError, match=r"'nope' isn't a profile of this project \(have: dev\)"):
-        sp.set_active_profile(project, "nope")
+    with pytest.raises(ValueError, match=r"'nope' isn't an env of this project \(have: dev\)"):
+        sp.set_active_env(project, "nope")
 
 
 def test_a_blank_active_file_means_none(project: Path) -> None:
-    (project / "script" / "env" / sp.ACTIVE_PROFILE_FILENAME).write_text("  \n")
-    assert sp.active_profile_name(project) is None
+    (project / "script" / "env" / sp.ACTIVE_ENV_FILENAME).write_text("  \n")
+    assert sp.active_env_name(project) is None
 
 
 def test_preprocess_project_uses_the_active_profile(project: Path) -> None:
     _write_env(project, "dev", "FLAGS=DEV\nSCORE=5\n")
     _write_env(project, "release", "SCORE=50\n")
     src = "-- @if DEV\ndebug\n-- @end\nwin at ${SCORE}\n"
-    sp.set_active_profile(project, "dev")
+    sp.set_active_env(project, "dev")
     dev = sp.preprocess_project(project, src)
-    sp.set_active_profile(project, "release")
+    sp.set_active_env(project, "release")
     release = sp.preprocess_project(project, src)
     assert "debug" in dev and "win at 5" in dev
     assert "debug" not in release and "win at 50" in release
@@ -343,20 +343,20 @@ def test_preprocess_project_with_no_active_profile_leaves_plain_text_untouched(p
 
 def test_preprocess_project_with_no_active_profile_still_drops_flag_blocks_and_rejects_constants(project: Path) -> None:
     assert "dev" not in sp.preprocess_project(project, "-- @if DEV\ndev\n-- @end\n")
-    with pytest.raises(PreprocessError, match="no environment profile is active"):
+    with pytest.raises(PreprocessError, match="no env is active"):
         sp.preprocess_project(project, "x = ${A}\n")
 
 
 def test_an_active_profile_whose_file_is_missing_is_a_clear_error(project: Path) -> None:
-    (project / "script" / "env" / sp.ACTIVE_PROFILE_FILENAME).write_text("ghost\n")
-    with pytest.raises(PreprocessError, match="the active profile 'ghost' has no file") as excinfo:
+    (project / "script" / "env" / sp.ACTIVE_ENV_FILENAME).write_text("ghost\n")
+    with pytest.raises(PreprocessError, match="the active env 'ghost' has no file") as excinfo:
         sp.preprocess_project(project, "x\n")
     assert excinfo.value.path == project / "script" / "env" / "ghost.env"
 
 
 def test_a_broken_env_file_is_reported_against_that_file(project: Path) -> None:
     _write_env(project, "dev", "A=1\nB=oops oops\n")
-    sp.set_active_profile(project, "dev")
+    sp.set_active_env(project, "dev")
     with pytest.raises(PreprocessError) as excinfo:
         sp.preprocess_project(project, "x\n")
     assert excinfo.value.path == project / "script" / "env" / "dev.env" and excinfo.value.line == 2

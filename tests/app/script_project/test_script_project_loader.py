@@ -61,7 +61,7 @@ def test_the_profile_overrides_the_projects_constants(tmp_path: Path) -> None:
     project = _project(tmp_path)
 
     assert project.constants == {"SCORE_INTERVAL": "1", "SCORE_TO_WIN": "5"}  # dev.env says 5, project.toml says 50
-    assert project.profile.name == "dev"
+    assert project.env.name == "dev"
 
 
 def test_a_modules_parameter_reaches_its_own_files(tmp_path: Path) -> None:
@@ -171,7 +171,7 @@ def test_a_bad_project_constant_is_reported_at_its_line_and_the_rest_still_load(
     assert project.constants["SCORE_INTERVAL"] == "1"
 
 
-# -- profiles -------------------------------------------------------------------------------------------
+# -- envs -------------------------------------------------------------------------------------------
 
 
 def test_the_ides_active_profile_beats_the_one_project_toml_names(tmp_path: Path) -> None:
@@ -181,20 +181,20 @@ def test_the_ides_active_profile_beats_the_one_project_toml_names(tmp_path: Path
         env__active_profile_dot_txt="release\n",
     )
 
-    assert project.profile.name == "release" and project.constants["SCORE_TO_WIN"] == "99"
+    assert project.env.name == "release" and project.constants["SCORE_TO_WIN"] == "99"
 
 
 def test_a_profile_that_does_not_exist_is_reported_and_the_load_carries_on(tmp_path: Path) -> None:
     project = _project(tmp_path, env__dev_dot_env=None)
 
-    assert ("profile-invalid", "env/dev.env", 0) in _codes(project)
-    assert project.profile is None and project.constants["SCORE_TO_WIN"] == "50"  # project.toml's default stands
+    assert ("env-invalid", "env/dev.env", 0) in _codes(project)
+    assert project.env is None and project.constants["SCORE_TO_WIN"] == "50"  # project.toml's default stands
 
 
 def test_a_broken_profile_is_reported_at_its_line(tmp_path: Path) -> None:
     project = _project(tmp_path, env__dev_dot_env="FLAGS=DEV\nnot a setting\n")
 
-    assert ("profile-invalid", "env/dev.env", 2) in _codes(project)
+    assert ("env-invalid", "env/dev.env", 2) in _codes(project)
 
 
 # -- modules --------------------------------------------------------------------------------------------

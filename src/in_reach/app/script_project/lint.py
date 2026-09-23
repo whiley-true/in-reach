@@ -15,7 +15,7 @@ IR011   a bitfield of more than 15 flags (bit 15 is reserved)
 IR016   ``@assumes BLOCK`` where BLOCK doesn't come before the block that assumes it
 ======  =============================================================================================
 
-Also: ``kind-unknown`` (object storage or a bitfield against a kind nobody declares), ``team-owner-invalid``, and
+Also: ``see-unknown`` (a warning: ``@see`` naming no tag, block, module, fragment or declared name), ``kind-unknown`` (object storage or a bitfield against a kind nobody declares), ``team-owner-invalid``, and
 ``body-syntax`` (a region's code that doesn't parse).
 
 Not here, because they need an engine catalog or the linker's output: IR001-IR004, IR008, IR009, IR012, IR014,
@@ -29,8 +29,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, parse, walk
-from in_reach.app.rvt.megalo_ast.annotations import BitfieldAnnotation, StorageAnnotation
+from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, walk
+from in_reach.app.rvt.megalo_ast.annotations import BitfieldAnnotation, SeeAnnotation, StorageAnnotation, TagsAnnotation
 from in_reach.app.rvt.megalo_ast.nodes import Call, ForEach, Identifier, Script, VariableDeclaration
 
 from .diagnostics import ProjectDiagnostic
@@ -51,6 +51,30 @@ class _Region:
     what: str
 
 
+def see_targets(model: SemanticModel) -> dict[str, str]:
+    """Everything a ``@see`` can name, with what it is: ``"tag"``, ``"block"``, ``"module"``, ``"fragment"`` or
+    ``"name"`` (a declared storage name or resource)."""
+    project = model.project
+    targets: dict[str, str] = {}
+    for module in project.modules:
+        for tag in module.manifest.module.tags:
+            targets.setdefault(tag, "tag")
+    for file in project.files:
+        for annotation in file.annotations.items:
+            if isinstance(annotation, TagsAnnotation):
+                for tag in annotation.tags:
+                    targets.setdefault(tag, "tag")
+    for declared in [*model.storage, *model.bitfields, *model.resources]:
+        targets[declared.annotation.name] = "name"
+    for fragment in model.fragments:
+        targets[fragment.id] = "fragment"
+    for module in project.modules:
+        targets[module.name] = "module"
+    for block in project.blocks:
+        targets[block] = "block"
+    return targets
+
+
 def lint(model: SemanticModel) -> list[ProjectDiagnostic]:
     """Every structural problem in ``model``'s project, in a stable order."""
     linter = _Linter(model)
@@ -67,6 +91,7 @@ class _Linter:
         self.found.append(ProjectDiagnostic(severity=severity, code=code, message=message, file=file, line=line, hint=hint))
 
     def run(self) -> None:
+        self._see_targets()
         self._duplicate_names()
         self._kinds_and_owners()
         self._bitfields()
@@ -92,7 +117,7 @@ class _Linter:
 
     def _parse(self, region: _Region) -> Script | None:
         try:
-            return parse("\n".join(region.lines))
+            return self.model.parse(region.lines)
         except (MegaloLexError, MegaloParseError) as exc:
             token = getattr(exc, "token", None)
             line = region.first_line + (getattr(token, "start_line", 1) - 1)
@@ -132,6 +157,17 @@ class _Linter:
                     "IR010", "an unlabelled 'for each object' in something that runs every tick visits every object in the map",
                     region.file, line_of(node), hint="give the objects a label and use 'with label ...'", severity="warning",
                 )
+
+    def _see_targets(self) -> None:
+        targets = see_targets(self.model)
+        for file in self.model.project.files:
+            for annotation in file.annotations.items:
+                if isinstance(annotation, SeeAnnotation) and annotation.tag not in targets:
+                    self.add(
+                        "see-unknown", f"@see {annotation.tag} points at nothing in this script", file.path,
+                        annotation.span.start_line, hint="a tag, block, module, fragment (module.name) or declared name",
+                        severity="warning",
+                    )
 
     def _loop_annotations(self) -> None:
         for fragment in self.model.fragments:
@@ -179,7 +215,7 @@ class _Linter:
 
     def _quiet_parse(self, region: _Region) -> Script | None:
         try:
-            return parse("\n".join(region.lines))
+            return self.model.parse(region.lines)
         except (MegaloLexError, MegaloParseError):
             return None  # reported once, by _parse
 

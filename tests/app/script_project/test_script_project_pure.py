@@ -3,7 +3,7 @@ file sees, and putting blocks in order. None of this touches the file system; ``
 loads whole projects."""
 import pytest
 
-from in_reach.app.script_preprocess import Profile
+from in_reach.app.script_preprocess import Env
 from in_reach.app.script_project.constants import base_constants, module_constants, resolve_value
 from in_reach.app.script_project.diagnostics import ProjectDiagnostic
 from in_reach.app.script_project.manifests import ModuleManifest, ParamSpec, ProjectManifest, read_manifest
@@ -75,7 +75,7 @@ def test_indentation_is_the_column() -> None:
 def test_a_complete_project_manifest_is_read() -> None:
     text = """[project]
 name = "hill_rush"
-profile = "dev"
+env = "dev"
 
 [constants]
 SCORE = 5
@@ -194,7 +194,7 @@ def test_a_diagnostic_prints_like_a_compiler_message() -> None:
 
 # -- constants ------------------------------------------------------------------------------------------
 
-_DEV = Profile("dev", frozenset({"DEV"}), {"PHASE_TIMER": "2"})
+_DEV = Env("dev", frozenset({"DEV"}), {"PHASE_TIMER": "2"})
 
 
 def test_project_constants_are_defaults_and_the_profile_overrides_them() -> None:
@@ -209,7 +209,7 @@ def test_without_a_profile_the_project_constants_stand() -> None:
 
 
 def test_a_constant_defined_in_terms_of_another_follows_its_final_value() -> None:
-    """So a profile that changes PHASE_TIMER changes everything defined from it."""
+    """So an env that changes PHASE_TIMER changes everything defined from it."""
     constants, _ = base_constants({"PHASE_TIMER": 6, "ROUND": "${PHASE_TIMER}"}, _DEV)
 
     assert constants["ROUND"] == "2"
@@ -244,7 +244,7 @@ def test_constants_defined_in_a_circle_are_reported() -> None:
 
 
 def test_a_bad_default_the_profile_overrides_is_not_a_problem() -> None:
-    constants, problems = base_constants({"X": "nope nope"}, Profile("p", frozenset(), {"X": "5"}))
+    constants, problems = base_constants({"X": "nope nope"}, Env("p", frozenset(), {"X": "5"}))
 
     assert problems == [] and constants == {"X": "5"}
 

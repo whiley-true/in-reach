@@ -5,6 +5,7 @@
 -- modules create between them). Two fragments with the same loop are fused into one trigger.
 -- @fragment TICK.score
 -- @loop player
+-- @doc Counts each player's second down, and scores a point every time it runs out.
 current_player.p_second.set_rate(-100%)
 if current_player.p_second.is_zero() then
    current_player.score += 1

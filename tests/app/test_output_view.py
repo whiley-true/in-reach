@@ -58,14 +58,14 @@ def test_write_output_view_reflects_the_scripts_latest_content_on_each_call(tmp_
     assert "v1" not in path.read_text(encoding="utf-8")
 
 
-# -- the active environment profile is applied, so the view shows what actually gets compiled ---------------
+# -- the active env is applied, so the view shows what actually gets compiled ---------------
 
 
 def _project_with_profile(tmp_path: Path, script: str, env: str = "FLAGS=DEV\nSCORE=5\n") -> None:
     (tmp_path / "script" / "env").mkdir(parents=True)
     (tmp_path / "script" / "output.txt").write_text(script, encoding="utf-8")
     (tmp_path / "script" / "env" / "dev.env").write_text(env, encoding="utf-8")
-    (tmp_path / "script" / "env" / "active_profile.txt").write_text("dev\n", encoding="utf-8")
+    (tmp_path / "script" / "env" / "active_env.txt").write_text("dev\n", encoding="utf-8")
 
 
 def test_the_view_shows_the_script_with_the_active_profile_applied(tmp_path: Path) -> None:
@@ -89,7 +89,7 @@ def test_a_script_that_cannot_be_preprocessed_is_shown_as_written_with_the_reaso
 
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
 
-    assert "-- NOT PREPROCESSED (line 2): '${MISSING}' isn't defined in the 'dev' profile" in text
+    assert "-- NOT LINKED: output.txt:2: '${MISSING}' isn't defined in the 'dev' env [preprocess]" in text
     assert "win = ${MISSING}" in text  # still readable, so the user can see what to fix
 
 
@@ -98,15 +98,15 @@ def test_a_broken_env_file_is_named_in_the_banner_and_the_script_shown_as_writte
 
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
 
-    assert "-- NOT PREPROCESSED (dev.env, line 1)" in text
+    assert "-- NOT LINKED: env/dev.env:1: SCORE='oops oops'" in text
     assert "x = 1" in text
 
 
 def test_with_no_profile_and_no_directives_the_view_is_exactly_what_it_always_was(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("do stuff\n", encoding="utf-8")
+    (tmp_path / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
-    assert text.endswith("do stuff\n") and "NOT PREPROCESSED" not in text
+    assert text.endswith("game.end_round()\n") and "NOT LINKED" not in text
 
 
 def test_a_linked_projects_view_is_the_linkers_script_and_writes_nothing_else(tmp_path: Path) -> None:
