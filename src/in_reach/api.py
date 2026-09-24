@@ -174,10 +174,10 @@ def _script_project(folder: Path) -> Path:
 
 
 def _scripted(folder: Path) -> Path:
-    """``folder``, if it has a script to check: a script project, or a single ``script/output.txt``."""
+    """``folder``, if it has a script to check: a script project, or a single ``script/output.mgl``."""
     folder = Path(folder)
-    if not is_linked(folder) and not (folder / new_project.SCRIPT_DIRNAME / "output.txt").is_file():
-        raise ApiError(f"{folder} has no script (neither script/project.toml nor script/output.txt).")
+    if not is_linked(folder) and not new_project.migrate_script_file(folder).is_file():
+        raise ApiError(f"{folder} has no script (neither script/project.toml nor script/output.mgl).")
     return folder
 
 
@@ -208,14 +208,14 @@ def _link_outcome(folder: Path, write: bool) -> LinkOutcome:
 
 def check(folder: Path) -> CheckResult:
     """Everything wrong with the project's script (annotations, lint, allocation; for a script project also its
-    modules and fusion), writing nothing. A single ``script/output.txt`` is checked as a project of one block."""
+    modules and fusion), writing nothing. A single ``script/output.mgl`` is checked as a project of one block."""
     outcome = _link_outcome(_scripted(folder), write=False)
     return CheckResult(outcome.ok, outcome.diagnostics, outcome.link_map, outcome.link_result)
 
 
 def check_text(folder: Path, path: str | Path, text: str) -> CheckResult:
     """:func:`check` with ``text`` standing in for the file at ``path`` -- an editor's unsaved buffer, for checking as you
-    type. ``path`` is relative to ``script/`` (``output.txt``, ``blocks/setup.mgl``) or absolute inside it. Writes nothing.
+    type. ``path`` is relative to ``script/`` (``output.mgl``, ``blocks/setup.mgl``) or absolute inside it. Writes nothing.
 
     An env file (``env/<name>.env``) is checked on its own: whether it parses. Any other file is checked as part of the
     whole script, so the result holds every diagnostic of the project, not only ``path``'s."""
@@ -274,6 +274,68 @@ def docs(folder: Path, *, write: bool = True, checked: CheckResult | None = None
     return DocsResult(gathered, _docs.render_markdown(gathered), [p.relative_to(folder).as_posix() for p in written])
 
 
+def _entry(folder: Path, file: str, line: int):
+    for note in _docs.build_docs(folder).notes:
+        if note.file == file and line in note.lines:
+            return note
+    raise ApiError(f"there is no documentation entry at {file}:{line}")
+
+
+def edit_doc_entry(folder: Path, file: str, line: int, note: str, text: str | None = None) -> str:
+    """Rewrites the docstring at ``file:line`` (any of its ``-- @doc`` lines): its ``-- @doc`` lines in the script become
+    ``note``, and its longer text (its section of ``script/DOCSTRINGS.md``, not the script) becomes ``text``, or stays as
+    it was for ``None`` -- under the new title, if the note's first line changed. A blank note removes the docstring,
+    text and all. Returns the file changed, relative to ``script/``."""
+    folder = _scripted(folder)
+    entry = _entry(folder, file, line)
+    old_title = _docs.docstring_title(entry)
+    try:
+        _docs.rewrite_entry(folder, entry.file, entry.lines, note)
+        new_title = _docs.docstring_title(_docs.Note(note, entry.file, line, entry.kind, entry.subject)) if note.strip() else None
+        _docs.set_docstring_text(folder, old_title, new_title, text)
+    except (ValueError, OSError) as exc:
+        raise ApiError(str(exc)) from exc
+    return entry.file
+
+
+def remove_doc_entry(folder: Path, file: str, line: int) -> str:
+    """Removes the docstring at ``file:line`` -- all of its ``-- @doc`` lines, and its text in DOCSTRINGS.md."""
+    return edit_doc_entry(folder, file, line, "")
+
+
+def refresh_docstrings(folder: Path) -> Path | None:
+    """Brings an existing ``script/DOCSTRINGS.md`` in step with the script as saved -- each docstring's where-line, and a
+    section for a new one. Returns the file if it changed, else ``None`` (also with no DOCSTRINGS.md: nothing is made)."""
+    folder = _scripted(folder)
+    try:
+        changed = _docs.refresh_docstrings(folder, _docs.build_docs(folder))
+    except OSError as exc:
+        raise ApiError(str(exc)) from exc
+    return _docs.docstrings_path(folder) if changed else None
+
+
+def docstring_section(folder: Path, file: str, line: int) -> tuple[Path, int]:
+    """Where to edit the longer text of the docstring at ``file:line``: ``script/DOCSTRINGS.md`` (brought in step with the
+    script first, so its section is there) and the 1-based line its text starts on."""
+    folder = _scripted(folder)
+    entry = _entry(folder, file, line)
+    try:
+        _docs.sync_docstrings(folder, _docs.build_docs(folder))
+    except OSError as exc:
+        raise ApiError(str(exc)) from exc
+    return _docs.docstrings_path(folder), _docs.docstring_line(folder, _docs.docstring_title(entry))
+
+
+def set_docs_description(folder: Path, text: str) -> None:
+    """Sets the documentation's own description (``script/docs.json``; the overview's Description section) -- not the
+    gametype's in-game description, which is ``settings.json``'s ``meta.description``."""
+    folder = _scripted(folder)
+    try:
+        _docs.set_description(folder, text)
+    except OSError as exc:
+        raise ApiError(str(exc)) from exc
+
+
 # -- building ------------------------------------------------------------------------------------------------
 
 
@@ -329,7 +391,7 @@ def show(folder: Path, view: str) -> ShowResult:
     * ``rvt`` -- what RVT shows: the built ``.bin`` decompiled, no modules, no env (``build/Decompiled.txt``). Needs
       a build and the native module.
     * ``rvt+`` -- the same script before it is compiled, with the env applied: ``build/Compiled.txt``.
-    * ``megalo`` -- the source as written: ``script/output.txt``, or every block and module file of a script project."""
+    * ``megalo`` -- the source as written: ``script/output.mgl``, or every block and module file of a script project."""
     folder = Path(folder)
     if view not in VIEWS:
         raise ApiError(f"unknown view {view!r}; choose one of {', '.join(VIEWS)}")
@@ -351,7 +413,7 @@ def show(folder: Path, view: str) -> ShowResult:
 def _megalo_source(folder: Path) -> str:
     if not is_linked(folder):
         try:
-            return (folder / new_project.SCRIPT_DIRNAME / "output.txt").read_text(encoding="utf-8")
+            return new_project.migrate_script_file(folder).read_text(encoding="utf-8")
         except OSError:
             return ""
     parts = []

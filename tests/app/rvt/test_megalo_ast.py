@@ -1,4 +1,4 @@
-"""in_reach.app.rvt.megalo_ast -- parses script/output.txt (RVT's decompiler output) into a
+"""in_reach.app.rvt.megalo_ast -- parses script/output.mgl (RVT's decompiler output) into a
 traversable AST and back. Ported from a prior prototype's own test suite
 (``D:\\whileyRepos\\sort\\mega-ide\\tests\\test_megalo_ast.py``, PROMPT.md: "we want a fromm
 scratch compiler then") -- see :mod:`in_reach.app.rvt.megalo_ast.nodes`'s own module docstring for

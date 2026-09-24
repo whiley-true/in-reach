@@ -97,7 +97,7 @@ def run() -> None:
 @_folder_argument
 @_format_option
 def check_cmd(folder: Path, fmt: str) -> None:
-    """Check the script (a script project, or script/output.txt) for problems, writing nothing. Exits 1 if anything is an
+    """Check the script (a script project, or script/output.mgl) for problems, writing nothing. Exits 1 if anything is an
     error."""
     try:
         result = api.check(folder)
@@ -219,7 +219,7 @@ def show_cmd(folder: Path, view: str, fmt: str) -> None:
 def create_project_cmd(folder: Path, backup: bool, fmt: str) -> None:
     """Convert a single-file script into a script project (script/project.toml + blocks/main.mgl).
 
-    Experimental, and one-way: from then on script/output.txt is no longer compiled. --backup keeps a copy first."""
+    Experimental, and one-way: from then on script/output.mgl is no longer compiled. --backup keeps a copy first."""
     backup_path = None
     try:
         if backup:

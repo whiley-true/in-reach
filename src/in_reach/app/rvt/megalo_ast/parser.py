@@ -1,4 +1,4 @@
-"""Recursive-descent parser: Megalo script text (``script/output.txt``, or the richer hand-
+"""Recursive-descent parser: Megalo script text (``script/output.mgl``, or the richer hand-
 authorable dialect -- see ``nodes.py``'s module docstring) -> ``nodes.Script``.
 
 Ported verbatim from a prior prototype (``D:\\whileyRepos\\sort\\mega-ide``, PROMPT.md: "we want a
@@ -418,7 +418,7 @@ def parse_expression(source: str, *, line: int = 1, col: int = 0) -> Expression:
 
 
 def parse(source: str) -> Script:
-    """Parses Megalo script text (``script/output.txt``, or the richer hand-authorable dialect)
+    """Parses Megalo script text (``script/output.mgl``, or the richer hand-authorable dialect)
     into a ``Script`` AST. Raises ``MegaloLexError``/``MegaloParseError`` on malformed input -- see
     this module's grammar comment and ``nodes.py``'s docstring for the grammar this covers.
 

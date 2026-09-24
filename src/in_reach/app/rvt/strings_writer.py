@@ -38,6 +38,7 @@ get_content() distinction this mirrors.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from .rvt_bridge import get_rvt
 
@@ -147,11 +148,92 @@ def _is_untranslated(entry: dict) -> bool:
     script itself just created looks like, so nothing a user typed would be lost by dropping it.
     (A forge label's name is copied into every language as-is; a format string's other languages are
     empty or unset. Neither is a translation.)"""
+    if isinstance(entry["text"], str):  # the bare-string shorthand: English only
+        return True
     english = entry["text"].get("english")
     return all(not text or text == english for language, text in entry["text"].items() if language != "english")
 
 
-def reconcile_script_strings(mp, strings: dict) -> StringReconciliation:
+def _english(entry: dict) -> str | None:
+    """An entry's English text, whether it is written out per language or as the bare-string shorthand."""
+    text = entry["text"]
+    return text if isinstance(text, str) else text.get("english")
+
+
+def _every_language(text: str) -> dict:
+    """``text`` in every language -- what a string edited in (or added by) the script gets: the script only has one
+    text, so no language is left showing an older one."""
+    from .strings_io import LANGUAGES
+
+    return {language: text for language in LANGUAGES}
+
+
+def _filled(texts: dict) -> dict:
+    """``texts`` with every empty language given the English text."""
+    english = texts.get("english")
+    return {language: (value or english) for language, value in texts.items()}
+
+
+def _literals(script: str) -> list[str]:
+    """The string literals ``script`` passes to calls, in order -- not forge-label names (``with label "x"``,
+    ``has_forge_label("x")``' own argument is a name too, but a label is renamed in settings, not here)."""
+    from .megalo_ast.lexer import MegaloLexError, tokenize
+
+    try:
+        tokens = tokenize(script)
+    except MegaloLexError:
+        return []
+    literals = []
+    for position, token in enumerate(tokens):
+        if token.kind != "string":
+            continue
+        before = tokens[position - 1] if position else None
+        if before is not None and before.kind == "ident" and before.text == "label":
+            continue
+        literals.append(token.value)
+    return literals
+
+
+def edited_literals(old_script: str, new_script: str) -> list[tuple[str, str]]:
+    """``(old text, new text)`` for each string literal ``new_script`` changed in place: one replaced by another at the
+    same place in the sequence of literals, whose old text the new script no longer uses anywhere."""
+    old, new = _literals(old_script), _literals(new_script)
+    pairs = []
+    for tag, i1, i2, j1, j2 in SequenceMatcher(a=old, b=new, autojunk=False).get_opcodes():
+        if tag == "replace" and i2 - i1 == j2 - j1:
+            pairs += zip(old[i1:i2], new[j1:j2])
+    still_used = set(new)
+    return [(before, after) for before, after in pairs if before != after and before not in still_used]
+
+
+def rename_edited_strings(mp, old_script: str, new_script: str) -> list[tuple[str, str]]:
+    """Renames, in ``mp``'s string table, each string the script edited in place (:func:`edited_literals`; the old script
+    is the base variant's own), setting every language to the new text -- so the compile reuses that entry, index and
+    all, rather than adding the new text as another one and leaving the old behind (a build always starts from the
+    same base, whose table still holds the old text). A string whose new text is already in the table is left alone:
+    the compile uses that one. Returns the renames made."""
+    from .strings_io import LANGUAGES
+
+    rvt = get_rvt()
+    table = mp.script_strings
+    english = rvt.Language.english
+    by_text = {}
+    for i in range(len(table)):
+        if table[i].has_content(english):
+            by_text.setdefault(table[i].get_content(english), i)
+    renamed = []
+    for before, after in edited_literals(old_script, new_script):
+        if after in by_text or before not in by_text:
+            continue
+        index = by_text.pop(before)
+        for language in LANGUAGES:
+            table[index].set_content(getattr(rvt.Language, language), after)
+        by_text[after] = index
+        renamed.append((before, after))
+    return renamed
+
+
+def reconcile_script_strings(mp, strings: dict, previous: dict | None = None) -> StringReconciliation:
     """Makes ``strings["script_strings"]`` cover exactly the compiled variant's own script-string table.
 
     Like forge labels (see :func:`~in_reach.app.rvt.settings_writer.reconcile_forge_labels`), the
@@ -167,6 +249,8 @@ def reconcile_script_strings(mp, strings: dict) -> StringReconciliation:
     Args:
         mp: The just-compiled variant's ``MultiplayerData``.
         strings: A validated ``strings.json`` document (see :func:`~in_reach.app.rvt.strings_io.load_strings`).
+        previous: The last build's ``build/strings.autogenerated.json`` -- what tells a string edited in the script (its
+            entry still says what that build did: it follows the compile) from one edited in ``strings.json`` (kept).
 
     Returns:
         A :class:`StringReconciliation`; ``strings`` on it is the input itself if nothing changed.
@@ -181,12 +265,29 @@ def reconcile_script_strings(mp, strings: dict) -> StringReconciliation:
         removed.append(entries.pop()["index"])
     present = {entry["index"] for entry in entries}
     added = [i for i in range(len(table)) if i not in present]
-    for i in added:
-        entries.append({"index": i, "text": _all_languages(rvt, table[i])})
-    if not (added or removed):
+    for i in added:  # a string the script added: its one text in every language
+        entries.append({"index": i, "text": _filled(_all_languages(rvt, table[i]))})
+    # A literal edited in the script is what the compile put in the table, and strings.json follows it -- otherwise the
+    # old text, applied after the compile, would put the old string back in the game. Only when strings.json still says
+    # what the last build did, though (``previous``): an entry someone changed in strings.json itself is theirs, and is
+    # applied over the compile as always. Every language follows: the script has one text, and a translation of the old
+    # one would be wrong for the new.
+    last_built = {e["index"]: _english(e) for e in (previous or {}).get("script_strings", [])}
+    updated: list[int] = []
+    for position, entry in enumerate(entries):
+        index = entry["index"]
+        if index in added or index >= len(table) or index not in last_built:
+            continue
+        compiled = table[index].text
+        english = _english(entry)
+        if english == compiled or english != last_built[index]:
+            continue
+        entries[position] = {**entry, "text": _every_language(compiled)}
+        updated.append(index)
+    if not (added or removed or updated):
         return StringReconciliation(strings)
     entries.sort(key=lambda entry: entry["index"])
-    return StringReconciliation({**strings, "script_strings": entries}, added, removed)
+    return StringReconciliation({**strings, "script_strings": entries}, added, removed, updated)
 
 
 def own_text(reconciled: StringReconciliation, owned: dict[int, str]) -> StringReconciliation:
@@ -203,7 +304,8 @@ def own_text(reconciled: StringReconciliation, owned: dict[int, str]) -> StringR
     if not updated:
         return reconciled
     return StringReconciliation(
-        {**reconciled.strings, "script_strings": entries}, reconciled.added, reconciled.removed, updated
+        {**reconciled.strings, "script_strings": entries}, reconciled.added, reconciled.removed,
+        sorted(set(reconciled.updated) | set(updated)),
     )
 
 

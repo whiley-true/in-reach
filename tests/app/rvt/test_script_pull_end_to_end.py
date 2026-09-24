@@ -1,10 +1,10 @@
 """Editing the script in ReachVariantTool and keeping it: the whole loop, against real variants.
 
 A script changed in RVT used to be lost: RVT saved the built ``.bin``, in-reach mirrored its *settings*
-into ``settings/``, and the next Apply rebuilt the ``.bin`` from ``script/output.txt`` -- which RVT never
+into ``settings/``, and the next Apply rebuilt the ``.bin`` from ``script/output.mgl`` -- which RVT never
 touched. These tests play RVT's part (native-compile a different script into the built ``.bin`` and save
 it over the file), run the same resync the IDE's file watcher runs, and check the script comes back into
-``output.txt`` and survives the next build. See :mod:`in_reach.app.script_sync`.
+``output.mgl`` and survives the next build. See :mod:`in_reach.app.script_sync`.
 """
 import collections
 import logging
@@ -105,7 +105,7 @@ def test_an_apply_records_the_built_scripts_text_and_output_txts_digest(tmp_path
     snapshot = script_sync.read_snapshot(folder)
     assert snapshot.text == _built_script(bin_path)
     assert "global.number[1] = 2" in snapshot.text
-    script_sync.record_build(folder, snapshot.text)  # recording again over an unchanged output.txt ...
+    script_sync.record_build(folder, snapshot.text)  # recording again over an unchanged output.mgl ...
     assert script_sync.read_snapshot(folder) == snapshot  # ... gives the digest the Apply recorded
 
 
@@ -125,7 +125,7 @@ def test_a_script_edited_in_rvt_comes_back_and_survives_the_next_apply(tmp_path:
     script_sync.pull(folder, after)
     pulled = script_sync.read_script(folder)
     assert "global.number[0] = 5" in pulled and "global.number[2] = 7" in pulled
-    assert "global.number[1] = 2" not in pulled  # the script that was in output.txt is gone, by design
+    assert "global.number[1] = 2" not in pulled  # the script that was in output.mgl is gone, by design
 
     rebuilt = _apply(project_dir, folder)
 

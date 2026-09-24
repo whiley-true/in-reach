@@ -231,7 +231,7 @@ def test_show_megalo_prints_every_source_file_of_a_script_project(runner: CliRun
 
 def test_show_megalo_of_a_single_script_is_output_txt(runner: CliRunner, tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("global.number[0] = 1\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("global.number[0] = 1\n", encoding="utf-8")
 
     assert runner.invoke(main, ["show", str(tmp_path), "--view", "megalo"]).output == "global.number[0] = 1\n"
 
@@ -259,7 +259,7 @@ def test_show_needs_a_view(runner: CliRunner, tmp_path: Path) -> None:
 
 def test_create_project_and_new_module_scaffold_a_script_project(runner: CliRunner, tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("x = 1\n", encoding="utf-8")
 
     created = runner.invoke(main, ["create-project", str(tmp_path), "--format", "json"])
     module = runner.invoke(main, ["new-module", "extras", str(tmp_path)])

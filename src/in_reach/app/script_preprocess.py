@@ -1,6 +1,6 @@
 """Envs for a project's Megalo script: ``${NAME}`` constants and ``-- @if`` blocks.
 
-A project's script is one file (``script/output.txt``), and it can stay one large file -- what this
+A project's script is one file (``script/output.mgl``), and it can stay one large file -- what this
 adds is a way to build *variants* of it without copying it: the same source compiled for ``dev``
 (a shorter round, a debug message) and for ``release``. An **env** is ``script/env/<name>.env``::
 
@@ -224,6 +224,7 @@ def create_env(folder: Path, name: str, *, copy_from: str | None = None) -> Path
         if not source.is_file():
             raise ValueError(f"there is no env named {copy_from!r} to copy")
         text = source.read_text(encoding="utf-8")
+        text = re.sub(r'^# Env "[^"\n]*"', f'# Env "{name}"', text, count=1)  # the copy's header names the copy
     else:
         text = new_project.env_file_text(name)
     path.parent.mkdir(parents=True, exist_ok=True)

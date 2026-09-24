@@ -168,6 +168,14 @@ def test_ir007_in_a_block_file_uses_the_files_own_line_numbers(tmp_path: Path) -
     assert _at(found, "IR007") == [("blocks/setup.mgl", 3)]
 
 
+def test_a_line_that_is_only_a_value_is_not_a_statement(tmp_path: Path) -> None:
+    found = _lint(tmp_path, _FRAGMENT, blocks={"setup": "ff\nfor each player do\n   current_player.score\n   game.end_round()\nend\n"})
+
+    assert _at(found, "not-a-statement") == [("blocks/setup.mgl", 1), ("blocks/setup.mgl", 3)]
+    first, second = [d for d in found if d.code == "not-a-statement"]
+    assert first.message.startswith("'ff' on its own does nothing") and (first.col, second.col) == (0, 3)
+
+
 def test_ir005_a_timer_declared_with_a_network_priority(tmp_path: Path) -> None:
     found = _lint(tmp_path, _FRAGMENT, blocks={"setup": "declare global.timer[0] with network priority low\n"})
 

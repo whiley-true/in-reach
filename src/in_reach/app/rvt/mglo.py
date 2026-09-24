@@ -32,7 +32,7 @@ def write_mglo(bin_path: Path, script_path: Path, dest_path: Path, *, run=subpro
         bin_path: A fully-settings-applied ``.bin`` to recompile ``script_path`` against (normally
             :func:`~in_reach.app.new_project.compiled_variant_path`'s own result, freshly built).
         script_path: The Megalo script source that was just compiled into ``bin_path`` (normally
-            ``script/output.txt``).
+            ``script/output.mgl``).
         dest_path: Where to save the result -- a ``.mglo`` extension writes RVT's bare/script-only
             format; anything else writes a normal full ``.bin``.
         run: Injectable :func:`subprocess.run`-alike, for testing.

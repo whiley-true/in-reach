@@ -1,5 +1,5 @@
 """Compiles a project's ``settings/`` (settings.json/script_settings.json/strings.json) and
-``script/output.txt`` into a real game variant (PROMPT.md: "applying changes should try and
+``script/output.mgl`` into a real game variant (PROMPT.md: "applying changes should try and
 compile the jsons into a gametype and i[f] it fails then dont allow application (raise errors in
 text window - although hopefully our schema validation should catch this)").
 
@@ -128,7 +128,7 @@ def format_build_result(result: BuildResult) -> str:
 
 
 def run_compile(project_dir: Path, folder: Path, *, save: bool) -> BuildResult:
-    """Builds ``folder``'s project from ``settings/``/``script/output.txt`` onto its fixed base
+    """Builds ``folder``'s project from ``settings/``/``script/output.mgl`` onto its fixed base
     (see module docstring for what that base is and why, and for why the real work happens in an
     isolated child process rather than here).
 
@@ -217,6 +217,16 @@ def _run_compile_isolated(project_dir: Path, folder: Path, *, save: bool) -> Bui
             return BuildResult(success=False, failure=f"Couldn't read the compile result: {exc}")
     finally:
         result_path.unlink(missing_ok=True)
+
+
+def _read_json_or_none(path: Path) -> dict | None:
+    import json
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _diagnostic_message(diagnostic: ProjectDiagnostic) -> BuildMessage:
@@ -309,13 +319,15 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         # `source` hasn't actually changed since it was decompiled from this same base, skip
         # recompiling it at all rather than re-deriving bytecode that's already sitting right there
         # and risking a discrepancy like the one above for zero reason.
-        if source == decompile.normalize_script_text(variant.decompile_script()):
+        base_script = variant.decompile_script()
+        if source == decompile.normalize_script_text(base_script):
             _logger.info(
                 "script unchanged since decompile for %s -- skipping recompile to avoid the "
                 "non-idempotent decompile/recompile round trip",
                 folder,
             )
         else:
+            strings_writer.rename_edited_strings(mp, base_script, source)
             fallback_reason = None
             try:
                 # The synthetic template pool is only built if the script needs something this base
@@ -378,6 +390,7 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
                 variant = rvt.load(str(variant_source_path))
                 mp = variant.multiplayer
                 content_header = variant.content_header
+                strings_writer.rename_edited_strings(mp, base_script, source)
                 if is_linked(folder) or link_map.get("resources"):
                     # The native compiler can't create a trait set, option or widget, only refer to one that's there
                     # -- and the linker has just written the ones the project declares. Grow the fresh variant to
@@ -449,7 +462,8 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
             except ValueError as exc:
                 return BuildResult(success=False, failure=f"Failed to name the script's resources: {exc}")
         # Same idea as the forge labels above: the script decides which strings exist.
-        reconciled_strings = strings_writer.reconcile_script_strings(mp, strings_data)
+        previous_strings = _read_json_or_none(folder / new_project.BUILD_DIRNAME / decompile.GENERATED_STRINGS_FILENAME)
+        reconciled_strings = strings_writer.reconcile_script_strings(mp, strings_data, previous_strings)
         reconciled_strings = strings_writer.own_text(reconciled_strings, owned_text)
         try:
             string_warnings = strings_writer.apply_strings(mp, reconciled_strings.strings)
@@ -463,6 +477,10 @@ def _run_compile_in_process(project_dir: Path, folder: Path, *, save: bool) -> B
         if reconciled_strings.removed:
             result.notices.append(
                 BuildMessage(line=0, col=0, text=f"Removed {len(reconciled_strings.removed)} unused script string(s) from strings.json")
+            )
+        if reconciled_strings.updated:
+            result.notices.append(
+                BuildMessage(line=0, col=0, text=f"Updated {len(reconciled_strings.updated)} script string(s) in strings.json to the script's text")
             )
     else:
         reconciled = tables = reconciled_strings = None

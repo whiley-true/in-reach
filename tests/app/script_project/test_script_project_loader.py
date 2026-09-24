@@ -121,7 +121,7 @@ def test_kinds_defined_in_the_project_and_a_module_are_merged(tmp_path: Path) ->
 
 def test_a_folder_without_a_project_toml_is_not_linked(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("x = 1\n", encoding="utf-8")
 
     assert not is_linked(tmp_path)
 

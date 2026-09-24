@@ -680,9 +680,11 @@ def _fusion(line: _Line) -> FusionAnnotation:
 
 
 def _doc(line: _Line) -> DocAnnotation:
-    text = line.body.strip()
-    if not text:
-        raise line.problem("@doc needs some text")
+    """``@doc`` takes the rest of its line as Markdown: one space after ``@doc`` is dropped, and any further indent is
+    kept (a nested list, an indented code block). A bare ``-- @doc`` is a blank line -- a paragraph break in a longer
+    note."""
+    body = line.body.rstrip()
+    text = body[1:] if body.startswith(" ") else body
     return DocAnnotation(span=line.span(line.name_col, line.line_end), text=text)
 
 
@@ -749,6 +751,8 @@ _INTERPRETERS = {
 
 #: Names whose whole remainder is prose or an expression, so ``--`` inside isn't a note delimiter.
 _WHOLE_LINE = frozenset({"doc"})
+#: Every ``-- @name`` this module reads, sorted (not the env directives ``@if``/``@else``/``@end``).
+ANNOTATION_NAMES = tuple(sorted(_INTERPRETERS))
 
 
 def parse_annotations(text: str) -> Annotations:

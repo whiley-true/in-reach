@@ -22,7 +22,7 @@ def _built(folder: Path) -> None:
 
 def _single_built(folder: Path, text: str = "x = 1\n") -> Path:
     (folder / "script").mkdir()
-    (folder / "script" / "output.txt").write_text(text, encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text(text, encoding="utf-8")
     assert link(folder).ok
     binary = new_project.compiled_variant_path(folder)
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -34,7 +34,7 @@ def _single_built(folder: Path, text: str = "x = 1\n") -> Path:
 
 def test_a_single_file_built_before_builds_recorded_their_script_is_not_reported(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("x = 1\n", encoding="utf-8")
 
     assert apply_settings.script_has_unapplied_changes(tmp_path) is False
 
@@ -45,7 +45,7 @@ def test_a_freshly_built_single_file_has_nothing_to_apply(tmp_path: Path) -> Non
 
 def test_editing_a_single_file_makes_it_unapplied(tmp_path: Path) -> None:
     folder = _single_built(tmp_path)
-    (folder / "script" / "output.txt").write_text("x = 2\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("x = 2\n", encoding="utf-8")
 
     assert apply_settings.script_has_unapplied_changes(folder) is True
 
@@ -53,7 +53,7 @@ def test_editing_a_single_file_makes_it_unapplied(tmp_path: Path) -> None:
 def test_a_comment_only_edit_to_a_single_file_is_still_unapplied(tmp_path: Path) -> None:
     """A comment is part of what the compiler is given (and of skip-if-unchanged), so it is a change."""
     folder = _single_built(tmp_path)
-    (folder / "script" / "output.txt").write_text("-- hi\nx = 1\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("-- hi\nx = 1\n", encoding="utf-8")
 
     assert apply_settings.script_has_unapplied_changes(folder) is True
 

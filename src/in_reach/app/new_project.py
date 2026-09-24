@@ -11,7 +11,7 @@ project folder") -- it carries no project data of its own to keep in sync, so no
 reasoning for removing it applies. Everything else about the shape is carried over from
 the v2 prototype's ``inreach init``, restructured per several PROMPT.md passes into:
 
-- ``script/output.txt`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
+- ``script/output.mgl`` -- the one genuinely hand-editable thing: the Megalo script, decompiled once
   as a starting point, then never auto-touched again.
 - ``settings/`` -- a live, always-in-sync mirror of the source ``.bin``'s own settings (edited
   through RVT's own GUI, not by hand here) -- ``settings.json``/``script_settings.json``/
@@ -36,7 +36,7 @@ also where this project's own category/category_icon end up, stamped into the de
 ``settings.json`` itself (PROMPT.md: "we can get rid of user_settings.json ad move category and
 category_icon into settings.json" -- there's no separate ``user_settings.json`` file at all).
 ``settings/`` and ``build/`` are kept in sync with the ``.bin`` afterward too, whenever RVT saves
-over it (see ``MainWindow``'s own ``.bin``-file-watcher) -- only ``script/output.txt`` is ever left
+over it (see ``MainWindow``'s own ``.bin``-file-watcher) -- only ``script/output.mgl`` is ever left
 alone once written.
 """
 
@@ -56,10 +56,29 @@ _logger = logging_setup.get_logger(__name__)
 PROJECT_DIR_KEY = "PROJECT_DIR"
 
 #: PROMPT.md: "rename edit to script: and then move script.txt to be script/game.txt" (later
-#: renamed again, PROMPT.md: "please rename game.txt to output.txt" -- see
+#: renamed again, PROMPT.md: "please rename game.txt to output.mgl" -- see
 #: :data:`~in_reach.app.rvt.decompile.SCRIPT_FILENAME`) -- the one genuinely hand-editable thing in
 #: a project, a flat folder now rather than nested under a no-longer-meaningful "rvt" subdirectory.
 SCRIPT_DIRNAME = "script"
+#: A single-file project's script, in ``script/`` -- Megalo text, so ``.mgl`` like a script project's blocks and modules
+#: (not ``.mglo``: that is ReachVariantTool's binary bare-Megalo variant, what Export can write).
+SCRIPT_FILENAME = "output.mgl"
+#: What in-reach 0.3 called it; :func:`migrate_script_file` renames it.
+LEGACY_SCRIPT_FILENAME = "output.txt"
+
+
+def migrate_script_file(folder: Path) -> Path:
+    """``folder``'s script file (``script/output.mgl``), renaming a project's old ``script/output.txt`` to it first if that
+    is what it has. Called wherever the script is first read, so an existing project moves over on its own."""
+    scripts = folder / SCRIPT_DIRNAME
+    new = scripts / SCRIPT_FILENAME
+    old = scripts / LEGACY_SCRIPT_FILENAME
+    if old.is_file() and not new.exists():
+        old.rename(new)
+        _logger.info("renamed %s to %s", old, new.name)
+    return new
+
+
 SETTINGS_DIRNAME = "settings"
 #: Envs for the script (see :mod:`in_reach.app.script_preprocess`): ``script/env/<name>.env``,
 #: the active one's name in ``script/env/active_env.txt``. Named here, not there, so a new project
@@ -67,17 +86,31 @@ SETTINGS_DIRNAME = "settings"
 ENV_DIRNAME = "env"
 ENV_SUFFIX = ".env"
 ACTIVE_ENV_FILENAME = "active_env.txt"
-#: The env a new project starts on -- development is the normal state, and a release is something
-#: you switch to deliberately.
-DEFAULT_ENV = "dev"
+#: The env a new project starts on -- its one starter env, :data:`STARTER_ENVS`. Others (a "release" build, say) are
+#: added as they are needed.
+DEFAULT_ENV: str | None = "base"
 _ENV_HEADER = (
-    '# Env "{name}" -- one of the environments script/output.txt can be built for.\n'
-    "# The active env is named in active_env.txt; pick one in the IDE's Envs section (or\n"
-    "# `in-reach env set NAME`). Add one there, with `in-reach env new NAME`, or by dropping in a <name>.env file.\n"
+    '# Env "{name}"\n'
     "#\n"
-    "# FLAGS switches on the `-- @if NAME` ... `-- @end` blocks in the script (`-- @else` and\n"
-    "# `-- @if !NAME` work too). NAME=value lines fill in ${{NAME}} wherever it appears in the script:\n"
-    '# a number, a percentage like -100%, a name, or a "quoted string".\n'
+    "# An env builds the script a particular way -- say the \"base\" build you test in, and a\n"
+    '# "release" build you share (add one when you need it: Copy or New in the Scripts view). It only\n'
+    "# does anything while it is the active env: choose it in the IDE's Scripts view (Envs, then Use),\n"
+    "# or run:  in-reach env set {name}\n"
+    "#\n"
+    "# FLAGS -- names that switch parts of the script on. With FLAGS=DEV, these lines are kept:\n"
+    "#     -- @if DEV\n"
+    "#     current_player.score += 10\n"
+    "#     -- @end\n"
+    "#   and without DEV they are left out. `-- @if !DEV` keeps lines only when DEV is NOT set,\n"
+    "#   and `-- @else` starts the other half of a block. Several flags: FLAGS=DEV,VERBOSE_HUD\n"
+    "#\n"
+    "# NAME=value -- a value the script uses as ${{NAME}}. With SCORE_TO_WIN=5, this line:\n"
+    "#     if current_player.score >= ${{SCORE_TO_WIN}} then\n"
+    "#   is built as:  if current_player.score >= 5 then\n"
+    "#   A value is a number (-32768 to 32767), a percentage (-100%), a name (hill_label),\n"
+    '#   or a "quoted string".\n'
+    "#\n"
+    "# Lines starting with # are notes, like these.\n"
 )
 #: What in-reach 0.3 called ACTIVE_ENV_FILENAME: still read when there is no new one, removed when an env is chosen.
 LEGACY_ACTIVE_ENV_FILENAME = "active_profile.txt"
@@ -88,10 +121,11 @@ def env_file_text(name: str, body: str = "\nFLAGS=\n") -> str:
     return _ENV_HEADER.format(name=name) + body
 
 
-#: Starter env text by name. Both are inert for a script that uses neither feature.
+#: Starter env text by name: the one env a new project has, and builds with (:data:`DEFAULT_ENV`). Inert for a script
+#: that uses neither feature.
 STARTER_ENVS = {
-    "dev": _ENV_HEADER.format(name="dev") + "\nFLAGS=DEV\n# SCORE_TO_WIN=5\n",
-    "release": _ENV_HEADER.format(name="release") + "\nFLAGS=\n# SCORE_TO_WIN=50\n",
+    "base": _ENV_HEADER.format(name="base")
+    + "\nFLAGS=DEV\n# SCORE_TO_WIN=5    <- remove the # to give ${SCORE_TO_WIN} a value\n",
 }
 #: PROMPT.md: "move settings/schemas into schemas" -- a project-root folder of its own, not nested
 #: under SETTINGS_DIRNAME (see :mod:`in_reach.app.rvt.decompile`, which writes into it).
@@ -105,6 +139,31 @@ INIT_GAMETYPE_DIRNAME = "init_gametype"
 #: would have hidden that placeholder).
 NOTES_FILENAME = "Notes.txt"
 NOTES_TEMPLATE = ""
+#: What a project's own ``.gitignore`` leaves out: personal files, never versioned -- by the user's git or the shadow VCS.
+PERSONAL_FILES = (NOTES_FILENAME,)
+GITIGNORE_FILENAME = ".gitignore"
+_GITIGNORE_HEADER = "# Personal files, never versioned (in-reach keeps the Dashboard's notepad here)."
+
+
+def ensure_gitignore(folder: Path) -> Path:
+    """``folder``'s ``.gitignore``, created or added to so it lists every :data:`PERSONAL_FILES` entry (nothing else in
+    it is touched). An existing project gets one the first time it is opened."""
+    path = folder / GITIGNORE_FILENAME
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    listed = {line.strip().lstrip("/") for line in text.splitlines()}
+    missing = [name for name in PERSONAL_FILES if name not in listed]
+    if missing:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        if not text:
+            text = _GITIGNORE_HEADER + "\n"
+        path.write_text(text + "".join(f"/{name}\n" for name in missing), encoding="utf-8")
+    return path
+
+
+def is_personal_file(relative: Path) -> bool:
+    """Whether ``relative`` (to a project folder) is one of its :data:`PERSONAL_FILES`."""
+    return len(relative.parts) == 1 and relative.name in PERSONAL_FILES
 #: PROMPT.md: "please also add a second stubbed README.md file in the generated project folder"
 #: -- distinct from (and, unlike the old one this module's docstring mentions removing, carries no
 #: copy of) the title: a plain stub, same treatment as the .in-reach-level one (see
@@ -458,7 +517,8 @@ def create_gametype_project(
     env_dir.mkdir()
     for env_name, env_text in STARTER_ENVS.items():
         (env_dir / f"{env_name}{ENV_SUFFIX}").write_text(env_text, encoding="utf-8")
-    (env_dir / ACTIVE_ENV_FILENAME).write_text(DEFAULT_ENV + "\n", encoding="utf-8")
+    if DEFAULT_ENV is not None:
+        (env_dir / ACTIVE_ENV_FILENAME).write_text(DEFAULT_ENV + "\n", encoding="utf-8")
     (folder / SETTINGS_DIRNAME).mkdir(parents=True)
 
     build_dir = folder / BUILD_DIRNAME
@@ -466,6 +526,7 @@ def create_gametype_project(
     (build_dir / ".gitignore").write_text(_BUILD_GITIGNORE, encoding="utf-8")
 
     (folder / NOTES_FILENAME).write_text(NOTES_TEMPLATE, encoding="utf-8")
+    ensure_gitignore(folder)
     (folder / README_FILENAME).write_text(_README_TEMPLATE, encoding="utf-8")
 
     resolved_icon = category_icon if category_icon is not None else (default_icon_for(category) or EngineIcon.capture_the_flag)

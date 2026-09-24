@@ -10,7 +10,7 @@
             print(diagnostic)            # "modules/hill_buff/module.toml:5: error: ... [order-unknown-block]"
 
 Nothing here loads the native extension or Qt, so the IDE process can import it (``link`` builds ``build/Compiled.txt``
-from the project -- or from a single ``script/output.txt``, as a project of one block (:func:`load_single_file`); the
+from the project -- or from a single ``script/output.mgl``, as a project of one block (:func:`load_single_file`); the
 compile flow calls it before compiling). See :mod:`.project` for what is
 loaded and reported, and ``TO_IMPLEMENT`` §2 and §5 for the layout it reads.
 """

@@ -1,4 +1,4 @@
-"""Tokenizer for Megalo script text (``script/output.txt``). See ``nodes.py``'s module docstring
+"""Tokenizer for Megalo script text (``script/output.mgl``). See ``nodes.py``'s module docstring
 for why this grammar (RVT's decompiler output) rather than a binding onto the engine's own AST.
 
 Ported verbatim from a prior prototype (``D:\\whileyRepos\\sort\\mega-ide``, PROMPT.md: "we want a

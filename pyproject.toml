@@ -36,4 +36,5 @@ in_reach = [
     "app/rvt_tool/bin/**/*",
     "app/rvt/native/**/*",
     "app/blank_variants/*.bin",
+    "app/rvt/megalo_ast/vocabulary.json",
 ]

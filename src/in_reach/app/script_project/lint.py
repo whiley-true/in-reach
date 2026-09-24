@@ -16,7 +16,8 @@ IR016   ``@assumes BLOCK`` where BLOCK doesn't come before the block that assume
 ======  =============================================================================================
 
 Also: ``see-unknown`` (a warning: ``@see`` naming no tag, block, module, fragment or declared name), ``kind-unknown`` (object storage or a bitfield against a kind nobody declares), ``team-owner-invalid``, and
-``body-syntax`` (a region's code that doesn't parse).
+``body-syntax`` (a region's code that doesn't parse) and ``not-a-statement`` (a line that is only a value -- ``ff``,
+``current_player.score`` -- which parses, but Megalo has no such statement: a line is a call or an assignment).
 
 Not here, because they need an engine catalog or the linker's output: IR001-IR004, IR008, IR009, IR012, IR014,
 IR018 (and IR006b). IR013 is the block-order cycle ``load_project`` already reports (``order-cycle``), IR015 the
@@ -31,10 +32,11 @@ from dataclasses import dataclass
 
 from in_reach.app.rvt.megalo_ast import MegaloLexError, MegaloParseError, walk
 from in_reach.app.rvt.megalo_ast.annotations import BitfieldAnnotation, SeeAnnotation, StorageAnnotation, TagsAnnotation
-from in_reach.app.rvt.megalo_ast.nodes import Call, ForEach, Identifier, Script, VariableDeclaration
+from in_reach.app.rvt.megalo_ast.nodes import Call, ExprStatement, ForEach, Identifier, Script, VariableDeclaration
 
 from .diagnostics import ProjectDiagnostic
 from .model import SemanticModel
+from .project import is_linked
 
 _TEAM_OWNER = re.compile(r"team[0-7]")
 _MAX_BITFIELD_FLAGS = 15
@@ -87,8 +89,10 @@ class _Linter:
         self.model = model
         self.found: list[ProjectDiagnostic] = []
 
-    def add(self, code: str, message: str, file: str, line: int, hint: str = "", severity: str = "error") -> None:
-        self.found.append(ProjectDiagnostic(severity=severity, code=code, message=message, file=file, line=line, hint=hint))
+    def add(self, code: str, message: str, file: str, line: int, hint: str = "", severity: str = "error", col: int = 0) -> None:
+        self.found.append(
+            ProjectDiagnostic(severity=severity, code=code, message=message, file=file, line=line, col=col, hint=hint)
+        )
 
     def run(self) -> None:
         self._see_targets()
@@ -121,9 +125,11 @@ class _Linter:
         except (MegaloLexError, MegaloParseError) as exc:
             token = getattr(exc, "token", None)
             line = region.first_line + (getattr(token, "start_line", 1) - 1)
+            # A single file's one block (MAIN) is an internal name: its file and line say where.
+            single = not is_linked(self.model.project.folder)
             self.add(
                 "body-syntax", str(exc).split(" at line")[0], region.file, line,
-                hint=f"in {region.what}", severity="error",
+                hint="" if single else f"in {region.what}", severity="error",
             )
             return None
 
@@ -151,6 +157,15 @@ class _Linter:
                 self.add(
                     "IR005", f"a timer has no network priority, but {node.scope}.timer[{node.index}] is declared with one",
                     region.file, line_of(node), hint="remove 'with network priority ...'",
+                )
+            elif isinstance(node, ExprStatement) and not isinstance(node.expr, Call):
+                span = node.span
+                source = region.lines[span.start_line - 1] if span.start_line - 1 < len(region.lines) else ""
+                written = source[span.start_col:span.end_col].strip() if span.end_line == span.start_line else ""
+                self.add(
+                    "not-a-statement", f"{written or 'this'!r} on its own does nothing -- a line of script is a call or "
+                    "an assignment", region.file, line_of(node),
+                    hint="call something (game.end_round()) or assign it (global.number[0] = 1)", col=span.start_col,
                 )
             elif isinstance(node, ForEach) and node.selector == "object" and node.label is None and id(node) in per_tick_nodes:
                 self.add(

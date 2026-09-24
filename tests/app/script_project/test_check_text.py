@@ -9,16 +9,16 @@ from in_reach import api
 
 def _single(tmp_path: Path, text: str = "game.end_round()\n") -> Path:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text(text, encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text(text, encoding="utf-8")
     return tmp_path
 
 
 def test_a_single_files_buffer_is_checked_instead_of_what_is_saved(tmp_path: Path) -> None:
     folder = _single(tmp_path)
 
-    result = api.check_text(folder, "output.txt", "-- @number g_a\n-- @number g_a\n")
+    result = api.check_text(folder, "output.mgl", "declare global.number[0]\ndeclare global.number[0]\n")
 
-    assert not result.ok and [(d.code, d.file, d.line) for d in result.errors] == [("IR006", "output.txt", 2)]
+    assert not result.ok and [(d.code, d.file, d.line) for d in result.errors] == [("IR006", "output.mgl", 2)]
     assert api.check(folder).ok  # the file on disk is still fine
     assert not (folder / "build").exists()
 
@@ -26,7 +26,7 @@ def test_a_single_files_buffer_is_checked_instead_of_what_is_saved(tmp_path: Pat
 def test_an_absolute_path_inside_script_is_accepted(tmp_path: Path) -> None:
     folder = _single(tmp_path)
 
-    result = api.check_text(folder, folder / "script" / "output.txt", "x = true\n")
+    result = api.check_text(folder, folder / "script" / "output.mgl", "x = true\n")
 
     assert [d.code for d in result.diagnostics] == ["IR007"]
 

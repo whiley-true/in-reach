@@ -1733,7 +1733,7 @@ def test_raises_when_the_variant_has_no_existing_templates_to_source_from() -> N
 
 def test_run_compile_uses_megalo_compiler_for_a_supported_edited_script(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, source_variant=_JUGGERNAUT_BIN)
-    (folder / "script" / "output.txt").write_text(
+    (folder / "script" / "output.mgl").write_text(
         "global.number[0] = 1\r\nif global.number[0] == 1 then\r\n   game.end_round()\r\nend\r\n",
         encoding="utf-8",
     )
@@ -1761,7 +1761,7 @@ def test_run_compile_falls_back_to_native_for_an_unsupported_edited_script(tmp_p
     # A player-scoped variable is outside megalo_compiler's supported subset -- global.number[N]
     # only, see its own module docstring -- but is perfectly valid, ordinary Megalo the native
     # compiler handles fine.
-    (folder / "script" / "output.txt").write_text("current_player.number[0] = 1\r\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("current_player.number[0] = 1\r\n", encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 

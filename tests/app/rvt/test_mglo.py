@@ -23,7 +23,7 @@ def _fake_run(returncode: int, *, touch: Path | None = None):
 
 def test_write_mglo_invokes_the_headless_cli_with_the_expected_arguments(tmp_path: Path) -> None:
     bin_path = tmp_path / "build" / "dist" / "Slayer.bin"
-    script_path = tmp_path / "script" / "output.txt"
+    script_path = tmp_path / "script" / "output.mgl"
     dest_path = tmp_path / "Slayer.mglo"
     calls = []
 

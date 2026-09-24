@@ -1,4 +1,4 @@
-"""AST node types for Megalo script text (``script/output.txt`` -- RVT's own decompiler output, see
+"""AST node types for Megalo script text (``script/output.mgl`` -- RVT's own decompiler output, see
 :mod:`in_reach.app.rvt.decompile`'s module docstring).
 :func:`in_reach.app.rvt.megalo_ast.parser.parse` builds a :class:`Script` out of these;
 :func:`in_reach.app.rvt.megalo_ast.unparse.unparse` renders one back to text.
@@ -14,7 +14,7 @@ separate, sibling text-side grammar. It covers Megalo script source text as a wh
 ``GameVariant.decompile_script()`` actually emits (declarations/for-each/do/if/on-event blocks,
 sequential sibling ``if``s, no comments) AND the richer hand-authorable dialect ``compile_script()``
 also accepts (comments, ``alias``, ``alt``/``altif`` -- confirmed directly via ``compile_script()``,
-see below), since a user hand-editing ``script/output.txt`` before recompiling it can use either. A
+see below), since a user hand-editing ``script/output.mgl`` before recompiling it can use either. A
 plain recursive-descent parser over this text is enough to get a real, traversable object tree
 without needing the C++ AST binding for it.
 
@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 
 
 class SourceSpan(BaseModel):
-    """1-based line numbers (matching how a human/editor reads ``script/output.txt``), 0-based
+    """1-based line numbers (matching how a human/editor reads ``script/output.mgl``), 0-based
     columns. ``end_*`` is exclusive, i.e. one past the last character of the node's own text -- the
     same convention as Python's own slice semantics."""
 
@@ -271,7 +271,7 @@ class Comment(ASTNode):
 
 
 class Script(BaseModel):
-    """The whole of a decompiled ``script/output.txt`` (or hand-authored source in the richer
+    """The whole of a decompiled ``script/output.mgl`` (or hand-authored source in the richer
     dialect). Top-level ``body`` mixes variable/alias declarations and top-level statements in
     source order -- top-level statements are each their own always-ticking trigger (Megalo has no
     single implicit "main" block; every top-level statement in the decompiled text runs every tick

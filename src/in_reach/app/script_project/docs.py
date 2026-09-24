@@ -60,8 +60,11 @@ _DECLARING = (StorageAnnotation, BitfieldAnnotation, TraitAnnotation, OptionAnno
 
 @dataclass
 class Note:
-    """One run of ``@doc`` lines. ``kind`` is what it documents: ``"file"``, ``"name"`` (``subject`` is the names,
-    comma-separated), ``"fragment"``, ``"preamble"`` or ``"code"`` (``subject`` is that line of code)."""
+    """One run of ``@doc`` lines -- an *entry*. ``kind`` is what it documents: ``"file"``, ``"name"`` (``subject`` is the
+    names, comma-separated), ``"fragment"``, ``"preamble"`` or ``"code"`` (``subject`` is that line of code). ``text`` is
+    Markdown, one line per ``@doc`` line (a bare ``-- @doc`` is a blank line); ``lines`` are those lines' 1-based numbers
+    in ``file``, which :func:`rewrite_entry` replaces. ``details`` is the docstring's longer text, Markdown too -- kept in
+    ``script/DOCSTRINGS.md`` (:data:`DOCSTRINGS_FILENAME`), not in the script, under the docstring's title."""
 
     text: str
     file: str
@@ -69,6 +72,8 @@ class Note:
     kind: str
     subject: str
     names: list[str] = field(default_factory=list)
+    lines: list[int] = field(default_factory=list)
+    details: str = ""
 
 
 @dataclass
@@ -130,7 +135,10 @@ class Docs:
     flags: list[str]
     linked: bool  # whether the script links right now (if not, storage/budget come from the last link)
     readme: Readme | None = None
-    tags: dict[str, list[str]] = field(default_factory=dict)  # tag -> "block SETUP" / "module x" / "file output.txt"
+    description: str = ""  # the documentation's own description (script/docs.json) -- not the gametype's in-game one
+    #: DOCSTRINGS.md texts whose docstring is gone or was reworded: ``{note, text}`` (``note``: the title it had).
+    detached: list[dict] = field(default_factory=list)
+    tags: dict[str, list[str]] = field(default_factory=dict)  # tag -> "block SETUP" / "module x" / "file output.mgl"
     files: list[FileDocs] = field(default_factory=list)
     blocks: list[BlockDocs] = field(default_factory=list)
     modules: list[ModuleDocs] = field(default_factory=list)
@@ -193,26 +201,29 @@ def _file_docs(file: SourceFile, targets: dict[str, str], module: str | None) ->
                     unclaimed = []
             elif isinstance(annotation, DocAnnotation):
                 (declared[-1][1] if declared else unclaimed).append(annotation)
+        def add(texts: list[DocAnnotation], kind: str, subject: str, names: list[str] | None = None) -> None:
+            text = "\n".join(a.text for a in texts).strip("\n")
+            if text.strip():  # bare `-- @doc` lines alone document nothing
+                numbers = [a.span.start_line for a in texts]
+                docs.notes.append(Note(text, file.path, numbers[0], kind, subject, names or [], numbers))
+
         for name, texts in declared:
             if texts:
-                docs.notes.append(Note("\n".join(a.text for a in texts), file.path, texts[0].span.start_line, "name", name, [name]))
+                add(texts, "name", name, [name])
         if not unclaimed:
             continue
-        text = "\n".join(a.text for a in unclaimed)
-        line = unclaimed[0].span.start_line
         fragment = next((a for a in found if isinstance(a, FragmentAnnotation)), None)
         preamble = next((a for a in found if isinstance(a, PreambleAnnotation)), None)
         if fragment is not None:
-            subject = f"{module}.{fragment.name}" if module else f"{fragment.block}.{fragment.name}"
-            docs.notes.append(Note(text, file.path, line, "fragment", subject))
+            add(unclaimed, "fragment", f"{module}.{fragment.name}" if module else f"{fragment.block}.{fragment.name}")
         elif preamble is not None:
-            docs.notes.append(Note(text, file.path, line, "preamble", preamble.name))
+            add(unclaimed, "preamble", preamble.name)
         else:
             following = lines[last] if last < len(lines) else ""
             if following.strip():
-                docs.notes.append(Note(text, file.path, line, "code", following.strip()))
+                add(unclaimed, "code", following.strip())
             else:
-                docs.notes.append(Note(text, file.path, line, "file", file.path))
+                add(unclaimed, "file", file.path)
     docs.notes.sort(key=lambda note: note.line)
     return docs
 
@@ -256,6 +267,7 @@ def build_docs(folder: Path, linked: LinkResult | None = None) -> Docs:
     docs = Docs(
         mode="single" if single else "project", name=name, env=env.name if env else None,
         flags=sorted(env.flags) if env else [], linked=linked.ok, readme=_readme(scripts, README_FILENAME),
+        description=read_store(folder)["description"],
     )
 
     targets = see_targets(model)
@@ -319,8 +331,236 @@ def build_docs(folder: Path, linked: LinkResult | None = None) -> Docs:
         docs.resources.append({**entry, "name": name_, "doc": notes_by_subject.get(("name", name_), "")})
     docs.budget = link_map.get("budget") or {}
     docs.fusion = link_map.get("fusion") or {}
+    _attach_details(folder, docs)
     _index_tags(docs)
     return docs
+
+
+# -- editing entries ---------------------------------------------------------------------------------------------
+
+_DOC_LINE = re.compile(r"^(\s*)--\s*@doc\b")
+
+#: ``script/docs.json``: the documentation's own description -- plain text the overview opens with (not the gametype's
+#: in-game description). (Before DOCSTRINGS.md it held docstring texts too, as ``entries``; :func:`read_docstrings`
+#: still reads them, and :func:`sync_docstrings` moves them over.)
+STORE_FILENAME = "docs.json"
+#: ``script/DOCSTRINGS.md``: every docstring in the script by its title (the ``-- @doc`` line's own text) with a longer
+#: text under it, written by a person -- kept in step with the script by :func:`sync_docstrings`.
+DOCSTRINGS_FILENAME = "DOCSTRINGS.md"
+_DETACHED_HEADING = "# No longer in the script"
+_LOCATION = re.compile(r"^<!--\s*(.*?)\s*-->$")
+_DOCSTRINGS_INTRO = (
+    "# Docstrings\n\n"
+    "Every `-- @doc` docstring in the script, by its title (what its `-- @doc` line says), with a longer text under it.\n"
+    "Write the text under a title; the titles, their order and the `<!-- where -->` lines follow the script (a docstring\n"
+    "taken out of the script keeps its text, under \"No longer in the script\" at the end). The documentation shows each\n"
+    "text under its docstring.\n"
+)
+
+
+def store_path(folder: Path) -> Path:
+    return script_dir(folder) / STORE_FILENAME
+
+
+def docstrings_path(folder: Path) -> Path:
+    return script_dir(folder) / DOCSTRINGS_FILENAME
+
+
+def read_store(folder: Path) -> dict:
+    """``script/docs.json`` as ``{"description": str, "entries": [...]}`` (``entries``: the old home of docstring texts)
+    -- empty when there is none, or it can't be read."""
+    try:
+        data = json.loads(store_path(folder).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    entries = [
+        {"file": str(e.get("file", "")), "note": str(e.get("note", "")), "text": str(e.get("text", ""))}
+        for e in data.get("entries", []) if isinstance(e, dict)
+    ]
+    return {"description": str(data.get("description", "") or ""), "entries": entries}
+
+
+def write_store(folder: Path, store: dict) -> Path:
+    """Writes ``store`` to ``script/docs.json`` -- or, when it holds nothing, removes the file."""
+    path = store_path(folder)
+    store = {key: value for key, value in store.items() if value}
+    if not store:
+        path.unlink(missing_ok=True)
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def set_description(folder: Path, text: str) -> None:
+    """The documentation's own description, plain text (the overview's Description section)."""
+    store = read_store(folder)
+    store["description"] = text.strip("\n")
+    write_store(folder, store)
+
+
+def docstring_title(note: Note) -> str:
+    """A docstring's title in DOCSTRINGS.md: the first line of its ``-- @doc`` text."""
+    return next((line.strip() for line in note.text.splitlines() if line.strip()), "")
+
+
+def read_docstrings(folder: Path) -> dict[str, str]:
+    """Title -> text for every section of ``script/DOCSTRINGS.md`` (the first of any repeated title), then any older
+    ``docs.json`` entries not already there."""
+    texts: dict[str, str] = {}
+    try:
+        lines = docstrings_path(folder).read_text(encoding="utf-8").replace("\r\n", "\n").split("\n")
+    except OSError:
+        lines = []
+    title, body = None, []
+
+    def close() -> None:
+        if title is not None:
+            while body and (not body[0].strip() or _LOCATION.match(body[0].strip())):
+                body.pop(0)
+            texts.setdefault(title, "\n".join(body).strip("\n"))
+
+    for line in lines:
+        if line.startswith("## "):
+            close()
+            title, body = line[3:].strip(), []
+        elif line.startswith("# "):
+            close()
+            title, body = None, []
+        elif title is not None:
+            body.append(line)
+    close()
+    for entry in read_store(folder)["entries"]:
+        if entry["note"] and not texts.get(docstring_title(Note(entry["note"], entry["file"], 0, "code", ""))):
+            texts[docstring_title(Note(entry["note"], entry["file"], 0, "code", ""))] = entry["text"]
+    return texts
+
+
+def render_docstrings(notes: list[Note], texts: dict[str, str]) -> str:
+    """DOCSTRINGS.md for ``notes`` (in script order) with ``texts`` under their titles; texts whose title no docstring
+    has any more go at the end, under "No longer in the script"."""
+    out = [_DOCSTRINGS_INTRO]
+    seen: set[str] = set()
+    for note in notes:
+        title = docstring_title(note)
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        text = texts.get(title, "").strip("\n")
+        out += [f"## {title}", f"<!-- {note.file}:{note.line} -->", ""] + ([text, ""] if text else [])
+    detached = [(title, text) for title, text in texts.items() if title not in seen and text.strip()]
+    if detached:
+        out += [_DETACHED_HEADING, ""]
+        for title, text in detached:
+            out += [f"## {title}", "", text.strip("\n"), ""]
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _write_docstrings(folder: Path, notes: list[Note], texts: dict[str, str]) -> Path:
+    path = docstrings_path(folder)
+    if not notes and not any(texts.values()):
+        return path
+    content = render_docstrings(notes, texts)
+    current = path.read_text(encoding="utf-8").replace("\r\n", "\n") if path.is_file() else None
+    if current != content:
+        path.write_text(content, encoding="utf-8")
+    store = read_store(folder)
+    if store["entries"]:  # moved over: docs.json keeps only the description
+        write_store(folder, {"description": store["description"]})
+    return path
+
+
+def sync_docstrings(folder: Path, docs: Docs) -> Path:
+    """Brings ``script/DOCSTRINGS.md`` in step with ``docs``' docstrings -- a section for each, texts kept -- and moves
+    any older ``docs.json`` texts into it. Writes only when something changed; with no docstrings and no texts, writes
+    nothing."""
+    return _write_docstrings(folder, docs.notes, read_docstrings(folder))
+
+
+def refresh_docstrings(folder: Path, docs: Docs) -> bool:
+    """:func:`sync_docstrings`, but only for a project that has a ``script/DOCSTRINGS.md`` already -- after the script is
+    saved, so each where-line says where its docstring is now. ``True`` if the file changed."""
+    path = docstrings_path(folder)
+    if not path.is_file():
+        return False
+    before = path.read_text(encoding="utf-8")
+    sync_docstrings(folder, docs)
+    return path.read_text(encoding="utf-8") != before
+
+
+def docstring_line(folder: Path, title: str) -> int:
+    """The 1-based line in ``script/DOCSTRINGS.md`` where ``title``'s text starts (under its heading and where-line), or
+    0 if it has no section."""
+    try:
+        lines = docstrings_path(folder).read_text(encoding="utf-8").replace("\r\n", "\n").split("\n")
+    except OSError:
+        return 0
+    for number, line in enumerate(lines, start=1):
+        if line.startswith("## ") and line[3:].strip() == title:
+            below = number + 1
+            if below <= len(lines) and _LOCATION.match(lines[below - 1].strip()):
+                below += 1
+            if below <= len(lines) and not lines[below - 1].strip():
+                following = lines[below] if below < len(lines) else ""
+                if following.strip() and not following.startswith("#"):
+                    return below + 1  # the text's first line
+            return below  # the blank line to start the text on
+    return 0
+
+
+def set_docstring_text(folder: Path, title: str, new_title: str | None, text: str | None = None) -> None:
+    """Moves a docstring's text from ``title`` to ``new_title`` (``None``: the docstring is gone, and so is its text),
+    replacing it with ``text`` unless that is ``None``, and rewrites DOCSTRINGS.md for the script as it is now (call it
+    after the ``-- @doc`` lines themselves have changed)."""
+    texts = read_docstrings(folder)
+    kept = texts.pop(title, "")
+    if new_title:
+        texts[new_title] = text if text is not None else kept
+    _write_docstrings(folder, build_docs(folder).notes, texts)
+
+
+def _attach_details(folder: Path, docs: Docs) -> None:
+    texts = read_docstrings(folder)
+    used = set()
+    for note in docs.notes:
+        title = docstring_title(note)
+        if title in texts:
+            note.details = texts[title]
+            used.add(title)
+    docs.detached = [{"note": title, "text": text} for title, text in texts.items() if title not in used and text.strip()]
+
+
+def rewrite_entry(folder: Path, file: str, lines: list[int], text: str | None) -> Path:
+    """Replaces an entry's ``-- @doc`` lines (``lines``, 1-based, in ``script/<file>``) with ``text`` -- one ``-- @doc``
+    line per line of it, at the first line's indent, a blank line as a bare ``-- @doc`` -- or, for ``None`` or blank
+    text, removes them. Every other line, and the file's line endings, stay as they are. Returns the file.
+
+    Raises:
+        ValueError: One of ``lines`` is no longer a ``@doc`` line (the file changed since the entry was read)."""
+    path = script_dir(folder) / file
+    raw = path.read_bytes().decode("utf-8")
+    crlf = "\r\n" in raw
+    source = raw.replace("\r\n", "\n").split("\n")
+    wanted = sorted(set(lines))
+    for number in wanted:
+        if not (1 <= number <= len(source) and _DOC_LINE.match(source[number - 1])):
+            raise ValueError(f"{file}:{number} isn't a @doc line any more -- the file has changed")
+    indent = _DOC_LINE.match(source[wanted[0] - 1])[1]
+    replacement = []
+    if text is not None and text.strip():
+        replacement = [f"{indent}-- @doc {line}".rstrip() if line.strip() else f"{indent}-- @doc" for line in text.strip("\n").split("\n")]
+    gone = set(wanted)
+    out: list[str] = []
+    for number, line in enumerate(source, start=1):
+        if number == wanted[0]:
+            out += replacement
+        elif number not in gone:
+            out.append(line)
+    written = "\n".join(out)
+    path.write_bytes((written.replace("\n", "\r\n") if crlf else written).encode("utf-8"))
+    return path
 
 
 # -- views of it -----------------------------------------------------------------------------------------------
@@ -395,15 +635,21 @@ def _readme_section(readme: Readme | None, level: str) -> list[str]:
 
 
 def _notes(notes: list[Note]) -> list[str]:
+    """Each entry as a Markdown list item: its first line beside what it documents and where, any further lines (a
+    longer entry is Markdown too) indented under it."""
     out = []
     for note in notes:
         where = f"`{note.file}:{note.line}`"
+        first, *rest = note.text.split(chr(10))
         if note.kind == "file":
-            out.append(f"- {_paragraph(note.text)} ({where})")
+            out.append(f"- {first} ({where})")
         elif note.kind == "code":
-            out.append(f"- `{note.subject}` -- {_paragraph(note.text)} ({where})")
+            out.append(f"- `{note.subject}` -- {first} ({where})")
         else:
-            out.append(f"- **{note.subject}** -- {_paragraph(note.text)} ({where})")
+            out.append(f"- **{note.subject}** -- {first} ({where})")
+        if note.details.strip():
+            rest += ["", *note.details.strip(chr(10)).split(chr(10))]
+        out += [f"  {line}" if line.strip() else "" for line in rest]
     return out
 
 
@@ -415,11 +661,13 @@ def render_markdown(docs: Docs) -> str:
     out += [f"{kind} -- {env}." + ("" if docs.linked else " **The script doesn't link right now**; slots and budget are from the last link."), ""]
     if docs.tags:
         out += ["Tags: " + " ".join(f"`{tag}`" for tag in docs.tags), ""]
+    out += ["## Description", "", docs.description.strip() or "*No description yet.*", ""]
     out += _readme_section(docs.readme, "#")
 
     file_notes = [n for n in docs.notes if n.kind == "file"]
     if file_notes:
-        out += ["## About", "", *[_paragraph(n.text) + "\n" for n in file_notes]]
+        # Markdown as written
+        out += ["## About", "", *[n.text + ("\n\n" + n.details.strip() if n.details.strip() else "") + "\n" for n in file_notes]]
 
     for block in docs.blocks:
         out += [f"## Block {block.name}" + (f" (`{block.file}`)" if block.file else " (fragments only)"), ""]
@@ -494,6 +742,14 @@ def render_markdown(docs: Docs) -> str:
         out += ["## Tags", ""]
         out += [f"- `{tag}`: {', '.join(where)}" for tag, where in docs.tags.items()]
         out.append("")
+    if docs.detached:
+        out += [
+            "## Docstring texts no longer in the script", "",
+            f"In `script/{DOCSTRINGS_FILENAME}`: their `-- @doc` line was removed or reworded.", "",
+        ]
+        for entry in docs.detached:
+            out += [f"- {entry['note']}", *[f"  {line}" if line.strip() else "" for line in entry["text"].split("\n")]]
+        out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
 
@@ -502,7 +758,9 @@ def docs_dir(folder: Path) -> Path:
 
 
 def write_docs(folder: Path, docs: Docs) -> list[Path]:
-    """Writes ``build/docs/overview.md`` and ``overview.json``; returns the files whose content changed."""
+    """Writes ``build/docs/overview.md`` and ``overview.json`` -- and brings ``script/DOCSTRINGS.md`` in step with the
+    script (:func:`sync_docstrings`); returns the ``build/docs`` files whose content changed."""
+    sync_docstrings(folder, docs)
     directory = docs_dir(folder)
     directory.mkdir(parents=True, exist_ok=True)
     written = []

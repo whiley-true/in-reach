@@ -9,7 +9,7 @@ def _project(tmp_path: Path) -> Path:
     folder = tmp_path / "abcd1234"
     (folder / "settings").mkdir(parents=True)
     (folder / "settings" / "settings.json").write_text('{"a": 1}', encoding="utf-8")
-    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\n", encoding="utf-8")
     return folder
 
 
@@ -139,7 +139,7 @@ def test_commit_raises_when_nothing_changed(tmp_path: Path) -> None:
 def test_commit_snapshots_a_real_edit(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nmore\n", encoding="utf-8")
     vcs.stage_all(folder)
 
     result = vcs.commit(folder, "edited notes")
@@ -154,7 +154,7 @@ def test_commit_snapshots_a_real_edit(tmp_path: Path) -> None:
 def test_commit_requires_a_message(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nmore\n", encoding="utf-8")
 
     with pytest.raises(ValueError):
         vcs.commit(folder, "   ")
@@ -182,24 +182,24 @@ def test_uncommitted_changes_is_empty_for_a_clean_project(tmp_path: Path) -> Non
 def test_uncommitted_changes_reports_a_modified_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nmore\n", encoding="utf-8")
 
     changes = vcs.uncommitted_changes(folder)
 
     assert len(changes) == 1
-    assert changes[0].path == "Notes.txt"
+    assert changes[0].path == "notes.md"
     assert changes[0].change_type == "modified"
 
 
 def test_uncommitted_changes_reports_an_added_and_a_removed_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").unlink()
+    (folder / "notes.md").unlink()
     (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
 
     changes = {c.path: c.change_type for c in vcs.uncommitted_changes(folder)}
 
-    assert changes == {"Notes.txt": "removed", "new_file.txt": "added"}
+    assert changes == {"notes.md": "removed", "new_file.txt": "added"}
 
 
 def test_uncommitted_changes_ignores_generated_build_output(tmp_path: Path) -> None:
@@ -215,7 +215,7 @@ def test_uncommitted_changes_ignores_generated_build_output(tmp_path: Path) -> N
 def test_uncommitted_changes_is_empty_again_right_after_committing(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nmore\n", encoding="utf-8")
     assert vcs.uncommitted_changes(folder) != []
     vcs.stage_all(folder)
 
@@ -237,32 +237,32 @@ def test_uncommitted_changes_before_init_is_empty(tmp_path: Path) -> None:
 def test_a_freshly_edited_file_is_not_staged_by_default(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
 
     changes = vcs.uncommitted_changes(folder)
 
-    assert changes[0].path == "Notes.txt"
+    assert changes[0].path == "notes.md"
     assert changes[0].staged is False
 
 
 def test_stage_marks_a_file_as_staged(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
 
-    vcs.stage(folder, ["Notes.txt"])
+    vcs.stage(folder, ["notes.md"])
 
-    assert vcs.staged_paths(folder) == {"Notes.txt"}
+    assert vcs.staged_paths(folder) == {"notes.md"}
     assert vcs.uncommitted_changes(folder)[0].staged is True
 
 
 def test_unstage_removes_a_file_from_staging(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
 
-    vcs.unstage(folder, ["Notes.txt"])
+    vcs.unstage(folder, ["notes.md"])
 
     assert vcs.staged_paths(folder) == set()
     assert vcs.uncommitted_changes(folder)[0].staged is False
@@ -271,25 +271,25 @@ def test_unstage_removes_a_file_from_staging(tmp_path: Path) -> None:
 def test_stage_all_stages_every_uncommitted_path(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
     (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
 
     vcs.stage_all(folder)
 
-    assert vcs.staged_paths(folder) == {"Notes.txt", "new_file.txt"}
+    assert vcs.staged_paths(folder) == {"notes.md", "new_file.txt"}
 
 
 def test_commit_only_snapshots_staged_files(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("staged edit\n", encoding="utf-8")
+    (folder / "notes.md").write_text("staged edit\n", encoding="utf-8")
     (folder / "settings" / "settings.json").write_text('{"a": 2}', encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    vcs.stage(folder, ["notes.md"])
 
-    vcs.commit(folder, "stage only Notes.txt")
+    vcs.commit(folder, "stage only notes.md")
 
-    # Notes.txt made it into the commit -- settings.json's own unstaged edit did not.
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "staged edit\n"
+    # notes.md made it into the commit -- settings.json's own unstaged edit did not.
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "staged edit\n"
     remaining = {c.path for c in vcs.uncommitted_changes(folder)}
     assert remaining == {"settings/settings.json"}
     committed_notes = vcs.uncommitted_file_diff(folder, "settings/settings.json")[0]
@@ -299,9 +299,9 @@ def test_commit_only_snapshots_staged_files(tmp_path: Path) -> None:
 def test_commit_clears_only_the_staged_paths_it_actually_committed(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("staged edit\n", encoding="utf-8")
+    (folder / "notes.md").write_text("staged edit\n", encoding="utf-8")
     (folder / "settings" / "settings.json").write_text('{"a": 2}', encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt", "settings/settings.json"])
+    vcs.stage(folder, ["notes.md", "settings/settings.json"])
 
     vcs.commit(folder, "stage both")
 
@@ -312,7 +312,7 @@ def test_commit_clears_only_the_staged_paths_it_actually_committed(tmp_path: Pat
 def test_commit_raises_when_nothing_is_staged_even_if_something_changed(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
 
     with pytest.raises(ValueError):
         vcs.commit(folder, "nothing staged")
@@ -321,12 +321,12 @@ def test_commit_raises_when_nothing_is_staged_even_if_something_changed(tmp_path
 def test_commit_of_a_staged_deletion_removes_the_file_from_the_commit(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").unlink()
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").unlink()
+    vcs.stage(folder, ["notes.md"])
 
     vcs.commit(folder, "remove notes")
 
-    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    old, new = vcs.uncommitted_file_diff(folder, "notes.md")
     assert new is None
     # Nothing left uncommitted -- the deletion is now what HEAD itself has too.
     assert vcs.uncommitted_changes(folder) == []
@@ -338,9 +338,9 @@ def test_commit_uses_the_snapshot_taken_at_stage_time_not_current_disk_content(t
     # commit() always uses the content stage() captured, same as real git's own index.
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
-    (folder / "Notes.txt").write_text("hi\n", encoding="utf-8")  # hand-reverted back to HEAD's own content
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
+    (folder / "notes.md").write_text("hi\n", encoding="utf-8")  # hand-reverted back to HEAD's own content
 
     vcs.commit(folder, "commit the snapshot")
 
@@ -348,9 +348,9 @@ def test_commit_uses_the_snapshot_taken_at_stage_time_not_current_disk_content(t
     # as uncommitted (differs from the new HEAD, which has "edited").
     changes = vcs.uncommitted_changes(folder)
     assert len(changes) == 1
-    assert changes[0].path == "Notes.txt"
+    assert changes[0].path == "notes.md"
     assert changes[0].staged is False
-    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    old, new = vcs.uncommitted_file_diff(folder, "notes.md")
     assert old == "edited\n"  # HEAD now has the committed snapshot
     assert new == "hi\n"  # disk still has the hand-reverted content
 
@@ -362,13 +362,13 @@ def test_further_edits_after_staging_show_up_in_changes_without_touching_the_sta
     # that file should still appear in changes and staged changes should not update."
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("staged content\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").write_text("staged content\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
 
-    (folder / "Notes.txt").write_text("further edit\n", encoding="utf-8")
+    (folder / "notes.md").write_text("further edit\n", encoding="utf-8")
 
     changes = {(c.path, c.staged) for c in vcs.uncommitted_changes(folder)}
-    assert changes == {("Notes.txt", True), ("Notes.txt", False)}
+    assert changes == {("notes.md", True), ("notes.md", False)}
 
 
 def test_restaging_an_already_staged_path_overwrites_its_snapshot(tmp_path: Path) -> None:
@@ -376,11 +376,11 @@ def test_restaging_an_already_staged_path_overwrites_its_snapshot(tmp_path: Path
     # changes should overwrite as with normal git."
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("first staged content\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
-    (folder / "Notes.txt").write_text("second staged content\n", encoding="utf-8")
+    (folder / "notes.md").write_text("first staged content\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
+    (folder / "notes.md").write_text("second staged content\n", encoding="utf-8")
 
-    vcs.stage(folder, ["Notes.txt"])  # re-stage -- overwrites the first snapshot
+    vcs.stage(folder, ["notes.md"])  # re-stage -- overwrites the first snapshot
 
     changes = vcs.uncommitted_changes(folder)
     assert len(changes) == 1
@@ -388,18 +388,18 @@ def test_restaging_an_already_staged_path_overwrites_its_snapshot(tmp_path: Path
 
     vcs.commit(folder, "commit the re-staged content")
 
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "second staged content\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "second staged content\n"
     assert vcs.uncommitted_changes(folder) == []
 
 
 def test_discard_uncommitted_change_reverts_a_modified_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
 
-    vcs.discard_uncommitted_change(folder, "Notes.txt")
+    vcs.discard_uncommitted_change(folder, "notes.md")
 
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "hi\n"
     assert vcs.uncommitted_changes(folder) == []
 
 
@@ -416,10 +416,10 @@ def test_discard_uncommitted_change_deletes_a_newly_added_file(tmp_path: Path) -
 def test_discard_uncommitted_change_also_unstages_the_path(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
 
-    vcs.discard_uncommitted_change(folder, "Notes.txt")
+    vcs.discard_uncommitted_change(folder, "notes.md")
 
     assert vcs.staged_paths(folder) == set()
 
@@ -428,7 +428,7 @@ def test_discard_uncommitted_change_before_init_raises(tmp_path: Path) -> None:
     folder = _project(tmp_path)
 
     with pytest.raises(ValueError):
-        vcs.discard_uncommitted_change(folder, "Notes.txt")
+        vcs.discard_uncommitted_change(folder, "notes.md")
 
 
 def test_switch_branch_clears_the_staging_area(tmp_path: Path) -> None:
@@ -436,8 +436,8 @@ def test_switch_branch_clears_the_staging_area(tmp_path: Path) -> None:
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
 
     vcs.switch_branch(folder, "feature")
 
@@ -448,8 +448,8 @@ def test_restore_snapshot_clears_the_staging_area(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
-    vcs.stage(folder, ["Notes.txt"])
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
+    vcs.stage(folder, ["notes.md"])
 
     vcs.restore_snapshot(folder, first)
 
@@ -464,9 +464,9 @@ def test_restore_snapshot_clears_the_staging_area(tmp_path: Path) -> None:
 def test_uncommitted_file_diff_for_a_modified_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("hi\nedited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nedited\n", encoding="utf-8")
 
-    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    old, new = vcs.uncommitted_file_diff(folder, "notes.md")
 
     assert old == "hi\n"
     assert new == "hi\nedited\n"
@@ -486,9 +486,9 @@ def test_uncommitted_file_diff_for_a_newly_added_file(tmp_path: Path) -> None:
 def test_uncommitted_file_diff_for_a_removed_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").unlink()
+    (folder / "notes.md").unlink()
 
-    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    old, new = vcs.uncommitted_file_diff(folder, "notes.md")
 
     assert old == "hi\n"
     assert new is None
@@ -496,11 +496,11 @@ def test_uncommitted_file_diff_for_a_removed_file(tmp_path: Path) -> None:
 
 def test_uncommitted_file_diff_normalizes_crlf_from_the_committed_blob(tmp_path: Path) -> None:
     folder = _project(tmp_path)
-    (folder / "Notes.txt").write_bytes(b"line1\r\nline2\r\n")
+    (folder / "notes.md").write_bytes(b"line1\r\nline2\r\n")
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    (folder / "notes.md").write_text("line1\nline2\nline3\n", encoding="utf-8")
 
-    old, new = vcs.uncommitted_file_diff(folder, "Notes.txt")
+    old, new = vcs.uncommitted_file_diff(folder, "notes.md")
 
     assert old == "line1\nline2\n"  # not "line1\r\nline2\r\n"
     assert new == "line1\nline2\nline3\n"
@@ -509,7 +509,7 @@ def test_uncommitted_file_diff_normalizes_crlf_from_the_committed_blob(tmp_path:
 def test_uncommitted_file_diff_before_init_is_none_none(tmp_path: Path) -> None:
     folder = _project(tmp_path)
 
-    assert vcs.uncommitted_file_diff(folder, "Notes.txt") == (None, None)
+    assert vcs.uncommitted_file_diff(folder, "notes.md") == (None, None)
 
 
 # -- ref_file_diff (PROMPT.md, a later pass: "please then add text colourings and line numbers in
@@ -520,12 +520,12 @@ def test_ref_file_diff_between_two_branches(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    (folder / "notes.md").write_text("changed\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
 
-    old, new = vcs.ref_file_diff(folder, vcs.DEFAULT_BRANCH, "feature", "Notes.txt")
+    old, new = vcs.ref_file_diff(folder, vcs.DEFAULT_BRANCH, "feature", "notes.md")
 
     assert old == "hi\n"
     assert new == "changed\n"
@@ -535,10 +535,10 @@ def test_ref_file_diff_between_two_stamps(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    (folder / "notes.md").write_text("changed\n", encoding="utf-8")
     second = vcs.stamp(folder, "v2")
 
-    old, new = vcs.ref_file_diff(folder, first, second, "Notes.txt")
+    old, new = vcs.ref_file_diff(folder, first, second, "notes.md")
 
     assert old == "hi\n"
     assert new == "changed\n"
@@ -564,18 +564,18 @@ def test_ref_file_diff_rejects_an_unknown_ref(tmp_path: Path) -> None:
     vcs.init(folder)
 
     with pytest.raises(ValueError):
-        vcs.ref_file_diff(folder, vcs.DEFAULT_BRANCH, "does-not-exist", "Notes.txt")
+        vcs.ref_file_diff(folder, vcs.DEFAULT_BRANCH, "does-not-exist", "notes.md")
 
 
 def test_ref_file_diff_normalizes_crlf(tmp_path: Path) -> None:
     folder = _project(tmp_path)
-    (folder / "Notes.txt").write_bytes(b"line1\r\nline2\r\n")
+    (folder / "notes.md").write_bytes(b"line1\r\nline2\r\n")
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    (folder / "notes.md").write_text("line1\nline2\nline3\n", encoding="utf-8")
     second = vcs.stamp(folder, "v2")
 
-    old, new = vcs.ref_file_diff(folder, first, second, "Notes.txt")
+    old, new = vcs.ref_file_diff(folder, first, second, "notes.md")
 
     assert old == "line1\nline2\n"
     assert new == "line1\nline2\nline3\n"
@@ -612,7 +612,7 @@ def test_last_stamp_finds_the_most_recent_stamp_only(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("edit\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edit\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "test change")
 
@@ -663,7 +663,7 @@ def test_graph_history_includes_commits_only_reachable_from_a_non_current_branch
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("feature-only change\n", encoding="utf-8")
+    (folder / "notes.md").write_text("feature-only change\n", encoding="utf-8")
     vcs.stage_all(folder)
     feature_sha = vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
@@ -677,7 +677,7 @@ def test_graph_history_records_each_commits_parent(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     root_sha = vcs.history(folder)[0].sha
-    (folder / "Notes.txt").write_text("edit\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edit\n", encoding="utf-8")
     vcs.stage_all(folder)
     second_sha = vcs.commit(folder, "edit notes")
 
@@ -699,21 +699,21 @@ def test_commit_files_changed_for_the_root_commit_diffs_against_an_empty_tree(tm
 
     changes = vcs.commit_files_changed(folder, root_sha)
 
-    assert {c.path for c in changes} == {"Notes.txt", "settings/settings.json"}
+    assert {c.path for c in changes} == {"notes.md", "settings/settings.json"}
     assert all(c.change_type == "added" for c in changes)
 
 
 def test_commit_files_changed_for_a_later_commit_diffs_against_its_own_parent(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
     (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
     vcs.stage_all(folder)
     second_sha = vcs.commit(folder, "second commit")
 
     changes = {c.path: c.change_type for c in vcs.commit_files_changed(folder, second_sha)}
 
-    assert changes == {"Notes.txt": "modified", "new_file.txt": "added"}
+    assert changes == {"notes.md": "modified", "new_file.txt": "added"}
 
 
 def test_commit_files_changed_rejects_an_unknown_sha(tmp_path: Path) -> None:
@@ -727,11 +727,11 @@ def test_commit_files_changed_rejects_an_unknown_sha(tmp_path: Path) -> None:
 def test_commit_file_diff_for_a_later_commit(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
-    (folder / "Notes.txt").write_text("edited\n", encoding="utf-8")
+    (folder / "notes.md").write_text("edited\n", encoding="utf-8")
     vcs.stage_all(folder)
     second_sha = vcs.commit(folder, "second commit")
 
-    old, new = vcs.commit_file_diff(folder, second_sha, "Notes.txt")
+    old, new = vcs.commit_file_diff(folder, second_sha, "notes.md")
 
     assert old == "hi\n"
     assert new == "edited\n"
@@ -742,7 +742,7 @@ def test_commit_file_diff_for_the_root_commit_has_no_old_text(tmp_path: Path) ->
     vcs.init(folder)
     root_sha = vcs.history(folder)[0].sha
 
-    old, new = vcs.commit_file_diff(folder, root_sha, "Notes.txt")
+    old, new = vcs.commit_file_diff(folder, root_sha, "notes.md")
 
     assert old is None
     assert new == "hi\n"
@@ -753,7 +753,7 @@ def test_commit_file_diff_rejects_an_unknown_sha(tmp_path: Path) -> None:
     vcs.init(folder)
 
     with pytest.raises(ValueError):
-        vcs.commit_file_diff(folder, "not-a-real-sha", "Notes.txt")
+        vcs.commit_file_diff(folder, "not-a-real-sha", "notes.md")
 
 
 def test_create_branch_switches_to_the_new_branch(tmp_path: Path) -> None:
@@ -813,7 +813,7 @@ def test_create_branch_with_a_source_branches_off_that_ref_instead_of_head(tmp_p
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("feature content\n", encoding="utf-8")
+    (folder / "notes.md").write_text("feature content\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
@@ -821,7 +821,7 @@ def test_create_branch_with_a_source_branches_off_that_ref_instead_of_head(tmp_p
     vcs.create_branch(folder, "from-feature", source="feature")
 
     assert vcs.current_branch(folder) == "from-feature"
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "feature content\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "feature content\n"
 
 
 def test_create_branch_with_an_unknown_source_raises(tmp_path: Path) -> None:
@@ -836,13 +836,13 @@ def test_switch_branch_restores_files_from_that_branchs_last_snapshot(tmp_path: 
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("feature branch content\n", encoding="utf-8")
+    (folder / "notes.md").write_text("feature branch content\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "test change")
 
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
 
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "hi\n"
     assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH
 
 
@@ -927,7 +927,7 @@ def test_merge_branch_fast_forwards_when_current_branch_has_no_new_commits(tmp_p
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    (folder / "notes.md").write_text("from feature\n", encoding="utf-8")
     vcs.stage_all(folder)
     feature_sha = vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
@@ -935,7 +935,7 @@ def test_merge_branch_fast_forwards_when_current_branch_has_no_new_commits(tmp_p
     result_sha = vcs.merge_branch(folder, "feature")
 
     assert result_sha == feature_sha
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from feature\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "from feature\n"
     assert vcs.current_branch(folder) == vcs.DEFAULT_BRANCH
 
 
@@ -947,7 +947,7 @@ def test_merge_branch_creates_a_two_parent_commit_for_a_true_merge(tmp_path: Pat
     vcs.stage_all(folder)
     feature_sha = vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
-    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    (folder / "notes.md").write_text("from main\n", encoding="utf-8")
     vcs.stage_all(folder)
     main_sha = vcs.commit(folder, "main change")
 
@@ -955,7 +955,7 @@ def test_merge_branch_creates_a_two_parent_commit_for_a_true_merge(tmp_path: Pat
 
     snapshots = {s.sha: s for s in vcs.graph_history(folder)}
     assert sorted(snapshots[result_sha].parents) == sorted([main_sha, feature_sha])
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "from main\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "from main\n"
     assert (folder / "feature.txt").read_text(encoding="utf-8") == "from feature\n"
 
 
@@ -967,7 +967,7 @@ def test_merge_branch_clears_the_staging_area(tmp_path: Path) -> None:
     vcs.stage_all(folder)
     vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
-    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    (folder / "notes.md").write_text("from main\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "main change")
 
@@ -980,18 +980,18 @@ def test_merge_branch_raises_on_a_real_conflict(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("from feature\n", encoding="utf-8")
+    (folder / "notes.md").write_text("from feature\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "feature change")
     vcs.switch_branch(folder, vcs.DEFAULT_BRANCH)
-    (folder / "Notes.txt").write_text("from main\n", encoding="utf-8")
+    (folder / "notes.md").write_text("from main\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "main change")
 
     with pytest.raises(vcs.MergeConflictError) as excinfo:
         vcs.merge_branch(folder, "feature")
 
-    assert excinfo.value.paths == ["Notes.txt"]
+    assert excinfo.value.paths == ["notes.md"]
 
 
 def test_merge_branch_rejects_merging_the_current_branch_into_itself(tmp_path: Path) -> None:
@@ -1017,7 +1017,7 @@ def test_diff_between_branches_reports_modified_added_and_matches_content(tmp_pa
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").write_text("hi\nmore\n", encoding="utf-8")
+    (folder / "notes.md").write_text("hi\nmore\n", encoding="utf-8")
     (folder / "new_file.txt").write_text("new\n", encoding="utf-8")
     vcs.stage_all(folder)
     vcs.commit(folder, "test change")
@@ -1026,9 +1026,9 @@ def test_diff_between_branches_reports_modified_added_and_matches_content(tmp_pa
     diffs = vcs.diff(folder, vcs.DEFAULT_BRANCH, "feature")
 
     by_path = {d.path: d for d in diffs}
-    assert set(by_path) == {"Notes.txt", "new_file.txt"}
-    assert by_path["Notes.txt"].change_type == "modified"
-    assert "+more" in by_path["Notes.txt"].diff_text
+    assert set(by_path) == {"notes.md", "new_file.txt"}
+    assert by_path["notes.md"].change_type == "modified"
+    assert "+more" in by_path["notes.md"].diff_text
     assert by_path["new_file.txt"].change_type == "added"
 
 
@@ -1036,14 +1036,14 @@ def test_diff_reports_a_removed_file(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     vcs.create_branch(folder, "feature")
-    (folder / "Notes.txt").unlink()
+    (folder / "notes.md").unlink()
     vcs.stage_all(folder)
     vcs.commit(folder, "test change")
 
     diffs = vcs.diff(folder, vcs.DEFAULT_BRANCH, "feature")
 
     assert len(diffs) == 1
-    assert diffs[0].path == "Notes.txt"
+    assert diffs[0].path == "notes.md"
     assert diffs[0].change_type == "removed"
 
 
@@ -1059,12 +1059,12 @@ def test_diff_between_two_stamps(tmp_path: Path) -> None:
     folder = _project(tmp_path)
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    (folder / "notes.md").write_text("changed\n", encoding="utf-8")
     second = vcs.stamp(folder, "v2")
 
     diffs = vcs.diff(folder, first, second)
 
-    assert [d.path for d in diffs] == ["Notes.txt"]
+    assert [d.path for d in diffs] == ["notes.md"]
     assert diffs[0].change_type == "modified"
 
 
@@ -1096,12 +1096,12 @@ def test_restore_snapshot_brings_back_an_old_stamps_content(tmp_path: Path) -> N
     folder = _project(tmp_path)
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    (folder / "notes.md").write_text("changed\n", encoding="utf-8")
     vcs.stamp(folder, "v2")
 
     vcs.restore_snapshot(folder, first)
 
-    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "hi\n"
+    assert (folder / "notes.md").read_text(encoding="utf-8") == "hi\n"
 
 
 def test_restore_snapshot_records_a_new_plain_commit_rather_than_rewriting_history(
@@ -1110,7 +1110,7 @@ def test_restore_snapshot_records_a_new_plain_commit_rather_than_rewriting_histo
     folder = _project(tmp_path)
     vcs.init(folder)
     first = vcs.stamp(folder, "v1")
-    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+    (folder / "notes.md").write_text("changed\n", encoding="utf-8")
     second = vcs.stamp(folder, "v2")
     before = len(vcs.history(folder))
 
@@ -1141,3 +1141,31 @@ def test_restore_snapshot_rejects_an_unknown_sha(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         vcs.restore_snapshot(folder, "not-a-real-sha")
+
+
+def test_the_notepad_is_never_versioned_or_restored(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    (folder / "Notes.txt").write_text("private\n", encoding="utf-8")
+    vcs.init(folder)
+    first = vcs.history(folder)[-1].sha
+    (folder / "Notes.txt").write_text("changed\n", encoding="utf-8")
+
+    assert vcs.uncommitted_changes(folder) == []
+    vcs.restore_snapshot(folder, first)
+    assert (folder / "Notes.txt").read_text(encoding="utf-8") == "changed\n"
+
+
+def test_each_snapshot_knows_the_env_it_was_built_with(tmp_path: Path) -> None:
+    folder = _project(tmp_path)
+    (folder / "script" / "env").mkdir(parents=True)
+    (folder / "script" / "env" / "active_env.txt").write_text("development\n", encoding="utf-8")
+    vcs.init(folder)
+    (folder / "script" / "env" / "active_env.txt").write_text("release\n", encoding="utf-8")
+    vcs.stage(folder, ["script/env/active_env.txt"])
+    vcs.commit(folder, "use release")
+
+    newest, first = vcs.history(folder)
+
+    assert (newest.env, first.env) == ("release", "development")
+    assert [s.env for s in vcs.graph_history(folder)] == ["release", "development"]
+    assert vcs.env_at(folder, first.sha) == "development"

@@ -57,7 +57,7 @@ from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
 from in_reach.app import logging_setup
-from in_reach.app.new_project import is_generated_file
+from in_reach.app.new_project import is_generated_file, is_personal_file
 
 _logger = logging_setup.get_logger(__name__)
 
@@ -105,6 +105,9 @@ class Snapshot:
     #: Every branch name whose tip is exactly this commit, if any -- also only ever populated by
     #: :func:`graph_history`.
     branches: list[str] = field(default_factory=list)
+    #: The env the project was building with at this commit (``script/env/active_env.txt`` in its tree -- the file
+    #: is versioned like any other), or ``None`` for none. Filled by :func:`history` and :func:`graph_history`.
+    env: str | None = None
 
     @property
     def is_stamp(self) -> bool:
@@ -181,7 +184,8 @@ def _should_skip(path: Path, folder: Path) -> bool:
     vcs_root = folder / ".in-reach"
     if path == vcs_root or vcs_root in path.parents:
         return True
-    return is_generated_file(path.relative_to(folder))
+    relative = path.relative_to(folder)
+    return is_generated_file(relative) or is_personal_file(relative)
 
 
 def _walk_files(folder: Path) -> dict[str, Path]:
@@ -513,6 +517,8 @@ def _checkout_tree(repo: Repo, tree_sha: bytes, folder: Path) -> None:
 
     for rel, blob_sha in wanted.items():
         dest = folder / rel
+        if _should_skip(dest, folder):
+            continue  # a personal file an older snapshot still carries is never put back over the user's
         dest.parent.mkdir(parents=True, exist_ok=True)
         blob = repo.object_store[blob_sha]
         dest.write_bytes(blob.data)
@@ -859,7 +865,27 @@ def stamp(folder: Path, message: str, *, version: str | None = None) -> str:
     return sha
 
 
-def _to_snapshot(commit_obj: Commit, *, parents: list[str] = (), branches: list[str] = ()) -> Snapshot:
+_ACTIVE_ENV_PATH = b"script/env/active_env.txt"
+
+
+def _env_in_tree(repo: Repo, tree_sha: bytes) -> str | None:
+    from dulwich.object_store import tree_lookup_path
+
+    try:
+        _mode, sha = tree_lookup_path(repo.object_store.__getitem__, tree_sha, _ACTIVE_ENV_PATH)
+    except (KeyError, NotADirectoryError):
+        return None
+    name = repo.object_store[sha].data.decode("utf-8", errors="replace").strip()
+    return name or None
+
+
+def env_at(folder: Path, sha: str) -> str | None:
+    """The env the project was building with at commit ``sha`` (see :attr:`Snapshot.env`)."""
+    repo = _open(folder)
+    return _env_in_tree(repo, repo[sha.encode("ascii")].tree)
+
+
+def _to_snapshot(commit_obj: Commit, *, parents: list[str] = (), branches: list[str] = (), repo: Repo | None = None) -> Snapshot:
     text = commit_obj.message.decode("utf-8")
     stamp_message: str | None = None
     version: str | None = None
@@ -878,6 +904,7 @@ def _to_snapshot(commit_obj: Commit, *, parents: list[str] = (), branches: list[
         version=version,
         parents=list(parents),
         branches=list(branches),
+        env=_env_in_tree(repo, commit_obj.tree) if repo is not None else None,
     )
 
 
@@ -914,7 +941,7 @@ def history(folder: Path) -> list[Snapshot]:
     # date-ordered walk doesn't guarantee a commit comes before its own parents when ties like that
     # happen. Topological order does: a commit is never returned before every one of its own
     # children has been.
-    return [_to_snapshot(entry.commit) for entry in repo.get_walker(order="topo")]
+    return [_to_snapshot(entry.commit, repo=repo) for entry in repo.get_walker(order="topo")]
 
 
 def graph_history(folder: Path) -> list[Snapshot]:
@@ -948,6 +975,7 @@ def graph_history(folder: Path) -> list[Snapshot]:
                 commit_obj,
                 parents=[p.decode("ascii") for p in commit_obj.parents],
                 branches=branch_tips.get(commit_obj.id, []),
+                repo=repo,
             )
         )
     return snapshots

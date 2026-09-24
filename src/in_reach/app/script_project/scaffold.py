@@ -1,9 +1,9 @@
 """Starting a script project, and adding to one: the files ``script/project.toml`` and ``modules/<name>/`` need.
 
-:func:`create_project` turns a single-file project (``script/output.txt``) into a linked one without losing the script:
+:func:`create_project` turns a single-file project (``script/output.mgl``) into a linked one without losing the script:
 it becomes the first block, ``blocks/main.mgl``, exactly as written. Nothing is rewritten in it -- a linked project links
 hand-written code as it is, so the same script builds the same variant either way (the only difference is that the
-build is now assembled by the linker, and ``script/output.txt`` is no longer what is compiled).
+build is now assembled by the linker, and ``script/output.mgl`` is no longer what is compiled).
 
 :func:`create_module` adds ``modules/<name>/`` (a manifest and a starter file) and lists the module in ``project.toml``.
 
@@ -31,7 +31,7 @@ def _toml_string(value: str) -> str:
 def create_project(folder: Path) -> list[Path]:
     """Creates ``script/project.toml`` and ``script/blocks/main.mgl`` for ``folder``, returning the files written.
 
-    ``main.mgl`` is the existing ``script/output.txt`` verbatim (or a one-line starter if there is none, or it is empty).
+    ``main.mgl`` is the existing ``script/output.mgl`` verbatim (or a one-line starter if there is none, or it is empty).
     Raises :class:`ValueError` if the project is already a script project or has no ``script/`` folder."""
     scripts = script_dir(folder)
     if is_linked(folder):
@@ -42,7 +42,7 @@ def create_project(folder: Path) -> list[Path]:
     if block.exists():
         raise ValueError(f"{block.relative_to(folder)} already exists")
 
-    output = scripts / "output.txt"
+    output = new_project.migrate_script_file(folder)
     try:
         existing = output.read_text(encoding="utf-8")
     except OSError:

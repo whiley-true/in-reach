@@ -236,7 +236,7 @@ def test_the_declarations_equal_what_the_native_compiler_produces(rvt, blank, so
 @_NEEDS_JUGGERNAUT
 def test_editing_a_declare_line_changes_a_variant_that_already_had_it(rvt, juggernaut) -> None:
     """The reported bug: in a project made from a real ``.bin`` the variant's own declarations
-    survived, so editing (or deleting) a ``declare`` line in ``output.txt`` silently did nothing."""
+    survived, so editing (or deleting) a ``declare`` line in ``output.mgl`` silently did nothing."""
     assert "declare global.number[0] with network priority local" in _declares(juggernaut)
     source = normalize_script_text(juggernaut.decompile_script()).replace(
         "declare global.number[0] with network priority local",

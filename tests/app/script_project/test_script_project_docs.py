@@ -13,12 +13,13 @@ from in_reach.app.script_project.docs import build_docs, docs_dir, render_markdo
 from in_reach.app.script_project.edit import set_module_enabled
 from in_reach.cli import main
 
+# A single file names its own slots (a script project is what picks them), so its notes sit on code.
 _SCRIPT = """-- @tags scoring, hud
 -- @doc First to five wins.
--- @see g_score
+-- @see scoring
 
--- @number g_score priority=low
--- @doc How many points the leader has.
+-- @doc The leader's score, shown on the HUD.
+declare global.number[0] with network priority low
 for each player do
    -- @doc Ends the round at five.
    if current_player.score >= 5 then
@@ -27,10 +28,19 @@ for each player do
 end
 """
 
+# The design example's setup block, with notes beside its declarations.
+_SETUP_WITH_NOTES = (
+    "-- @number g_phase priority=low\n"
+    "-- @doc Which phase of the round it is.\n"
+    "on init: do\n"
+    "   g_phase = 0\n"
+    "end\n"
+)
+
 
 def _single(tmp_path: Path, text: str = _SCRIPT) -> Path:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text(text, encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text(text, encoding="utf-8")
     return tmp_path
 
 
@@ -52,7 +62,7 @@ def test_see_can_name_a_fragment() -> None:
     assert see.tag == "hill_score.score"
 
 
-def test_tags_and_see_are_fine_in_a_single_file(tmp_path: Path) -> None:
+def test_tags_see_and_doc_are_fine_in_a_single_file(tmp_path: Path) -> None:
     assert link(_single(tmp_path), write=False).diagnostics == []
 
 
@@ -68,20 +78,21 @@ def test_each_note_is_attached_to_what_it_documents(tmp_path: Path) -> None:
     docs = build_docs(_single(tmp_path))
 
     assert [(n.kind, n.subject, n.line) for n in docs.notes] == [
-        ("file", "output.txt", 2),  # a blank line follows its run
-        ("name", "g_score", 6),  # beside a declaration
-        ("code", "if current_player.score >= 5 then", 8),  # right above code
+        ("file", "output.mgl", 2),  # a blank line follows its run
+        ("code", "declare global.number[0] with network priority low", 5),  # right above code
+        ("code", "if current_player.score >= 5 then", 8),
     ]
-    assert docs.mode == "single" and docs.tags == {"hud": ["file output.txt"], "scoring": ["file output.txt"]}
+    assert docs.mode == "single" and docs.tags == {"hud": ["file output.mgl"], "scoring": ["file output.mgl"]}
     [see] = docs.files[0].see
-    assert (see.target, see.resolves_to) == ("g_score", "name")
+    assert (see.target, see.resolves_to) == ("scoring", "tag")
+    assert docs.storage == []  # nothing is allocated for a single file
 
 
 def test_storage_carries_its_slot_and_its_note(tmp_path: Path) -> None:
-    docs = build_docs(_single(tmp_path))
-    assert docs.storage == [
-        {"slot": "global.number[0]", "owner": "output.txt", "name": "g_score", "doc": "How many points the leader has."}
-    ]
+    docs = build_docs(hill_rush(tmp_path, blocks__setup_dot_mgl=_SETUP_WITH_NOTES))
+
+    [phase] = [entry for entry in docs.storage if entry["name"] == "g_phase"]
+    assert phase == {"slot": "global.number[1]", "owner": "blocks/setup.mgl", "name": "g_phase", "doc": "Which phase of the round it is."}
 
 
 def test_a_note_of_several_lines_keeps_them(tmp_path: Path) -> None:
@@ -98,12 +109,12 @@ def test_the_markdown_overview_of_a_single_file(tmp_path: Path) -> None:
     assert text.startswith(f"# {folder.name}\n\nSingle-file script -- no env.\n\nTags: `hud` `scoring`\n")
     assert "## Race to five\n\nA tiny mode." in text  # the README, one level down
     assert "## About\n\nFirst to five wins." in text
-    assert "| `g_score` | `global.number[0]` | output.txt | How many points the leader has. |" in text
-    assert "- `if current_player.score >= 5 then` -- Ends the round at five. (`output.txt:8`)" in text
+    assert "- `declare global.number[0] with network priority low` -- The leader's score, shown on the HUD. (`output.mgl:5`)" in text
+    assert "- `if current_player.score >= 5 then` -- Ends the round at five. (`output.mgl:8`)" in text
 
 
 def test_a_script_that_does_not_link_is_still_documented(tmp_path: Path) -> None:
-    folder = _single(tmp_path, "-- @doc still here\n-- @number g_a\n-- @number g_a\n")
+    folder = _single(tmp_path, "-- @doc still here\ndeclare global.number[0]\ndeclare global.number[0]\n")
 
     docs = build_docs(folder)
 
@@ -149,6 +160,28 @@ def test_a_disabled_module_is_still_described_from_its_manifest(tmp_path: Path) 
     assert "## Module hill_score 1.0.0 (disabled)" in render_markdown(docs)
 
 
+def test_each_doc_in_a_run_belongs_to_the_declaration_beside_it(tmp_path: Path) -> None:
+    folder = hill_rush(tmp_path, blocks__setup_dot_mgl=(
+        "-- @doc said before anything is declared\n"
+        "-- @number g_a\n"
+        "-- @doc about g_a\n"
+        "-- @trait t_b { name = \"B\" }\n"
+        "-- @doc about t_b\n"
+        "-- @doc more about t_b\n"
+        "on init: do\n"
+        "end\n"
+    ))
+
+    docs = build_docs(folder)
+
+    notes = [(n.kind, n.subject, n.text, n.line) for n in docs.notes if n.file == "blocks/setup.mgl"]
+    assert notes == [
+        ("name", "g_a", "said before anything is declared\nabout g_a", 1),
+        ("name", "t_b", "about t_b\nmore about t_b", 5),
+    ]
+    assert {r["name"]: r["doc"] for r in docs.resources}["t_b"] == "about t_b\nmore about t_b"
+
+
 # -- writing, the api and the command -----------------------------------------------------------------------
 
 
@@ -159,7 +192,7 @@ def test_the_overview_is_written_only_when_it_changes(tmp_path: Path) -> None:
 
     assert [p.name for p in first] == ["overview.md", "overview.json"] and again == []
     data = json.loads((docs_dir(folder) / "overview.json").read_text(encoding="utf-8"))
-    assert data["docs_schema"] == 1 and data["storage"][0]["name"] == "g_score"
+    assert data["docs_schema"] == 1 and data["mode"] == "single" and data["files"][0]["notes"][0]["text"] == "First to five wins."
 
 
 def test_api_docs_can_leave_the_build_alone(tmp_path: Path) -> None:
@@ -177,6 +210,12 @@ def test_the_docs_command_prints_the_overview_and_writes_it(tmp_path: Path) -> N
     assert text.exit_code == 0 and "## About" in text.output
     assert (docs_dir(folder) / "overview.md").is_file()
     assert json.loads(data.output)["docs"]["mode"] == "single"
+
+
+def test_api_docs_can_reuse_a_check(tmp_path: Path) -> None:
+    folder = _single(tmp_path)
+    checked = api.check(folder)
+    assert api.docs(folder, write=False, checked=checked).docs.notes[0].text == "First to five wins."
 
 
 # -- views: a tag filter, and what a hover shows ------------------------------------------------------------
@@ -211,34 +250,15 @@ def test_hover_texts_name_slots_resources_and_fragments(tmp_path: Path) -> None:
 def test_hover_text_carries_a_names_note(tmp_path: Path) -> None:
     from in_reach.app.script_project.docs import hover_texts
 
-    texts = hover_texts(build_docs(_single(tmp_path)))
+    texts = hover_texts(build_docs(hill_rush(tmp_path, blocks__setup_dot_mgl=_SETUP_WITH_NOTES)))
 
-    assert texts["g_score"] == "g_score = global.number[0]  (output.txt)\nHow many points the leader has."
-    assert texts["scoring"] == "tag scoring: file output.txt"
-
-
-def test_api_docs_can_reuse_a_check(tmp_path: Path) -> None:
-    folder = _single(tmp_path)
-    checked = api.check(folder)
-    assert api.docs(folder, write=False, checked=checked).docs.storage[0]["name"] == "g_score"
+    assert texts["g_phase"] == "g_phase = global.number[1]  (blocks/setup.mgl)\nWhich phase of the round it is."
 
 
-def test_each_doc_in_a_run_belongs_to_the_declaration_beside_it(tmp_path: Path) -> None:
-    docs = build_docs(_single(tmp_path, (
-        "-- @doc said before anything is declared\n"
-        "-- @number g_a\n"
-        "-- @doc about g_a\n"
-        "-- @trait t_b { name = \"B\" }\n"
-        "-- @doc about t_b\n"
-        "-- @doc more about t_b\n"
-        "game.end_round()\n"
-    )))
+def test_a_single_files_tags_can_be_hovered(tmp_path: Path) -> None:
+    from in_reach.app.script_project.docs import hover_texts
 
-    assert [(n.kind, n.subject, n.text, n.line) for n in docs.notes] == [
-        ("name", "g_a", "said before anything is declared\nabout g_a", 1),
-        ("name", "t_b", "about t_b\nmore about t_b", 5),
-    ]
-    assert {r["name"]: r["doc"] for r in docs.resources} == {"t_b": "about t_b\nmore about t_b"}
+    assert hover_texts(build_docs(_single(tmp_path)))["scoring"] == "tag scoring: file output.mgl"
 
 
 def test_a_single_files_page_is_titled_with_the_projects_title(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ def test_output_view_path_is_under_build_dir(tmp_path: Path) -> None:
 
 def test_write_output_view_prepends_the_banner_to_the_scripts_content(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("do stuff\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("do stuff\n", encoding="utf-8")
 
     path = output_view.write_output_view(tmp_path)
 
@@ -46,7 +46,7 @@ def test_write_output_view_creates_the_build_dir_if_missing(tmp_path: Path) -> N
 
 def test_write_output_view_reflects_the_scripts_latest_content_on_each_call(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    script_path = tmp_path / "script" / "output.txt"
+    script_path = tmp_path / "script" / "output.mgl"
     script_path.write_text("v1", encoding="utf-8")
     path = output_view.write_output_view(tmp_path)
     assert "v1" in path.read_text(encoding="utf-8")
@@ -63,7 +63,7 @@ def test_write_output_view_reflects_the_scripts_latest_content_on_each_call(tmp_
 
 def _project_with_profile(tmp_path: Path, script: str, env: str = "FLAGS=DEV\nSCORE=5\n") -> None:
     (tmp_path / "script" / "env").mkdir(parents=True)
-    (tmp_path / "script" / "output.txt").write_text(script, encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text(script, encoding="utf-8")
     (tmp_path / "script" / "env" / "dev.env").write_text(env, encoding="utf-8")
     (tmp_path / "script" / "env" / "active_env.txt").write_text("dev\n", encoding="utf-8")
 
@@ -81,7 +81,7 @@ def test_the_source_file_itself_is_never_rewritten_by_making_the_view(tmp_path: 
     source = "win = ${SCORE}\n"
     _project_with_profile(tmp_path, source)
     output_view.write_output_view(tmp_path)
-    assert (tmp_path / "script" / "output.txt").read_text(encoding="utf-8") == source
+    assert (tmp_path / "script" / "output.mgl").read_text(encoding="utf-8") == source
 
 
 def test_a_script_that_cannot_be_preprocessed_is_shown_as_written_with_the_reason_on_top(tmp_path: Path) -> None:
@@ -89,7 +89,7 @@ def test_a_script_that_cannot_be_preprocessed_is_shown_as_written_with_the_reaso
 
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
 
-    assert "-- NOT LINKED: output.txt:2: '${MISSING}' isn't defined in the 'dev' env [preprocess]" in text
+    assert "-- NOT LINKED: output.mgl:2: '${MISSING}' isn't defined in the 'dev' env [preprocess]" in text
     assert "win = ${MISSING}" in text  # still readable, so the user can see what to fix
 
 
@@ -104,7 +104,7 @@ def test_a_broken_env_file_is_named_in_the_banner_and_the_script_shown_as_writte
 
 def test_with_no_profile_and_no_directives_the_view_is_exactly_what_it_always_was(tmp_path: Path) -> None:
     (tmp_path / "script").mkdir()
-    (tmp_path / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")
     text = output_view.write_output_view(tmp_path).read_text(encoding="utf-8")
     assert text.endswith("game.end_round()\n") and "NOT LINKED" not in text
 

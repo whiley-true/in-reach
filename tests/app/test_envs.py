@@ -19,7 +19,7 @@ from hill_project import PROJECT_TOML, hill_rush  # noqa: E402
 def _folder(tmp_path: Path) -> Path:
     env = tmp_path / "script" / "env"
     env.mkdir(parents=True)
-    (tmp_path / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
+    (tmp_path / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")
     (env / "dev.env").write_text("FLAGS=DEV,FAST\nSCORE=5\n", encoding="utf-8")
     return tmp_path
 
@@ -118,3 +118,33 @@ def test_an_old_profile_key_in_project_toml_still_works_with_a_warning(tmp_path:
     assert project.env is not None and project.env.name == "dev"
     [warning] = [d for d in project.diagnostics if d.code == "env-key-renamed"]
     assert (warning.severity, warning.line) == ("warning", 3)
+
+
+def test_what_a_new_env_file_explains_is_what_the_preprocessor_does() -> None:
+    """The header of every env file teaches FLAGS and NAME=value by example; the examples must be true."""
+    from in_reach.app import new_project
+
+    header = new_project.env_file_text("x")
+    assert "if current_player.score >= ${SCORE_TO_WIN} then" in header
+    assert "is built as:  if current_player.score >= 5 then" in header
+    with_value = script_preprocess.Env("x", frozenset(), {"SCORE_TO_WIN": "5"})
+    assert script_preprocess.preprocess("if current_player.score >= ${SCORE_TO_WIN} then\n", with_value) == (
+        "if current_player.score >= 5 then\n"
+    )
+    block = "-- @if DEV\ncurrent_player.score += 10\n-- @end\n"
+    assert "current_player.score += 10" in script_preprocess.preprocess(block, script_preprocess.Env("x", frozenset({"DEV"})))
+    assert "current_player.score += 10" not in script_preprocess.preprocess(block, script_preprocess.Env("x"))
+    notes = new_project._ENV_HEADER.format(name="x")
+    assert all(line.startswith("#") or not line.strip() for line in notes.splitlines())  # the explanation takes no effect
+
+
+def test_a_copied_envs_header_names_the_copy(tmp_path: Path) -> None:
+    from in_reach.app import new_project
+
+    (tmp_path / "script" / "env").mkdir(parents=True)
+    (tmp_path / "script" / "env" / "development.env").write_text(new_project.env_file_text("development", "\nFLAGS=DEV\n"), encoding="utf-8")
+
+    script_preprocess.create_env(tmp_path, "release", copy_from="development")
+
+    text = (tmp_path / "script" / "env" / "release.env").read_text(encoding="utf-8")
+    assert text.startswith('# Env "release"') and "FLAGS=DEV" in text

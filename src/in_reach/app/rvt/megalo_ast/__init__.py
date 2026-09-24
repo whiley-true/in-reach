@@ -1,5 +1,5 @@
 """``in_reach.app.rvt.megalo_ast`` -- a traversable Python AST for Megalo script text
-(``script/output.txt``). Ported from a prior prototype
+(``script/output.mgl``). Ported from a prior prototype
 (``D:\\whileyRepos\\sort\\mega-ide``, PROMPT.md: "we want a fromm scratch compiler then") -- see
 ``nodes.py``'s module docstring for the full port note, and ``engine.py``'s for the sibling
 engine-bound half this package also carries. :mod:`in_reach.app.rvt.megalo_compiler` is built on

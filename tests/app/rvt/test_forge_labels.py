@@ -360,7 +360,7 @@ def _project(tmp_path: Path, script: str | None = None) -> tuple[Path, Path]:
     )
     assert warning is None
     if script is not None:
-        (folder / "script" / "output.txt").write_text(script, encoding="utf-8")
+        (folder / "script" / "output.mgl").write_text(script, encoding="utf-8")
     return project_dir, folder
 
 
@@ -473,7 +473,7 @@ def test_the_settings_users_edit_on_a_label_survive_every_later_apply(tmp_path: 
 def test_removing_every_use_of_a_label_cleans_up_what_was_added_for_it(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, _loop("hill"))
     compile_module.run_compile(project_dir, folder, save=True)
-    (folder / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 
@@ -491,7 +491,7 @@ def test_removing_a_label_the_user_configured_still_fails_clearly_rather_than_di
     data["forge_labels"][0].update(requires_number=True, required_number=4)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     edited = path.read_bytes()
-    (folder / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 
@@ -503,7 +503,7 @@ def test_removing_a_label_the_user_configured_still_fails_clearly_rather_than_di
 def test_a_second_label_added_later_is_appended_after_the_first(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, _loop("hill"))
     compile_module.run_compile(project_dir, folder, save=True)
-    (folder / "script" / "output.txt").write_text(_loop("hill") + _loop("flag"), encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text(_loop("hill") + _loop("flag"), encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 

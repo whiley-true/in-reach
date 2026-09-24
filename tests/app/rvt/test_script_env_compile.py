@@ -1,4 +1,4 @@
-"""Env envs through a real Apply: ``${CONSTANTS}`` and ``-- @if`` blocks in ``script/output.txt``.
+"""Env envs through a real Apply: ``${CONSTANTS}`` and ``-- @if`` blocks in ``script/output.mgl``.
 
 The unit tests for the preprocessor itself are ``tests/app/test_script_preprocess.py``; these prove the
 compiler is actually handed the *processed* text, that switching envs changes what's built, and that
@@ -37,7 +37,7 @@ def _project(tmp_path: Path, script: str = _SCRIPT) -> tuple[Path, Path]:
         project_dir, "Env Test", source_variant=resolve_blank_variant(firefight=False)
     )
     assert warning is None
-    (folder / "script" / "output.txt").write_text(script, encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text(script, encoding="utf-8")
     # A new project already ships starter dev/release envs with dev active (see new_project); these
     # tests define their own, and each picks the active one explicitly.
     env = folder / "script" / "env"
@@ -79,7 +79,7 @@ def test_the_source_file_is_never_modified_by_applying(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path)
     script_preprocess.set_active_env(folder, "dev")
     compile_module.run_compile(project_dir, folder, save=True)
-    assert (folder / "script" / "output.txt").read_text(encoding="utf-8") == _SCRIPT
+    assert (folder / "script" / "output.mgl").read_text(encoding="utf-8") == _SCRIPT
 
 
 def test_a_project_with_no_profiles_and_no_directives_builds_exactly_as_before(tmp_path: Path) -> None:
@@ -101,8 +101,8 @@ def test_an_undefined_constant_fails_the_build_at_its_line_and_column(tmp_path: 
 
     assert result.success is False and result.output_path is None
     assert [(m.line, m.col) for m in result.errors] == [(2, 5)]  # 1-based, like the editor
-    assert result.errors[0].file == "output.txt" and result.errors[0].code == "preprocess"
-    assert "error (output.txt:2:5): '${NOPE}' isn't defined in the 'dev' env" in compile_module.format_build_result(result)
+    assert result.errors[0].file == "output.mgl" and result.errors[0].code == "preprocess"
+    assert "error (output.mgl:2:5): '${NOPE}' isn't defined in the 'dev' env" in compile_module.format_build_result(result)
 
 
 def test_a_constant_with_no_profile_active_says_so(tmp_path: Path) -> None:

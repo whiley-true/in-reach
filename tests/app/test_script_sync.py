@@ -1,4 +1,4 @@
-"""Pulling a script edited in ReachVariantTool back into ``script/output.txt``: the bookkeeping that
+"""Pulling a script edited in ReachVariantTool back into ``script/output.mgl``: the bookkeeping that
 decides *whether* RVT changed the script and *what a pull would cost* -- see
 :mod:`in_reach.app.script_sync` for why, and ``tests/app/rvt/test_script_pull_end_to_end.py`` for the real
 native round trip.
@@ -253,7 +253,7 @@ def test_uses_directives(source: str, expected: bool) -> None:
 
 
 def test_a_linked_project_is_never_pulled_into(folder: Path) -> None:
-    """Its script is built from blocks and modules; output.txt isn't the source, so an RVT change to the built
+    """Its script is built from blocks and modules; output.mgl isn't the source, so an RVT change to the built
     script has nowhere to go."""
     _write_script(folder, "mine\n")
     before, after = _snapshots(folder, built="built\n", rvt="edited in rvt\n")

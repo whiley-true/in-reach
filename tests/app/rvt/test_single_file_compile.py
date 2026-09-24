@@ -1,6 +1,6 @@
-"""A single ``script/output.txt`` through the real compile, now that it is linked first: annotations become slots and
-trait sets in the built variant, compiler errors still point at the file's own lines, and an untouched file is still
-recognised as unchanged (the link adds nothing to a file with no annotations)."""
+"""A single ``script/output.mgl`` through the real compile, now that it is linked first: its own slots are built as
+written, an annotation that would pick a slot for it fails the build (that is a script project's job), compiler errors
+point at the file's own lines, and an untouched file is still recognised as unchanged (the link adds nothing to it)."""
 from pathlib import Path
 
 import pytest
@@ -39,16 +39,13 @@ def test_an_untouched_single_file_still_builds_the_base_script_unchanged(tmp_pat
     assert _decompiled(result.output_path) == _decompiled(new_project.source_variant_path(project_dir, folder))
 
 
-def test_a_single_files_annotations_are_built_into_the_variant(tmp_path: Path) -> None:
+def test_a_single_file_names_its_own_slots_and_they_are_built_as_written(tmp_path: Path) -> None:
     project_dir, folder = _new_project(tmp_path)
-    (folder / "script" / "output.txt").write_text(
-        "-- @number g_rounds priority=high\n"
-        '-- @trait t_fast { name = "Fast", movement_speed = "value_150" }\n'
-        "for each player do\n"
-        "   current_player.apply_traits(t_fast)\n"
-        "end\n"
+    (folder / "script" / "output.mgl").write_text(
+        "-- @doc Three rounds, set when the game starts.\n"
+        "declare global.number[0] with network priority high\n"
         "on init: do\n"
-        "   g_rounds = 3\n"
+        "   global.number[0] = 3\n"
         "end\n",
         encoding="utf-8",
     )
@@ -59,20 +56,27 @@ def test_a_single_files_annotations_are_built_into_the_variant(tmp_path: Path) -
     text = _decompiled(result.output_path)
     assert "declare global.number[0] with network priority high" in text
     assert "global.number[0] = 3" in text
-    variant = rvt_bridge.get_rvt().load(str(result.output_path)).multiplayer
-    index = int(text.split("current_player.apply_traits(script_traits[")[1].split("]")[0])
-    assert variant.scripted_player_trait(index).name.text == "Fast"
     # every build refreshes the generated documentation
     overview = (folder / "build" / "docs" / "overview.md").read_text(encoding="utf-8")
-    assert "| `g_rounds` | `global.number[0]` |" in overview
+    assert "Three rounds, set when the game starts." in overview
 
 
-def test_a_compiler_error_below_the_declarations_is_reported_at_its_line_in_output_txt(tmp_path: Path) -> None:
+def test_a_slot_picking_annotation_fails_a_single_files_build_before_compiling(tmp_path: Path) -> None:
     project_dir, folder = _new_project(tmp_path)
-    (folder / "script" / "output.txt").write_text(
-        "-- @number g_a priority=low\n"  # 1  (adds a declare and an alias above the file)
+    (folder / "script" / "output.mgl").write_text("-- @number g_a\non init: do\n   g_a = 1\nend\n", encoding="utf-8")
+
+    result = compile_module._run_compile_in_process(project_dir, folder, save=True)
+
+    assert result.success is False and result.failure == "The script has errors -- see the errors."
+    assert [(m.file, m.line, m.code) for m in result.errors] == [("output.mgl", 1, "project-only")]
+
+
+def test_a_compiler_error_is_reported_at_its_line_in_output_txt(tmp_path: Path) -> None:
+    project_dir, folder = _new_project(tmp_path)
+    (folder / "script" / "output.mgl").write_text(
+        "-- @doc a note, which adds nothing above the file\n"  # 1
         "on init: do\n"  # 2
-        "   g_a = 1\n"  # 3
+        "   global.number[0] = 1\n"  # 3
         "   this_is_not_a_real_call()\n"  # 4
         "end\n",  # 5
         encoding="utf-8",
@@ -82,14 +86,14 @@ def test_a_compiler_error_below_the_declarations_is_reported_at_its_line_in_outp
 
     assert result.success is False
     located = [(m.file, m.line) for m in (result.fatal_errors + result.errors)]
-    assert ("output.txt", 4) in located, compile_module.format_build_result(result)
+    assert ("output.mgl", 4) in located, compile_module.format_build_result(result)
 
 
 def test_a_single_file_check_problem_fails_the_build_before_compiling(tmp_path: Path) -> None:
     project_dir, folder = _new_project(tmp_path)
-    (folder / "script" / "output.txt").write_text("-- @number g_a\n-- @number g_a\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("declare global.number[0]\ndeclare global.number[0]\n", encoding="utf-8")
 
     result = compile_module._run_compile_in_process(project_dir, folder, save=True)
 
     assert result.success is False and result.failure == "The script has errors -- see the errors."
-    assert [(m.file, m.line, m.code) for m in result.errors] == [("output.txt", 2, "IR006")]
+    assert [(m.file, m.line, m.code) for m in result.errors] == [("output.mgl", 2, "IR006")]

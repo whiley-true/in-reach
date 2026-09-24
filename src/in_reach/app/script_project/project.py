@@ -119,7 +119,7 @@ def script_dir(folder: Path) -> Path:
 
 def is_linked(folder: Path) -> bool:
     """Whether ``folder`` is a *linked* project: it has a ``script/project.toml``, so its script is built from
-    blocks and modules rather than being the single hand-edited ``script/output.txt``."""
+    blocks and modules rather than being the single hand-edited ``script/output.mgl``."""
     return (script_dir(folder) / PROJECT_FILENAME).is_file()
 
 
@@ -434,22 +434,40 @@ def load_project(folder: Path, overrides: dict[str, str] | None = None) -> Scrip
     return _Loader(folder, overrides).load()
 
 
-SINGLE_FILE = "output.txt"
+SINGLE_FILE = new_project.SCRIPT_FILENAME
 SINGLE_BLOCK = "MAIN"
-#: What only a script project can express: how blocks and fragments are cut and ordered, and object kinds.
-_PROJECT_ONLY = frozenset(
+#: What only a script project can express: how blocks and fragments are cut and ordered.
+_PROJECT_STRUCTURE = frozenset(
     {"block", "fragment", "loop", "gate", "guard", "guard_end", "preamble", "provides", "traits", "fusion", "assumes"}
 )
+#: What only a script project does for you: pick a storage slot for a name, or a table entry for a resource. A single
+#: file names its slots itself (``global.number[0]``) and its resources by index (``script_traits[0]``).
+_PROJECT_ALLOCATED = frozenset({"storage", "bitfield", "trait", "option", "widget", "label"})
+_PROJECT_ONLY = _PROJECT_STRUCTURE | _PROJECT_ALLOCATED
+_WRITTEN_NAME = re.compile(r"@([A-Za-z][A-Za-z0-9_-]*)")
+
+
+def _project_only_message(annotation, line: str) -> str:
+    match = _WRITTEN_NAME.search(line)
+    written = f"@{match[1]}" if match else f"@{annotation.kind.replace('_', '-')}"
+    if annotation.kind in _PROJECT_ALLOCATED:
+        return (
+            f"{written} has in-reach choose a slot or table entry for you, which only a script project does -- in a "
+            "single file write it yourself (global.number[0], script_traits[0]), or Convert to Project"
+        )
+    return f"{written} belongs in a script project (Convert to Project to use it)"
 
 
 def load_single_file(folder: Path, text: str | None = None) -> ScriptProject:
-    """``folder``'s ``script/output.txt`` as a project of one block, :data:`SINGLE_BLOCK`, so the model, the linter
+    """``folder``'s ``script/output.mgl`` as a project of one block, :data:`SINGLE_BLOCK`, so the model, the linter
     and the allocator read it the same way they read a script project. ``text`` stands in for the file's content
     (an unsaved editor buffer).
 
-    The file is preprocessed exactly as a single-file build always has been (the active env, nothing else). An
-    annotation only a project understands is an error; an *unknown* ``-- @name`` is a warning, since before a single
-    file's annotations were read it was just a comment."""
+    The file is preprocessed exactly as a single-file build always has been (the active env, nothing else). What a
+    single file gets from annotations is documentation (``@doc``, ``@tags``, ``@see``) and the checks; anything that has
+    in-reach choose for it -- a storage slot (``@number``), a trait set or other table entry (``@trait``), a label -- or
+    that shapes blocks and fragments is a ``project-only`` error, since that is what a script project is for. An
+    *unknown* ``-- @name`` is a warning, since before a single file's annotations were read it was just a comment."""
     loader = _Loader(folder)
     project = loader.project
     project.manifest = ProjectManifest()
@@ -464,7 +482,7 @@ def load_single_file(folder: Path, text: str | None = None) -> ScriptProject:
         project.constants = dict(project.env.constants)
 
     if text is None:
-        path = loader.scripts / SINGLE_FILE
+        path = new_project.migrate_script_file(folder)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
     try:
         processed: str | None = script_preprocess.preprocess(text, project.env)
@@ -475,10 +493,12 @@ def load_single_file(folder: Path, text: str | None = None) -> ScriptProject:
     for diagnostic in annotations.diagnostics:
         severity = "warning" if diagnostic.message.startswith("unknown annotation") else "error"
         loader.report(severity, "annotation", diagnostic.message, SINGLE_FILE, diagnostic.span.start_line, diagnostic.span.start_col)
+    lines = (processed or "").split("\n")
     for annotation in annotations.items:
         if annotation.kind in _PROJECT_ONLY:
+            line = lines[annotation.span.start_line - 1] if annotation.span.start_line <= len(lines) else ""
             loader.error(
-                "project-only", f"@{annotation.kind.replace('_', '-')} belongs in a script project (Convert to Project to use it)",
+                "project-only", _project_only_message(annotation, line),
                 SINGLE_FILE, annotation.span.start_line, annotation.span.start_col,
             )
     source = SourceFile(path=SINGLE_FILE, owner=f"block:{SINGLE_BLOCK}", text=text, processed=processed, annotations=annotations)

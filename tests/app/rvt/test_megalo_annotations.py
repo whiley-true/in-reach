@@ -409,7 +409,7 @@ def test_see_and_assumes_take_one_name() -> None:
 
 @pytest.mark.parametrize(
     ("text", "message"),
-    [("-- @doc", "needs some text"), ("-- @see", "needs a tag"), ("-- @see a b", "unexpected 'b'"), ("-- @assumes", "needs a block name")],
+    [("-- @see", "needs a tag"), ("-- @see a b", "unexpected 'b'"), ("-- @assumes", "needs a block name")],
 )
 def test_documentation_problems(text: str, message: str) -> None:
     assert message in _problem(text).message
@@ -531,3 +531,9 @@ def test_a_parse_expression_error_reports_the_real_line_and_column() -> None:
         parse_expression("a == b c", line=9, col=4)
 
     assert (raised.value.token.start_line, raised.value.token.start_col) == (9, 11)
+
+
+def test_a_doc_line_is_markdown_and_a_bare_one_is_a_blank_line() -> None:
+    assert _one("-- @doc   - nested item").text == "  - nested item"  # one space dropped, the rest kept
+    assert _one("-- @doc").text == ""
+    assert _one("-- @doc **bold** text  ").text == "**bold** text"

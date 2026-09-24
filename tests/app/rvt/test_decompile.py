@@ -238,7 +238,7 @@ def test_decompile_into_project_writes_valid_maps_json_filtered_by_script_settin
 
 
 def test_resync_from_bin_updates_settings_and_build_without_touching_edit(tmp_path: Path, monkeypatch) -> None:
-    # PROMPT.md: "[generated files] should update when rvt saves" -- but script/output.txt is the
+    # PROMPT.md: "[generated files] should update when rvt saves" -- but script/output.mgl is the
     # one hand-editable thing left, so a resync must never overwrite it.
     settings = _game_settings()
     variant = _FakeVariant(_FakeMultiplayer())

@@ -425,7 +425,7 @@ def test_apply_settings_changes_has_nothing_left_to_apply_afterward(_project: tu
 @_NEEDS_NATIVE_RVT
 def test_apply_settings_changes_reports_a_bad_script_and_writes_nothing(_project: tuple[Path, Path]) -> None:
     project_dir, folder = _project
-    script_path = folder / "script" / "output.txt"
+    script_path = folder / "script" / "output.mgl"
     script_path.write_text("this is not valid megalo script @#$%", encoding="utf-8")
     dist_bin = folder / "build" / "dist" / f"{folder.name}.bin"
     assert not dist_bin.exists()

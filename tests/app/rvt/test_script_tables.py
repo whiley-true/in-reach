@@ -390,7 +390,7 @@ def _project(tmp_path: Path, script: str) -> tuple[Path, Path]:
         project_dir, "Tables Test", source_variant=resolve_blank_variant(firefight=False)
     )
     assert warning is None
-    (folder / "script" / "output.txt").write_text(script, encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text(script, encoding="utf-8")
     return project_dir, folder
 
 
@@ -479,7 +479,7 @@ def test_edits_a_user_makes_to_a_created_entry_survive_every_later_apply(tmp_pat
 def test_a_script_that_grows_past_the_settings_list_extends_it(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, "for each player do\n   script_widget[0].set_visibility(current_player, true)\nend\n")
     compile_module.run_compile(project_dir, folder, save=True)
-    (folder / "script" / "output.txt").write_text(
+    (folder / "script" / "output.mgl").write_text(
         "for each player do\n   script_widget[3].set_visibility(current_player, true)\nend\n", encoding="utf-8"
     )
 
@@ -492,7 +492,7 @@ def test_a_script_that_grows_past_the_settings_list_extends_it(tmp_path: Path) -
 def test_a_script_that_stops_using_an_entry_leaves_it_in_settings(tmp_path: Path) -> None:
     project_dir, folder = _project(tmp_path, _SCRIPT)
     compile_module.run_compile(project_dir, folder, save=True)
-    (folder / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")
 
     result = compile_module.run_compile(project_dir, folder, save=True)
 
@@ -541,7 +541,7 @@ def test_an_options_hidden_flag_in_settings_is_not_undone_by_creating_the_option
     data = json.loads(settings_path.read_text(encoding="utf-8"))
     data["multiplayer"]["game_settings"]["option_visibility"]["megalo_options_hidden"] = [0]
     settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    (folder / "script" / "output.txt").write_text("game.end_round()\n", encoding="utf-8")  # no longer refers to it
+    (folder / "script" / "output.mgl").write_text("game.end_round()\n", encoding="utf-8")  # no longer refers to it
 
     result = compile_module.run_compile(project_dir, folder, save=True)  # ...so settings alone creates it now
 

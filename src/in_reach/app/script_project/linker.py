@@ -275,7 +275,7 @@ def _hand_used_slots(model: SemanticModel) -> set[tuple[str, str, int]]:
 
 
 def link(folder: Path, *, write: bool = True, overrides: dict[str, str] | None = None) -> LinkResult:
-    """Links ``folder``'s script: its script project, or its single ``script/output.txt`` (see the module docstring).
+    """Links ``folder``'s script: its script project, or its single ``script/output.mgl`` (see the module docstring).
     With ``write=False`` nothing is touched. ``overrides`` (unsaved editor buffers, by path relative to ``script/``)
     stand in for those files; a link that reads one never writes."""
     if overrides and write:

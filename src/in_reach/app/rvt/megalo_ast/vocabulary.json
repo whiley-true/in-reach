@@ -1,0 +1,1280 @@
+{
+ "source": "native/engine (ReachVariantTool), read by native/vocabulary.py",
+ "functions": [
+  {
+   "name": "break_into_debugger",
+   "kind": "action",
+   "context": null,
+   "args": [],
+   "returns": null,
+   "description": "Does nothing in Halo: Reach's release build."
+  },
+  {
+   "name": "debug_break",
+   "kind": "action",
+   "context": null,
+   "args": [],
+   "returns": null,
+   "description": "Does nothing in Halo: Reach's release build."
+  },
+  {
+   "name": "debug_force_player_view_count",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "number"
+   ],
+   "returns": null,
+   "description": "A debug function that does nothing in Halo: Reach's release build. Evidence suggests that in debug builds, it might have forcibly set the number of split-screen views to display."
+  },
+  {
+   "name": "debug_print",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Presumably, if this were run in a debug build of Halo: Reach, it'd write a message to some readout or log file."
+  },
+  {
+   "name": "debug_set_tracing_enabled",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "bool"
+   ],
+   "returns": null,
+   "description": "Likely does nothing in Halo: Reach's release build."
+  },
+  {
+   "name": "debugging_enable_tracing",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "bool"
+   ],
+   "returns": null,
+   "description": "Likely does nothing in Halo: Reach's release build."
+  },
+  {
+   "name": "get_random_object",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "label",
+    "exclude"
+   ],
+   "returns": "object",
+   "description": "Used by Infection to move the active Haven. Will not select the same Haven twice in a row; if the map has only one Haven, then the containing trigger runs on every frame and spams \"Hill Moved\" announcements."
+  },
+  {
+   "name": "insert_theater_film_marker",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "offset",
+    "label"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "rand",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "cap"
+   ],
+   "returns": "number",
+   "description": "Set a number variable to a random value greater than or equal to zero and less than the provided cap (i.e. [0, cap) as the range)."
+  },
+  {
+   "name": "saved_film_insert_marker",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "offset",
+    "label"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "send_incident",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "incident",
+    "cause?",
+    "affected?"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_scenario_interpolator_state",
+   "kind": "action",
+   "context": null,
+   "args": [
+    "which",
+    "state"
+   ],
+   "returns": null,
+   "description": "Modify the \"state\" value of a scenario interpolator. Each scenario interpolator is defined by a \"sirp\" tag in the map file."
+  },
+  {
+   "name": "end_round",
+   "kind": "action",
+   "context": "game",
+   "args": [],
+   "returns": null,
+   "description": "Ends the round. If the round limit is hit, ends the game as well."
+  },
+  {
+   "name": "hs_function_call",
+   "kind": "action",
+   "context": "game",
+   "args": [
+    "function_id"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Calls a HaloScript function that the map has made available for use by Megalo. This appears to be intended mainly for *.MAP mod authors who are creating map-and-Megalo combo mods."
+  },
+  {
+   "name": "hud_post_message",
+   "kind": "action",
+   "context": "game",
+   "args": [
+    "who",
+    "sound",
+    "text"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "is_in_forge",
+   "kind": "condition",
+   "context": "game",
+   "args": [],
+   "returns": null,
+   "description": "This condition is believed to test whether the current match is taking place in Forge. However, there is no known way to get gametype scripts to actually run in Forge."
+  },
+  {
+   "name": "play_sound_for",
+   "kind": "action",
+   "context": "game",
+   "args": [
+    "who",
+    "sound",
+    "immediate"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "show_message_to",
+   "kind": "action",
+   "context": "game",
+   "args": [
+    "who",
+    "sound",
+    "text"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "add_weapon",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "weapon",
+    "mode"
+   ],
+   "returns": null,
+   "description": "Give a weapon to any biped, be it a player or an inanimate script-spawned Spartan, Elite, or Monitor. If the biped's owner player has Weapon Pickup disabled in their player traits, you must use \"force\" to add the weapon."
+  },
+  {
+   "name": "animate_device_position",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "animation target",
+    "animation duration seconds",
+    "acceleration seconds",
+    "deceleration seconds"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "apply_shape_color_from_player_member",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "object + player"
+   ],
+   "returns": null,
+   "description": "Used by KOTH FFA to set a Hill's shape color to the player that controls the Hill. Takes a single argument consisting of a globally-scoped object and a player member on that object."
+  },
+  {
+   "name": "apply_upward_impulse",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": "Launches an object upward by a random amount. This is used for things like skulls popping out of heads in Headhunter."
+  },
+  {
+   "name": "attach_to",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "target",
+    "offset",
+    "relative"
+   ],
+   "returns": null,
+   "description": "Attach one object to another. The subject will be moved to the target's position plus the offset before being attached. An additional parameter controls whether the offset exists in the target's reference frame (i.e. whether the target's rotation affects the subject's final position); however, the subject will not be rotated (to match the target or otherwise) even if a relative position offset is used."
+  },
+  {
+   "name": "copy_rotation_from",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "b",
+    "all_axes"
+   ],
+   "returns": null,
+   "description": "Have one object copy another object's rotation. The boolean argument indicates whether we copy all axes of rotation (true) or just the heading (false)."
+  },
+  {
+   "name": "create_object",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "type",
+    "label",
+    "flags",
+    "offset",
+    "name"
+   ],
+   "returns": "object",
+   "description": "Creates an object. Note that even if the new object and/or the basis are non-solid, the new object may not be created exactly at the desired position. Attaching and detaching after the object is created is a more reliable way to ensure exact positioning when exact positioning is needed."
+  },
+  {
+   "name": "delete",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": "Delete an object. If the deleted object is a player's current biped, then the player will respawn instantly; in limited-life game variants, they will not lose a life as a result of the deletion. Deleting a player's biped repeatedly for a prolonged period of time will cause the screen to cut to black for them; no HUD widgets will be visible, and most sounds will not be audible."
+  },
+  {
+   "name": "detach",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": "Detach an object from any other object it is attached to."
+  },
+  {
+   "name": "enable_spawn_zone",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "enable (treated as bool)"
+   ],
+   "returns": null,
+   "description": "Control whether a Respawn Zone is influencing spawning."
+  },
+  {
+   "name": "face_toward",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "b",
+    "offset"
+   ],
+   "returns": null,
+   "description": "Makes one object face toward another. Only seems to affect the subject's heading; pitch and roll rotations don't seem to occur. If you face an object toward itself, you can use the offset position to rotate it."
+  },
+  {
+   "name": "get_carrier",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": "player",
+   "description": "Set a player variable to the carrier of a weapon or Armor Ability. Testing reveals no cases where this function can fail (i.e. it behaves correctly for dropped objects, none-objects, and objects held by an NPC biped), but Bungie and 343i still manually clear the out-variable before calling it."
+  },
+  {
+   "name": "get_device_position",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": "number",
+   "description": ""
+  },
+  {
+   "name": "get_device_power",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": "number",
+   "description": ""
+  },
+  {
+   "name": "get_distance_to",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "b"
+   ],
+   "returns": "number",
+   "description": "Returns the distance between two objects. Returned distances are measured in feet; for a decent conversion to meters, multiply by 7 and divide by 23."
+  },
+  {
+   "name": "get_orientation",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": "number",
+   "description": "Retrieve the object's orientation as an enum between 1 and 6 inclusive, indicating which side of the object is facing up. This can fail, so you should consider resetting the number variable before calling this. Testing with vehicles indicates that the orientation indicates which of the object's local vectors (up, down, etc.) is most closely aligned with world-up, with the vectors numbered from 1 to 6 being: up (i.e. object is upright), left, backward (i.e. nose down), forward (i.e. nose up), left, and down (i.e. object is upside-down). However, testing with pre-placed and pre-rotated weapons and scenery objects always returned 1."
+  },
+  {
+   "name": "get_speed",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": "number",
+   "description": "Set a number variable to an object's speed. The speed is premultiplied by 10 and, if less than 0.1, returned as zero. The unit of measurement seems to be feet per second; Race multiplies by 109 and then divides by 100 to convert to kilometers per hour."
+  },
+  {
+   "name": "has_forge_label",
+   "kind": "condition",
+   "context": "object",
+   "args": [
+    "label"
+   ],
+   "returns": null,
+   "description": "Checks whether an object has a Forge label."
+  },
+  {
+   "name": "is_in_use",
+   "kind": "condition",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "is_of_type",
+   "kind": "condition",
+   "context": "object",
+   "args": [
+    "type"
+   ],
+   "returns": null,
+   "description": "Checks an object's type."
+  },
+  {
+   "name": "is_out_of_bounds",
+   "kind": "condition",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether an object is out of bounds."
+  },
+  {
+   "name": "kill",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "silent"
+   ],
+   "returns": null,
+   "description": "Instantly destroy the specified object."
+  },
+  {
+   "name": "place_at_me",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "type",
+    "label",
+    "flags",
+    "offset",
+    "name"
+   ],
+   "returns": "object",
+   "description": "Creates an object. Note that even if the new object and/or the basis are non-solid, the new object may not be created exactly at the desired position. Attaching and detaching after the object is created is a more reliable way to ensure exact positioning when exact positioning is needed."
+  },
+  {
+   "name": "place_between_me_and",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "b",
+    "type",
+    "radius"
+   ],
+   "returns": "object",
+   "description": "create_tunnel"
+  },
+  {
+   "name": "push_upward",
+   "kind": "action",
+   "context": "object",
+   "args": [],
+   "returns": null,
+   "description": "Launches an object upward by a random amount. This is used for things like skulls popping out of heads in Headhunter."
+  },
+  {
+   "name": "remove_weapon",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "which",
+    "delete"
+   ],
+   "returns": null,
+   "description": "Take a weapon from any biped, be it a player or an inanimate script-spawned Spartan, Elite, or Monitor."
+  },
+  {
+   "name": "set_boundary",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "shape"
+   ],
+   "returns": null,
+   "description": "Add a Shape to an object, or replace its existing Shape."
+  },
+  {
+   "name": "set_device_actual_position",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "position"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_device_animation_position",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "animation",
+    "position"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_device_position",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "position"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_device_power",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "power"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_fireteam_respawn_filter",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "fireteams"
+   ],
+   "returns": null,
+   "description": "Limit which fireteams can spawn at an object."
+  },
+  {
+   "name": "set_garbage_collection_disabled",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "state (treated as bool)"
+   ],
+   "returns": null,
+   "description": "Set whether an object can be garbage-collected. This does not work if the object was created with the never_garbage_collect flag."
+  },
+  {
+   "name": "set_hidden",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "should_hide"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Set whether an object is made invisible."
+  },
+  {
+   "name": "set_invincibility",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "invincible (treated as a bool)"
+   ],
+   "returns": null,
+   "description": "Set whether an object is invincible. Invincible objects cannot be destroyed by anything -- even level boundaries."
+  },
+  {
+   "name": "set_pickup_permissions",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "who"
+   ],
+   "returns": null,
+   "description": "Limit who can pick up a weapon. This action does not affect grenades, armor abilities, or vehicles."
+  },
+  {
+   "name": "set_progress_bar",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "timer",
+    "who"
+   ],
+   "returns": null,
+   "description": "Set whether an object displays a progress bar."
+  },
+  {
+   "name": "set_respawn_filter",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "who"
+   ],
+   "returns": null,
+   "description": "Limit who can spawn at an object."
+  },
+  {
+   "name": "set_scale",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "scale"
+   ],
+   "returns": null,
+   "description": "Resizes an object. An enlarged object will correctly register hits from bullets and impacts with grenades (including being stuck), but splash damage will not take scaling into account and will apply (or not) based on the object's original size."
+  },
+  {
+   "name": "set_shape",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "shape"
+   ],
+   "returns": null,
+   "description": "Add a Shape to an object, or replace its existing Shape."
+  },
+  {
+   "name": "set_shape_visibility",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "who"
+   ],
+   "returns": null,
+   "description": "Limit who can see an object's Shape."
+  },
+  {
+   "name": "set_spawn_location_fireteams",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "fireteams"
+   ],
+   "returns": null,
+   "description": "Limit which fireteams can spawn at an object."
+  },
+  {
+   "name": "set_spawn_location_permissions",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "who"
+   ],
+   "returns": null,
+   "description": "Limit who can spawn at an object."
+  },
+  {
+   "name": "set_waypoint_icon",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "icon"
+   ],
+   "returns": null,
+   "description": "Control the icon of a waypoint on an object."
+  },
+  {
+   "name": "set_waypoint_priority",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "priority"
+   ],
+   "returns": null,
+   "description": "Control the priority of a waypoint on an object."
+  },
+  {
+   "name": "set_waypoint_range",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "min",
+    "max"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_waypoint_text",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Sets the text of an object's waypoint. Any variables used with a format string will be passed by reference, not by value, if the variable in question doesn't have network priority \"high,\" and this may lead to results contrary to what you expect."
+  },
+  {
+   "name": "set_waypoint_timer",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "timer"
+   ],
+   "returns": null,
+   "description": "Set which timer an object displays, of the timer variables scoped to that object."
+  },
+  {
+   "name": "set_waypoint_visibility",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "who"
+   ],
+   "returns": null,
+   "description": "Control the visibility of a waypoint on an object."
+  },
+  {
+   "name": "set_weapon_pickup_priority",
+   "kind": "action",
+   "context": "object",
+   "args": [
+    "priority"
+   ],
+   "returns": null,
+   "description": "Modify whether a weapon is picked up automatically or as a hold action. This only works on weapons, not grenades."
+  },
+  {
+   "name": "shape_contains",
+   "kind": "condition",
+   "context": "object",
+   "args": [
+    "a"
+   ],
+   "returns": null,
+   "description": "Checks whether one object is inside of another object's Shape. Note that this is a centerpoint check. If, for example, you check whether a shape contains a Warthog, the check will pass only when the Warthog's centerpoint is inside of the shape. If this check is run on an attached object, it will instead test the centerpoint of the parent object; for example, if A is attached to B, then A will only count as being in C's shape when B's centerpoint is in C's shape, regardless of the position of A's centerpoint."
+  },
+  {
+   "name": "add_weapon",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "weapon"
+   ],
+   "returns": null,
+   "description": "This function attempts to add a weapon object to a player, without having to access their biped."
+  },
+  {
+   "name": "apply_traits",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "traits"
+   ],
+   "returns": null,
+   "description": "Apply one of the scripted sets of Player Traits to a player. There is no trigger action to remove a set of player traits; rather, you must reapply traits on every frame, and you \"remove\" traits by not reapplying them."
+  },
+  {
+   "name": "assisted_kill_of",
+   "kind": "condition",
+   "context": "player",
+   "args": [
+    "victim"
+   ],
+   "returns": null,
+   "description": "Checks whether one player assisted in the slaying of another player. Note that players don't count as \"assisting\" themselves."
+  },
+  {
+   "name": "force_into_vehicle",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "vehicle"
+   ],
+   "returns": null,
+   "description": "Forces the player into a vehicle. The player is instantly teleported in. This action will not work if the player is already in a vehicle, or if the target vehicle is destroyed. It does work if the target vehicle is overturned, but the player will be instantly ejected without ever having spent any actual time in the vehicle."
+  },
+  {
+   "name": "get_armor_ability",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "object",
+   "description": "Returns a player's armor ability."
+  },
+  {
+   "name": "get_button_press_duration",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "button"
+   ],
+   "returns": "number",
+   "description": "[MCC-only; backported from Halo 4.] A host-only action to retrieve how long (in milliseconds) a player has held a given button down. Intended for debugging purposes only; future MCC updates may change how this functions."
+  },
+  {
+   "name": "get_button_time",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "button"
+   ],
+   "returns": "number",
+   "description": "[MCC-only; backported from Halo 4.] A host-only action to retrieve how long (in milliseconds) a player has held a given button down. Intended for debugging purposes only; future MCC updates may change how this functions."
+  },
+  {
+   "name": "get_crosshair_target",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "object",
+   "description": "Reportedly only works on objects that trigger a red reticle, and reportedly only on host."
+  },
+  {
+   "name": "get_death_damage_mod",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Set a number variable to indicate what damage modifier killed a player."
+  },
+  {
+   "name": "get_death_damage_type",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Set a number variable to indicate what damage type killed a player."
+  },
+  {
+   "name": "get_fireteam",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Returns a player's fireteam number."
+  },
+  {
+   "name": "get_killer",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "player",
+   "description": "Set a player variable to whoever most recently killed the target player."
+  },
+  {
+   "name": "get_scoreboard_pos",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Get a player's position on the scoreboard, across all players and teams. This function returns 0 if the player used is (no_player)."
+  },
+  {
+   "name": "get_spree_count",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Returns the number of consecutive kills that a player has accomplished without dying."
+  },
+  {
+   "name": "get_vehicle",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "object",
+   "description": "Sets an object variable to the vehicle that a player is currently using."
+  },
+  {
+   "name": "get_weapon",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "which"
+   ],
+   "returns": "object",
+   "description": "Returns a player's primary or secondary weapon, as desired."
+  },
+  {
+   "name": "is_elite",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a player is an Elite."
+  },
+  {
+   "name": "is_fireteam_leader",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "This function is a no-op and always returns false."
+  },
+  {
+   "name": "is_monitor",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a player is a Monitor."
+  },
+  {
+   "name": "is_not_respawning",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a player is NOT waiting to respawn."
+  },
+  {
+   "name": "is_sangheili",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a player is an Elite."
+  },
+  {
+   "name": "is_spartan",
+   "kind": "condition",
+   "context": "player",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a player is a Spartan."
+  },
+  {
+   "name": "killer_type_is",
+   "kind": "condition",
+   "context": "player",
+   "args": [
+    "killer types"
+   ],
+   "returns": null,
+   "description": "Checks what killed a player."
+  },
+  {
+   "name": "record_griefer_penalty",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "number"
+   ],
+   "returns": null,
+   "description": "The specific function of this action is not known. Presumably it has something to do with keeping track of bad behavior in-game."
+  },
+  {
+   "name": "set_biped",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "biped"
+   ],
+   "returns": null,
+   "description": "Forces a player to use a specific object as their biped, leaving their original biped behind. This action does nothing if the chosen object is not a valid biped (i.e. the BIPD tag). Once a Megalo-spawned Spartan biped is assigned to a player, its voice will match the player's chosen Spartan gender regardless of the biped's own gender presentation."
+  },
+  {
+   "name": "set_co_op_spawning",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "enabled"
+   ],
+   "returns": null,
+   "description": "Used in Halo: Reach's standard Race variant?"
+  },
+  {
+   "name": "set_fireteam",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "index"
+   ],
+   "returns": null,
+   "description": "Sets a player's fireteam number."
+  },
+  {
+   "name": "set_loadout_palette",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "loadout palette"
+   ],
+   "returns": null,
+   "description": "Set which loadout palette a player or team has access to."
+  },
+  {
+   "name": "set_objective_allegiance_icon",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "icon"
+   ],
+   "returns": null,
+   "description": "Alters the icon of the title card shown at the start of a round."
+  },
+  {
+   "name": "set_objective_allegiance_name",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Alters the description of the title card shown at the start of a round."
+  },
+  {
+   "name": "set_objective_text",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Alters the text of the title card shown at the start of a round."
+  },
+  {
+   "name": "set_primary_respawn_object",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "respawn"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_req_purchase_modes",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "flags",
+    "enable"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_requisition_palette",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "palette"
+   ],
+   "returns": null,
+   "description": "Switches which Requisition Palette a player has access to. This functionality is not used in Halo: Reach."
+  },
+  {
+   "name": "set_respawn_vehicle",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "vehicle"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Set which vehicle, if any, a player will respawn in."
+  },
+  {
+   "name": "set_vehicle_spawning_enabled",
+   "kind": "action",
+   "context": "player",
+   "args": [
+    "enable"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Enable or disable vehicle spawning for a player. When enabled, the player will spawn in whatever vehicle you've set."
+  },
+  {
+   "name": "try_get_death_damage_mod",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Set a number variable to indicate what damage modifier killed a player."
+  },
+  {
+   "name": "try_get_death_damage_type",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "number",
+   "description": "Set a number variable to indicate what damage type killed a player."
+  },
+  {
+   "name": "try_get_killer",
+   "kind": "action",
+   "context": "player",
+   "args": [],
+   "returns": "player",
+   "description": "Set a player variable to whoever most recently killed the target player."
+  },
+  {
+   "name": "get_scoreboard_pos",
+   "kind": "action",
+   "context": "team",
+   "args": [],
+   "returns": "number",
+   "description": "Get a team's scoreboard position."
+  },
+  {
+   "name": "has_alliance_status",
+   "kind": "condition",
+   "context": "team",
+   "args": [
+    "b",
+    "status"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "has_any_players",
+   "kind": "condition",
+   "context": "team",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a team has one or more players on it."
+  },
+  {
+   "name": "set_co_op_spawning",
+   "kind": "action",
+   "context": "team",
+   "args": [
+    "bool"
+   ],
+   "returns": null,
+   "description": "Co-op Spawning is more commonly known as \"Bro Spawning,\" and is used in Invasion and in Bro Slayer."
+  },
+  {
+   "name": "set_primary_respawn_object",
+   "kind": "action",
+   "context": "team",
+   "args": [
+    "respawn"
+   ],
+   "returns": null,
+   "description": ""
+  },
+  {
+   "name": "set_respawn_vehicle",
+   "kind": "action",
+   "context": "team",
+   "args": [
+    "vehicle"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Set which vehicle, if any, a team's players will respawn in."
+  },
+  {
+   "name": "set_vehicle_spawning_enabled",
+   "kind": "action",
+   "context": "team",
+   "args": [
+    "enable"
+   ],
+   "returns": null,
+   "description": "[MCC-only; backported from Halo 4.] Enable or disable vehicle spawning for a team. When enabled, the team will spawn in whatever vehicle you've set."
+  },
+  {
+   "name": "is_zero",
+   "kind": "condition",
+   "context": "timer",
+   "args": [],
+   "returns": null,
+   "description": "Checks whether a timer is at zero."
+  },
+  {
+   "name": "reset",
+   "kind": "action",
+   "context": "timer",
+   "args": [],
+   "returns": null,
+   "description": "Resets a timer."
+  },
+  {
+   "name": "set_rate",
+   "kind": "action",
+   "context": "timer",
+   "args": [
+    "rate"
+   ],
+   "returns": null,
+   "description": "Modify the rate at which a timer's value changes, and whether the value increases or decreases. If you set the timer to decrease, then its rate will automatically switch to 0% when it reaches zero. If you set the timer to increase, then it will not increase past its initial value unless its initial value is zero."
+  },
+  {
+   "name": "set_icon",
+   "kind": "action",
+   "context": "widget",
+   "args": [
+    "icon"
+   ],
+   "returns": null,
+   "description": "Modify a HUD widget's icon."
+  },
+  {
+   "name": "set_meter_params",
+   "kind": "action",
+   "context": "widget",
+   "args": [
+    "parameters"
+   ],
+   "returns": null,
+   "description": "Modify meter options for a HUD widget. Any variables specified as part of the meter parameters appear to be passed by reference, which would mean that the meter will update as their values change, even if this action isn't run again."
+  },
+  {
+   "name": "set_text",
+   "kind": "action",
+   "context": "widget",
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Modifies the text for a HUD widget. You can stitch values together dynamically. Note that if you display a player's name by way of a player variable, the variable must have \"high\" network priority for the name to display properly off-host."
+  },
+  {
+   "name": "set_value_text",
+   "kind": "action",
+   "context": "widget",
+   "args": [
+    "text"
+   ],
+   "returns": null,
+   "description": "Modifies an unknown text field for a HUD widget. You can stitch values together dynamically."
+  },
+  {
+   "name": "set_visibility",
+   "kind": "action",
+   "context": "widget",
+   "args": [
+    "player",
+    "visible"
+   ],
+   "returns": null,
+   "description": "Control whether a given player can see a HUD widget."
+  }
+ ],
+ "properties": {
+  "object": {
+   "health": "number",
+   "max_health": "number",
+   "max_shields": "number",
+   "shields": "number",
+   "spawn_sequence": "number",
+   "team": "team"
+  },
+  "player": {
+   "biped": "object",
+   "money": "number",
+   "rating": "number",
+   "score": "number",
+   "script_stat": "number",
+   "team": "team"
+  },
+  "team": {
+   "score": "number",
+   "script_stat": "number"
+  }
+ },
+ "namespaces": {
+  "": {
+   "all_players": "player",
+   "current_object": "object",
+   "current_player": "player",
+   "current_team": "team",
+   "death_event_damage_type": "number",
+   "hud_player": "player",
+   "hud_player_team": "team",
+   "hud_target_object": "object",
+   "hud_target_player": "player",
+   "hud_target_team": "team",
+   "killed_object": "object",
+   "killer_object": "object",
+   "killer_player": "player",
+   "local_player": "player",
+   "local_team": "team",
+   "neutral_team": "team",
+   "no_object": "object",
+   "no_player": "player",
+   "no_team": "team",
+   "no_widget": "widget",
+   "script_option": "number"
+  },
+  "game": {
+   "betrayal_booting": "number",
+   "betrayal_penalty": "number",
+   "current_round": "number",
+   "dead_players_can_talk": "number",
+   "dont_team_restrict_chat": "number",
+   "fireteams_enabled": "number",
+   "friendly_fire": "number",
+   "grace_period": "number",
+   "grace_period_timer": "timer",
+   "grenades_on_map": "number",
+   "indestructible_vehicles": "number",
+   "lives_per_round": "number",
+   "loadout_cam_time": "number",
+   "perfection_enabled": "number",
+   "powerup_duration_blue": "number",
+   "powerup_duration_red": "number",
+   "powerup_duration_yellow": "number",
+   "proximity_voice": "number",
+   "respawn_growth": "number",
+   "respawn_time": "number",
+   "respawn_traits_duration": "number",
+   "round_limit": "number",
+   "round_time_limit": "number",
+   "round_timer": "timer",
+   "rounds_to_win": "number",
+   "score_to_win": "number",
+   "sudden_death_time": "number",
+   "sudden_death_timer": "timer",
+   "suicide_penalty": "number",
+   "symmetry": "number",
+   "symmetry_getter": "number",
+   "team_lives_per_round": "number",
+   "teams_enabled": "number"
+  }
+ }
+}

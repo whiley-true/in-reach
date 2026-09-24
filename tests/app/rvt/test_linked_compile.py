@@ -64,7 +64,7 @@ def test_a_linked_project_builds_from_its_blocks_and_modules(tmp_path: Path) -> 
 def test_the_script_the_project_was_linked_from_is_not_output_txt(tmp_path: Path) -> None:
     project_dir, folder = _new_project(tmp_path)
     hill_rush(folder, **_PLAYABLE)
-    (folder / "script" / "output.txt").write_text("this is not even Megalo\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("this is not even Megalo\n", encoding="utf-8")
 
     result = compile_module._run_compile_in_process(project_dir, folder, save=False)
 

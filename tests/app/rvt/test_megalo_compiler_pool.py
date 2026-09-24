@@ -268,7 +268,7 @@ def _project(tmp_path: Path, *, source_variant: Path) -> tuple[Path, Path]:
 
 def test_run_compile_builds_a_blank_based_project_with_the_in_house_compiler(tmp_path: Path, caplog) -> None:
     project_dir, folder = _project(tmp_path, source_variant=resolve_blank_variant(firefight=False))
-    (folder / "script" / "output.txt").write_text(_LOOP.replace("\n", "\r\n"), encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text(_LOOP.replace("\n", "\r\n"), encoding="utf-8")
 
     # In-process, unlike run_compile()'s isolated child, so the fallback log line can be observed.
     with caplog.at_level(logging.INFO, logger="in_reach"):

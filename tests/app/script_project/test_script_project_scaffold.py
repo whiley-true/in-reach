@@ -14,7 +14,7 @@ def _single_file_project(folder: Path, script: str | None = _SCRIPT, title: str 
     (folder / "settings" / "settings.json").write_text(json.dumps({"meta": {"title": title}}), encoding="utf-8")
     (folder / "script").mkdir()
     if script is not None:
-        (folder / "script" / "output.txt").write_text(script, encoding="utf-8")
+        (folder / "script" / "output.mgl").write_text(script, encoding="utf-8")
     return folder
 
 
@@ -168,14 +168,14 @@ def test_backup_script_copies_script_outside_the_project(tmp_path: Path) -> None
 
     folder = tmp_path / "game"
     (folder / "script" / "env").mkdir(parents=True)
-    (folder / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("x = 1\n", encoding="utf-8")
     (folder / "script" / "env" / "dev.env").write_text("FLAGS=DEV\n", encoding="utf-8")
 
     first = api.backup_script(folder)
     second = api.backup_script(folder)
 
     assert first.parent == tmp_path / ".in-reach" / "backups" / "game" and first.name.startswith("script-")
-    assert (first / "output.txt").read_text(encoding="utf-8") == "x = 1\n" and (first / "env" / "dev.env").is_file()
+    assert (first / "output.mgl").read_text(encoding="utf-8") == "x = 1\n" and (first / "env" / "dev.env").is_file()
     assert second != first  # two in the same second don't collide
 
 
@@ -188,7 +188,7 @@ def test_create_project_with_backup_reports_where_the_copy_went(tmp_path: Path) 
 
     folder = tmp_path / "game"
     (folder / "script").mkdir(parents=True)
-    (folder / "script" / "output.txt").write_text("x = 1\n", encoding="utf-8")
+    (folder / "script" / "output.mgl").write_text("x = 1\n", encoding="utf-8")
 
     result = CliRunner().invoke(main, ["create-project", str(folder), "--backup", "--format", "json"])
 

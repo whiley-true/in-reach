@@ -1,6 +1,6 @@
 """Generates the read-only "View Output.txt" file the Dashboard's own button opens (PROMPT.md:
-"view output.txt should show output.txt but it should be locked and should always ... have a
-comment ... at the top"): a fresh copy of the project's hand-edited ``script/output.txt``, with an
+"view output.mgl should show output.mgl but it should be locked and should always ... have a
+comment ... at the top"): a fresh copy of the project's hand-edited ``script/output.mgl``, with an
 auto-generated banner comment prepended, written under ``build/`` -- landing it under
 :func:`~in_reach.app.new_project.is_generated_file`'s own ``BUILD_DIRNAME`` check for free, so the
 IDE opens it read-only with the usual padlock tab icon (see
@@ -9,7 +9,7 @@ IDE opens it read-only with the usual padlock tab icon (see
 Regenerated fresh every time the button is clicked (see
 :meth:`~in_reach_ide.main_window.MainWindow.view_output_txt`) rather than kept in sync
 automatically, so it always reflects the script's current on-disk content -- there's no other
-writer of ``script/output.txt`` to hook a sync into anyway (see
+writer of ``script/output.mgl`` to hook a sync into anyway (see
 :mod:`~in_reach.app.rvt.decompile`'s own module docstring: it's "the one genuinely hand-editable
 thing" and deliberately never auto-touched).
 """
@@ -18,12 +18,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from in_reach.app import new_project
 from in_reach.app.new_project import BUILD_DIRNAME, SCRIPT_DIRNAME
 from in_reach.app.rvt.decompile import SCRIPT_FILENAME
 from in_reach.app.script_project import is_linked, link
 
 #: The generated view's own filename -- deliberately distinct from :data:`SCRIPT_FILENAME`
-#: (``script/output.txt``, the hand-edited source this view is generated *from*), so the two never
+#: (``script/output.mgl``, the hand-edited source this view is generated *from*), so the two never
 #: share a name even though they live in different folders.
 VIEW_FILENAME = "Compiled.txt"
 
@@ -44,19 +45,19 @@ def output_view_path(folder: Path) -> Path:
 
 
 def write_output_view(folder: Path) -> Path:
-    """(Re)writes ``folder``'s own output view from its current ``script/output.txt``.
+    """(Re)writes ``folder``'s own output view from its current ``script/output.mgl``.
 
     Args:
         folder: The gametype project folder.
 
     Returns:
         The written file's path (see :func:`output_view_path`), whether or not
-        ``script/output.txt`` existed yet (an empty/missing script still gets a banner-only view
+        ``script/output.mgl`` existed yet (an empty/missing script still gets a banner-only view
         rather than this raising).
     """
     if is_linked(folder):
         return _write_linked_view(folder)
-    script_path = folder / SCRIPT_DIRNAME / SCRIPT_FILENAME
+    script_path = new_project.migrate_script_file(folder)
     try:
         script_text = script_path.read_text(encoding="utf-8")
     except OSError:
