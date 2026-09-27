@@ -10,8 +10,8 @@ What it is made of:
   block, module and file that carries it;
 * **READMEs** -- ``script/README.md`` (the script, or the project), ``blocks/<name>.md`` beside a block file, and
   ``modules/<name>/README.md``;
-* what the linker decided -- each storage name's slot, each resource's table entry, the budget, the block order and
-  what fusion merged -- from the link (or, if the script doesn't link right now, the last link map written).
+* what the linker decided -- each storage name's slot, each resource's table entry, the budget and the block order --
+  from the link (or, if the script doesn't link right now, the last link map written).
 
 :func:`build_docs` gathers all of it into a :class:`Docs`; :func:`render_markdown` turns that into the overview a
 person reads, and :meth:`Docs.to_dict` into the JSON a tool (or a language model) reads. :func:`write_docs` writes both
@@ -51,7 +51,7 @@ OVERVIEW_MD = "overview.md"
 OVERVIEW_JSON = "overview.json"
 README_FILENAME = "README.md"
 #: The shape of ``overview.json``; raised when a consumer would break.
-DOCS_SCHEMA = 1
+DOCS_SCHEMA = 2  # 2: no "fusion" (fusion was removed)
 
 _ANNOTATION_LINE = re.compile(r"^\s*--\s*@([A-Za-z][A-Za-z0-9_-]*)")
 _DIRECTIVES = frozenset({"if", "else", "end"})
@@ -145,7 +145,6 @@ class Docs:
     storage: list[dict] = field(default_factory=list)  # {name, slot, owner, kind?, doc}
     resources: list[dict] = field(default_factory=list)  # {name, kind, index, owner, text?, doc}
     budget: dict = field(default_factory=dict)
-    fusion: dict = field(default_factory=dict)
 
     @property
     def notes(self) -> list[Note]:
@@ -330,7 +329,6 @@ def build_docs(folder: Path, linked: LinkResult | None = None) -> Docs:
         entry = {key: value for key, value in entry.items() if key != "digest"}
         docs.resources.append({**entry, "name": name_, "doc": notes_by_subject.get(("name", name_), "")})
     docs.budget = link_map.get("budget") or {}
-    docs.fusion = link_map.get("fusion") or {}
     _attach_details(folder, docs)
     _index_tags(docs)
     return docs
@@ -568,8 +566,8 @@ def rewrite_entry(folder: Path, file: str, lines: list[int], text: str | None) -
 
 def filter_docs(docs: Docs, tag: str) -> Docs:
     """``docs`` narrowed to what carries ``tag``: those blocks and modules, the files that carry it or belong to one of
-    them, those files' notes, and the storage and resources they own. The README, budget and fusion go (they describe
-    the whole script)."""
+    them, those files' notes, and the storage and resources they own. The README and budget go (they describe the whole
+    script)."""
     blocks = [b for b in docs.blocks if tag in b.tags]
     modules = [m for m in docs.modules if tag in m.tags]
     paths = {f.path for f in docs.files if tag in f.tags}
@@ -726,13 +724,6 @@ def render_markdown(docs: Docs) -> str:
     if pools or counters:
         out += ["## Budget", "", "| Pool | Used | Cap |", "|---|---|---|"]
         out += [f"| {k} | {v['used']} | {v['cap']} |" for k, v in {**pools, **counters}.items() if "cap" in v]
-        out.append("")
-    groups = docs.fusion.get("groups") or []
-    declined = docs.fusion.get("declined") or []
-    if groups or declined:
-        out += ["## Fusion", ""]
-        out += [f"- {g['trigger']}: {' + '.join(g['fragments'])}" for g in groups]
-        out += [f"- kept apart: {' | '.join(d['fragments'])} -- {d['reason']}" for d in declined]
         out.append("")
 
     code_notes = [n for n in docs.notes if n.kind != "file"] if docs.mode == "single" else []

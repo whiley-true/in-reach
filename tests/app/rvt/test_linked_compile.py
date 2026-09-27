@@ -57,8 +57,9 @@ def test_a_linked_project_builds_from_its_blocks_and_modules(tmp_path: Path) -> 
     assert '"index": 2' in (folder / "build" / "link_map.json").read_text(encoding="utf-8")
     text = variant.decompile_script().replace("\r\n", "\n")
     assert "game.end_round()" in text
-    # the two modules' fragments were fused: one player loop carries both
-    assert "for each player do\n   current_player.score += 1\n   current_player.apply_traits(script_traits[2])\nend" in text
+    # each module's fragment is a player loop of its own
+    assert "for each player do\n   current_player.score += 1\nend" in text
+    assert "for each player do\n   current_player.apply_traits(script_traits[2])\nend" in text
 
 
 def test_the_script_the_project_was_linked_from_is_not_output_txt(tmp_path: Path) -> None:

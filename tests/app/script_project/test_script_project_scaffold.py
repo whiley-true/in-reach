@@ -92,6 +92,164 @@ def test_an_existing_main_block_is_never_overwritten(tmp_path: Path) -> None:
     assert not is_linked(folder)
 
 
+# -- converting splits the script into modules (PROMPT.md) --------------------------------------------------------------
+
+
+_LOOPED = (
+    "declare global.number[0] with network priority low\n"
+    "on init: do\n"
+    "   global.number[0] = 1\n"
+    "end\n"
+    "\n"
+    "-- @doc Scores every player each tick.\n"
+    "-- @tags scoring\n"
+    "for each player do\n"
+    "   current_player.score += 1\n"
+    "end\n"
+    "\n"
+    "-- tidy the map\n"
+    "for each object do\n"
+    "   current_object.number[0] = 0\n"
+    "end\n"
+    "\n"
+    "if global.number[0] == 1 then\n"
+    "   global.number[0] = 2\n"
+    "end\n"
+    "\n"
+    "for each team do\n"
+    "   current_team.number[0] = 3\n"
+    "end\n"
+)
+
+
+def _relative(folder: Path, written: list[Path]) -> list[str]:
+    return [p.relative_to(folder).as_posix() for p in written]
+
+
+def test_each_top_level_loop_becomes_a_module_of_its_own(tmp_path: Path) -> None:
+    folder = _single_file_project(tmp_path, _LOOPED)
+
+    written = create_project(folder)
+
+    assert _relative(folder, written) == [
+        "script/project.toml",
+        "script/blocks/main.mgl",
+        "script/modules/scores_every_player_each/module.toml", "script/modules/scores_every_player_each/scores_every_player_each.mgl",
+        "script/modules/object_loop_2/module.toml", "script/modules/object_loop_2/object_loop_2.mgl",
+        "script/modules/team_loop_3/module.toml", "script/modules/team_loop_3/team_loop_3.mgl",
+    ]
+    project = load_project(folder)
+    assert project.diagnostics == []
+    assert project.order == ["MAIN"]
+    assert [m.name for m in project.modules] == ["scores_every_player_each", "object_loop_2", "team_loop_3"]
+
+
+def test_a_loop_module_is_just_its_loop_with_its_docs(tmp_path: Path) -> None:
+    """No @fragment line: a module's one loop goes where the block's @import puts it."""
+    folder = _single_file_project(tmp_path, _LOOPED)
+    create_project(folder)
+
+    source = (folder / "script" / "modules" / "scores_every_player_each" / "scores_every_player_each.mgl").read_text(encoding="utf-8")
+    tidy = (folder / "script" / "modules" / "object_loop_2" / "object_loop_2.mgl").read_text(encoding="utf-8")
+
+    assert source == "-- @doc Scores every player each tick.\n-- @tags scoring\n-- @loop player\ncurrent_player.score += 1\n"
+    assert tidy == "-- @loop object\n-- tidy the map\ncurrent_object.number[0] = 0\n"  # a plain comment rides along
+
+
+def test_the_main_block_shows_where_each_module_is_imported(tmp_path: Path) -> None:
+    """PROMPT.md: after converting, the block says where each module's code comes in -- an @import line where the loop
+    (and the doc and comment lines above it) used to be."""
+    folder = _single_file_project(tmp_path, _LOOPED)
+    create_project(folder)
+
+    main_block = (folder / "script" / "blocks" / "main.mgl").read_text(encoding="utf-8")
+
+    assert main_block == (
+        "declare global.number[0] with network priority low\n"
+        "on init: do\n   global.number[0] = 1\nend\n"
+        "\n-- @import scores_every_player_each\n"
+        "\n-- @import object_loop_2\n"
+        "\nif global.number[0] == 1 then\n   global.number[0] = 2\nend\n"
+        "\n-- @import team_loop_3\n"
+    )
+
+
+def test_the_linked_script_runs_its_triggers_in_the_original_order(tmp_path: Path) -> None:
+    folder = _single_file_project(tmp_path, _LOOPED)
+    create_project(folder)
+
+    result = link(folder, write=False)
+
+    assert result.ok, [str(d) for d in result.diagnostics]
+    markers = ["on init: do", "current_player.score += 1", "current_object.number[0] = 0", "if global.number[0] == 1", "current_team.number[0] = 3"]
+    positions = [result.compiled.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+    assert result.compiled.count("for each ") == 3  # one trigger per loop: nothing fused
+
+
+@pytest.mark.parametrize(
+    "loop",
+    [
+        'for each object with label "hill" do\n   current_object.number[0] = 1\nend\n',  # @loop has no label
+        "for each player randomly do\n   current_player.number[0] = 1\nend\n",  # nor randomly
+        "on local: for each player do\n   current_player.number[0] = 1\nend\n",  # an event
+        "do\n   for each player do\n      current_player.number[0] = 1\n   end\nend\n",  # not top-level
+        "alias hp = current_player.number[0]\nfor each player do\n   hp = 1\nend\n",  # a module can't see the alias
+    ],
+    ids=["labelled", "randomly", "event", "nested", "alias"],
+)
+def test_what_a_module_cant_hold_stays_in_the_main_block_as_written(tmp_path: Path, loop: str) -> None:
+    folder = _single_file_project(tmp_path, loop)
+
+    written = create_project(folder)
+
+    assert _relative(folder, written) == ["script/project.toml", "script/blocks/main.mgl"]
+    assert (folder / "script" / "blocks" / "main.mgl").read_text(encoding="utf-8") == loop
+
+
+def test_a_script_with_env_directives_is_kept_whole(tmp_path: Path) -> None:
+    script = "-- @if DEV\nfor each player do\n   current_player.number[0] = 1\nend\n-- @end\n"
+    folder = _single_file_project(tmp_path, script)
+
+    written = create_project(folder)
+
+    assert _relative(folder, written) == ["script/project.toml", "script/blocks/main.mgl"]
+
+
+def test_without_modules_the_script_is_the_main_block_as_written(tmp_path: Path) -> None:
+    folder = _single_file_project(tmp_path, _LOOPED)
+
+    written = create_project(folder, modules=False)
+
+    assert _relative(folder, written) == ["script/project.toml", "script/blocks/main.mgl"]
+    assert (folder / "script" / "blocks" / "main.mgl").read_text(encoding="utf-8") == _LOOPED
+
+
+def test_a_module_file_that_is_already_there_is_never_overwritten(tmp_path: Path) -> None:
+    folder = _single_file_project(tmp_path, _LOOPED)
+    taken = folder / "script" / "modules" / "team_loop_3" / "module.toml"
+    taken.parent.mkdir(parents=True)
+    taken.write_text("mine\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        create_project(folder)
+
+    assert taken.read_text(encoding="utf-8") == "mine\n"
+    assert not is_linked(folder) and not (folder / "script" / "blocks").exists()
+
+
+def test_the_cli_can_keep_the_script_whole(tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    from in_reach.cli import main
+
+    folder = _single_file_project(tmp_path, _LOOPED)
+
+    result = CliRunner().invoke(main, ["create-project", str(folder), "--no-modules", "--format", "json"])
+
+    assert result.exit_code == 0 and json.loads(result.output)["written"] == ["script/project.toml", "script/blocks/main.mgl"]
+
+
 # -- modules --------------------------------------------------------------------------------------------
 
 

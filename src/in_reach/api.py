@@ -208,7 +208,7 @@ def _link_outcome(folder: Path, write: bool) -> LinkOutcome:
 
 def check(folder: Path) -> CheckResult:
     """Everything wrong with the project's script (annotations, lint, allocation; for a script project also its
-    modules and fusion), writing nothing. A single ``script/output.mgl`` is checked as a project of one block."""
+    modules and imports), writing nothing. A single ``script/output.mgl`` is checked as a project of one block."""
     outcome = _link_outcome(_scripted(folder), write=False)
     return CheckResult(outcome.ok, outcome.diagnostics, outcome.link_map, outcome.link_result)
 
@@ -425,10 +425,12 @@ def _megalo_source(folder: Path) -> str:
 # -- scaffolding and envs --------------------------------------------------------------------------------
 
 
-def create_script_project(folder: Path) -> list[str]:
-    """Turns a single-script project into a script project; returns the files written (relative to ``folder``)."""
+def create_script_project(folder: Path, *, modules: bool = True) -> list[str]:
+    """Turns a single-script project into a script project; returns the files written (relative to ``folder``).
+    With ``modules`` each top-level player/object/team loop becomes a module and the rest is split into blocks;
+    without, the script becomes ``blocks/main.mgl`` as written."""
     try:
-        written = create_project(Path(folder))
+        written = create_project(Path(folder), modules=modules)
     except ValueError as exc:
         raise ApiError(str(exc)) from exc
     return [p.relative_to(folder).as_posix() for p in written]

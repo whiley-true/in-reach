@@ -31,7 +31,7 @@ from pathlib import Path
 
 from in_reach.app import new_project, script_preprocess
 from in_reach.app.rvt.megalo_ast.annotations import (
-    Annotations, BlockAnnotation, FragmentAnnotation, parse_annotations,
+    Annotations, BlockAnnotation, FragmentAnnotation, ImportAnnotation, parse_annotations,
 )
 
 from .constants import ConstantProblem, base_constants, module_constants
@@ -220,7 +220,7 @@ class _Loader:
             processed = None
         annotations = parse_annotations(processed) if processed is not None else Annotations()
         for diagnostic in annotations.diagnostics:
-            self.error("annotation", diagnostic.message, relative, diagnostic.span.start_line, diagnostic.span.start_col)
+            self.report(diagnostic.severity, "annotation", diagnostic.message, relative, diagnostic.span.start_line, diagnostic.span.start_col)
         return SourceFile(path=relative, owner=owner, text=text, processed=processed, annotations=annotations)
 
     def _load_modules(self, manifest: ProjectManifest, where: dict) -> None:
@@ -333,6 +333,12 @@ class _Loader:
                             "@block belongs at the top of a file in blocks/; a module contributes with @fragment",
                             file.path, annotation.span.start_line, annotation.span.start_col,
                         )
+                    if isinstance(annotation, ImportAnnotation):
+                        self.error(
+                            "import-in-module",
+                            "@import belongs in a block file, where it places a module's fragments; a module contributes with @fragment",
+                            file.path, annotation.span.start_line, annotation.span.start_col,
+                        )
                     if isinstance(annotation, FragmentAnnotation):
                         block = self.project.blocks.setdefault(annotation.block, LoadedBlock(name=annotation.block))
                         if module.name not in block.contributors:
@@ -438,7 +444,7 @@ SINGLE_FILE = new_project.SCRIPT_FILENAME
 SINGLE_BLOCK = "MAIN"
 #: What only a script project can express: how blocks and fragments are cut and ordered.
 _PROJECT_STRUCTURE = frozenset(
-    {"block", "fragment", "loop", "gate", "guard", "guard_end", "preamble", "provides", "traits", "fusion", "assumes"}
+    {"block", "import", "fragment", "loop", "gate", "guard", "guard_end", "preamble", "provides", "traits", "assumes"}
 )
 #: What only a script project does for you: pick a storage slot for a name, or a table entry for a resource. A single
 #: file names its slots itself (``global.number[0]``) and its resources by index (``script_traits[0]``).
@@ -491,7 +497,7 @@ def load_single_file(folder: Path, text: str | None = None) -> ScriptProject:
         processed = None
     annotations = parse_annotations(processed) if processed is not None else Annotations()
     for diagnostic in annotations.diagnostics:
-        severity = "warning" if diagnostic.message.startswith("unknown annotation") else "error"
+        severity = "warning" if diagnostic.message.startswith("unknown annotation") else diagnostic.severity
         loader.report(severity, "annotation", diagnostic.message, SINGLE_FILE, diagnostic.span.start_line, diagnostic.span.start_col)
     lines = (processed or "").split("\n")
     for annotation in annotations.items:

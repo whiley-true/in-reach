@@ -19,8 +19,8 @@ Also: ``see-unknown`` (a warning: ``@see`` naming no tag, block, module, fragmen
 ``body-syntax`` (a region's code that doesn't parse) and ``not-a-statement`` (a line that is only a value -- ``ff``,
 ``current_player.score`` -- which parses, but Megalo has no such statement: a line is a call or an assignment).
 
-Not here, because they need an engine catalog or the linker's output: IR001-IR004, IR008, IR009, IR012, IR014,
-IR018 (and IR006b). IR013 is the block-order cycle ``load_project`` already reports (``order-cycle``), IR015 the
+Not here, because they need an engine catalog or the linker's output: IR001-IR004, IR008, IR009, IR012, IR014
+(and IR006b); IR018 went with fusion. IR013 is the block-order cycle ``load_project`` already reports (``order-cycle``), IR015 the
 unresolved-constant errors it reports (``preprocess``, ``constant-*``, ``param-*``), and IR017 no longer exists
 (``next_steps.md`` decision 1 dropped ``[requires]``).
 """

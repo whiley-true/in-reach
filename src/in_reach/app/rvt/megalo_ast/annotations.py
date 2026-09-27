@@ -42,13 +42,15 @@ Engine resources -- declared in code, allocated by the linker, written into ``se
   numbers, ``"strings"``, ``true``/``false`` or bare words. Which fields exist is the catalog's business.
 - ``@label NAME = "text"``.
 
-Fragments -- a loop body that the linker may merge with its neighbours (``TO_IMPLEMENT`` §4.6, §7):
+Fragments -- a loop body a module adds to a block (``TO_IMPLEMENT`` §4.6):
 
-- ``@block NAME`` (top of a block file), ``@fragment BLOCK.NAME``, ``@loop player|object|team``, ``@gate <condition>``, ``@guard <condition>``,
-  ``@traits layer=NAME``, ``@fusion auto|never|subroutine|force:GROUP``.
+- ``@block NAME`` (top of a block file), ``@import MODULE`` / ``@import MODULE.NAME`` (in a block file: that module's
+  fragments for this block -- or the one named -- go where the line is, not at the end of the block), ``@fragment BLOCK.NAME``, ``@loop player|object|team``, ``@gate <condition>``, ``@guard <condition>``,
+  ``@traits layer=NAME``. A module with a single loop needs no ``@fragment``: ``@loop`` opens it, and the block that
+  imports the module is where it goes.
 - ``@preamble NAME`` names a shared prologue -- to require it (in a fragment's header) or to define it (above
   its code); ``@provides name:type ...`` lists what it leaves behind and ``@guard-end`` marks where fragments
-  are inserted. ``subroutine`` asks for the shared logic to be a called subroutine rather than fused inline.
+  are inserted.
 
 Documentation:
 
@@ -62,6 +64,7 @@ Errors
 :func:`parse_annotations` never raises: a malformed annotation is left out of :attr:`Annotations.items` and
 reported in :attr:`Annotations.diagnostics` with its line and column (the first problem in each), so an editor
 can list every problem at once. An unknown ``@name`` is one of them, with a suggestion if it's close to a real one.
+A *retired* one (``@fusion``: fusion was removed) is reported too, as a warning -- the line does nothing.
 """
 
 from __future__ import annotations
@@ -96,7 +99,8 @@ _SCOPE_PREFIXES = {"": "global", "p": "player", "o": "object", "t": "team"}
 _STORAGE_NAMES = {f"{prefix}{type_}": (scope, type_) for prefix, scope in _SCOPE_PREFIXES.items() for type_ in _TYPES}
 _PRIORITIES = ("local", "low", "high")
 _LOOP_SELECTORS = ("player", "object", "team")
-_FUSION_MODES = ("auto", "never", "subroutine")
+#: Annotations that no longer do anything, with why -- reported as a warning rather than an unknown name.
+RETIRED = {"fusion": "@fusion does nothing: fusion was removed, so every fragment is its own trigger -- delete the line"}
 
 FieldValue = Union[bool, int, str]
 
@@ -205,15 +209,22 @@ class TraitsAnnotation(_Annotation):
     layer: str
 
 
-class FusionAnnotation(_Annotation):
-    kind: Literal["fusion"] = "fusion"
-    mode: Literal["auto", "never", "subroutine", "force"]
-    group: str | None = None  # the GROUP of `force:GROUP`
-
-
 class DocAnnotation(_Annotation):
     kind: Literal["doc"] = "doc"
     text: str
+
+
+class ImportAnnotation(_Annotation):
+    """``@import hill_score`` (or ``@import hill_score.health``) in a block file: the module's fragments for this block
+    -- or just the one named -- are built where the line is, not after the block's code."""
+
+    kind: Literal["import"] = "import"
+    module: str
+    fragment: str | None = None
+
+    @property
+    def target(self) -> str:
+        return f"{self.module}.{self.fragment}" if self.fragment else self.module
 
 
 class SeeAnnotation(_Annotation):
@@ -236,8 +247,8 @@ class TagsAnnotation(_Annotation):
 Annotation = Annotated[
     Union[
         StorageAnnotation, BitfieldAnnotation, TraitAnnotation, OptionAnnotation, WidgetAnnotation, LabelAnnotation,
-        BlockAnnotation, FragmentAnnotation, LoopAnnotation, GateAnnotation, GuardAnnotation, GuardEndAnnotation,
-        PreambleAnnotation, ProvidesAnnotation, TraitsAnnotation, FusionAnnotation,
+        BlockAnnotation, ImportAnnotation, FragmentAnnotation, LoopAnnotation, GateAnnotation, GuardAnnotation, GuardEndAnnotation,
+        PreambleAnnotation, ProvidesAnnotation, TraitsAnnotation,
         DocAnnotation, SeeAnnotation, AssumesAnnotation, TagsAnnotation,
     ],
     Field(discriminator="kind"),
@@ -245,9 +256,11 @@ Annotation = Annotated[
 
 
 class AnnotationDiagnostic(ASTNode):
-    """One malformed annotation. ``span`` covers the offending argument (or the whole line)."""
+    """One malformed annotation. ``span`` covers the offending argument (or the whole line). ``severity`` is
+    ``"warning"`` only for a retired annotation (:data:`RETIRED`)."""
 
     message: str
+    severity: Literal["error", "warning"] = "error"
 
 
 class Annotations(BaseModel):
@@ -604,6 +617,17 @@ def _block(line: _Line) -> BlockAnnotation:
     return BlockAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, name=token.text)
 
 
+def _import(line: _Line) -> ImportAnnotation:
+    _exactly(line, 1, "a module name (or MODULE.NAME for one fragment)")
+    token = line.tokens[0]
+    parts = token.text.split(".")
+    if token.kind != "word" or len(parts) > 2 or not all(_IDENT.fullmatch(p) for p in parts):
+        raise line.problem(f"expected MODULE or MODULE.NAME, not {token.text!r}", token)
+    return ImportAnnotation(
+        span=line.span(line.name_col, line.line_end), note=line.note, module=parts[0], fragment=parts[1] if len(parts) == 2 else None
+    )
+
+
 def _fragment(line: _Line) -> FragmentAnnotation:
     _exactly(line, 1, "BLOCK.NAME")
     block, name = _dotted(line, line.tokens[0], "BLOCK", "NAME")
@@ -666,19 +690,6 @@ def _traits(line: _Line) -> TraitsAnnotation:
     return TraitsAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, layer=value)
 
 
-def _fusion(line: _Line) -> FusionAnnotation:
-    _exactly(line, 1, "auto, never, subroutine or force:GROUP")
-    token = line.tokens[0]
-    mode, sep, group = token.text.partition(":")
-    if mode == "force":
-        if not sep or not _IDENT.fullmatch(group):
-            raise line.problem("force needs a group: force:GROUP", token)
-        return FusionAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, mode="force", group=group)
-    if sep or mode not in _FUSION_MODES:
-        raise line.problem(f"expected auto, never, subroutine or force:GROUP, not {token.text!r}", token)
-    return FusionAnnotation(span=line.span(line.name_col, line.line_end), note=line.note, mode=mode)
-
-
 def _doc(line: _Line) -> DocAnnotation:
     """``@doc`` takes the rest of its line as Markdown: one space after ``@doc`` is dropped, and any further indent is
     kept (a nested list, an indented code block). A bare ``-- @doc`` is a blank line -- a paragraph break in a longer
@@ -734,6 +745,7 @@ _INTERPRETERS = {
     "widget": lambda line: _resource(line, WidgetAnnotation),
     "label": _label,
     "block": _block,
+    "import": _import,
     "fragment": _fragment,
     "loop": _loop,
     "gate": _gate,
@@ -742,7 +754,6 @@ _INTERPRETERS = {
     "preamble": _preamble,
     "provides": _provides,
     "traits": _traits,
-    "fusion": _fusion,
     "doc": _doc,
     "see": _see,
     "assumes": _assumes,
@@ -776,6 +787,11 @@ def parse_annotations(text: str) -> Annotations:
         line = _Line(number=number, name=name, name_col=name_col, line_end=line_end, body=body,
                      body_col=rest_col, note=note, tokens=[])
 
+        if name in RETIRED:
+            result.diagnostics.append(
+                AnnotationDiagnostic(span=line.span(name_col, name_col + 1 + len(name)), message=RETIRED[name], severity="warning")
+            )
+            continue
         interpreter = _INTERPRETERS.get(name)
         try:
             if interpreter is None:

@@ -50,6 +50,30 @@ def test_a_real_gametypes_script_builds_as_a_project(tmp_path: Path, bin_path: s
     assert built.success, [str(d) for d in built.diagnostics if d.severity == "error"]
 
 
+@pytest.mark.parametrize("bin_path", _FIXTURES, ids=[Path(p).stem for p in _FIXTURES])
+def test_converting_into_modules_keeps_the_script_the_same(tmp_path: Path, bin_path: str) -> None:
+    """Every top-level loop moved into a module, the blocks split around them: the linked script still compiles to
+    exactly what the gametype's own script does."""
+    from in_reach.app.rvt import decompile
+    from in_reach.app.script_project import link
+
+    rvt = rvt_bridge.get_rvt()
+    if rvt.load(bin_path).multiplayer is None:
+        pytest.skip("Firefight")
+    folder = _script_project(tmp_path, bin_path)
+    original = decompile.normalize_script_text(rvt.load(bin_path).decompile_script())
+
+    def compiled(text: str) -> str:
+        variant = rvt.load(bin_path)
+        assert variant.multiplayer.compile_script(text).success
+        return variant.decompile_script()
+
+    linked = link(folder, write=False)
+    assert linked.ok
+    assert (folder / "script" / "modules").is_dir()  # the fixtures do have top-level loops
+    assert compiled(linked.compiled) == compiled(original)
+
+
 def test_the_yes_no_arguments_the_decompiler_writes_are_in_these_scripts() -> None:
     """The scripts these tests use really contain the construct the fix is about (or the tests prove nothing)."""
     from in_reach.app.rvt import decompile

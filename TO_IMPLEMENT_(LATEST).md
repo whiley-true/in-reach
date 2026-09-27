@@ -574,8 +574,15 @@ docstring is the grammar reference. Where this document's examples were loose, t
   examples show eight; the rest follow the same pattern. `@o*` takes `KIND.NAME`, `@t*` takes `TEAM.NAME`.
   `priority=` isn't allowed on a timer and `default=` isn't allowed on a player or object variable, the same rules
   as a `declare`.
-- **`@fusion` has a fourth mode, `subroutine`** (§7's alternative lowering, opt-in only -- see `next_steps.md`
-  decision 3), besides `auto`, `never` and `force:GROUP`.
+- **`@import MODULE` / `@import MODULE.NAME`** (new, not in the design above): in a block file, that module's
+  fragments for the block -- or just the one named -- are built where the line is instead of after the block's code;
+  a module import places whatever of it an earlier line hasn't. Unknown, empty (no fragment for this block) and
+  nothing-left imports are errors; it is an error in a module and `project-only` in a single file. Fragments at
+  different places are never fused together. Convert to Project writes one per loop it moves out.
+- **`@fusion` is retired** (fusion was removed, see §7): the line is reported as a warning that it does nothing.
+- **A module's one loop needs no `@fragment`**: a header run with `@loop` (and no `@fragment`/`@preamble`) is the
+  module's implicit fragment, named after the module, placed by the block that has `-- @import <module>` -- exactly
+  one block must (`module-unplaced`, `import-elsewhere`); a second such loop in the module is `loop-unnamed`.
 - **The parser only parses.** Duplicate names, pool capacity, the 15-flag limit of a bitfield, what fields a
   trait or option may have -- all the linter's and linker's (IR-rules), because they need more than one line.
 
@@ -742,6 +749,10 @@ by name), so `Compiled.txt` diffs between builds show real changes only.
 ---
 
 ## 7. Fusion (optimization) — plus the subroutine alternative
+
+> **Removed (2026-09-27).** Fusion was taken out of the linker and the IDE: every fragment is its own trigger, the link
+> map has no `fusion` section, IR018 is gone and `@fusion` is a retired annotation (a warning). What follows is the
+> design, kept for if it comes back.
 
 What fusion saves, with certainty: triggers (an RVT counter and bits) and the repeated **preamble**
 every per-player block carries (`cx = current_player.p_carrier; if cx != no_object; role = cx.c_role;

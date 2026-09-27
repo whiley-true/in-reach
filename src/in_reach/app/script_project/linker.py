@@ -48,7 +48,6 @@ from in_reach.app.rvt.variable_declarations import UnsupportedDeclaration, _vari
 
 from .allocation import POOL_SIZES, Allocation, allocate
 from .diagnostics import ProjectDiagnostic
-from .fusion import plan_fusion
 from .lint import lint
 from .model import Fragment, PreambleDef, SemanticModel, build_model
 from .project import SINGLE_BLOCK, ScriptProject, is_linked, load_script
@@ -137,11 +136,6 @@ def _code_lines(lines: list[str], first_line: int, file: str) -> list[tuple[str,
     return [(l[indent:] if l.strip() else "", origin) for l, origin in kept]
 
 
-def _code_text(lines: list[str], first_line: int, file: str) -> str:
-    """The code ``lines`` will become in the built script (annotations dropped), for analysis."""
-    return "\n".join(line for line, _ in _code_lines(lines, first_line, file))
-
-
 def _substitute_labels(line: str, labels: dict[str, str]) -> str:
     for name, text in labels.items():
         line = re.sub(rf"(?<=with label ){re.escape(name)}\b", json.dumps(text), line)
@@ -150,21 +144,18 @@ def _substitute_labels(line: str, labels: dict[str, str]) -> str:
 
 @dataclass
 class _Trigger:
-    """One emitted trigger: fragments sharing a loop (one, until fusion joins compatible neighbours)."""
+    """One emitted trigger: a fragment's loop."""
 
     block: str
-    fragments: list[Fragment]
-    hoisted: list = field(default_factory=list)  # guards every fragment shares, tested once around them all
+    fragment: Fragment
     temporaries: dict[str, int] = field(default_factory=dict)
 
 
 def _emit_trigger(
     text: _Text, trigger: _Trigger, preamble: PreambleDef | None, labels: dict[str, str], problems: list[ProjectDiagnostic]
 ) -> None:
-    first = trigger.fragments[0]
-    ids = ", ".join(f.id for f in trigger.fragments)
-    fused = f" (fused: {ids}" + (f"; preamble {preamble.name})" if preamble else ")") if len(trigger.fragments) > 1 else ""
-    text.add(f"-- {first.block}.{first.name}{fused}" if len(trigger.fragments) == 1 else f"-- {first.block}{fused}")
+    first = trigger.fragment
+    text.add(f"-- {first.block}.{first.name}")
 
     depth = 0
     if first.gate is not None:
@@ -195,23 +186,12 @@ def _emit_trigger(
         text.add(_indent(_substitute_labels(line, labels), inner), origin)
 
     body_indent = inner + " " * extra_indent
-    hoisted = [render_expr(g.condition) for g in trigger.hoisted]
-    if hoisted:
-        text.add(f"{body_indent}if {' and '.join(hoisted)} then")
-        body_indent += _INDENT
-    for fragment in trigger.fragments:
-        if len(trigger.fragments) > 1:
-            text.add(f"{body_indent}-- {fragment.id}")
-        guard = " and ".join(text_ for text_ in (render_expr(g.condition) for g in fragment.guards) if text_ not in hoisted)
-        wrapped = bool(guard)
-        if wrapped:
-            text.add(f"{body_indent}if {guard} then")
-        for line, origin in _code_lines(fragment.body, fragment.body_line, fragment.file):
-            text.add(_indent(_substitute_labels(line, labels), body_indent + (_INDENT if wrapped else "")), origin)
-        if wrapped:
-            text.add(f"{body_indent}end")
-    if hoisted:
-        body_indent = body_indent[: -len(_INDENT)]
+    guard = " and ".join(render_expr(g.condition) for g in first.guards)
+    if guard:
+        text.add(f"{body_indent}if {guard} then")
+    for line, origin in _code_lines(first.body, first.body_line, first.file):
+        text.add(_indent(_substitute_labels(line, labels), body_indent + (_INDENT if guard else "")), origin)
+    if guard:
         text.add(f"{body_indent}end")
 
     for line, origin in part_two:
@@ -305,13 +285,13 @@ def link(folder: Path, *, write: bool = True, overrides: dict[str, str] | None =
         return result
 
     assemble = _assemble_single if single else _assemble
-    text, declarations, triggers, fusion = assemble(project, model, allocation, plan, result)
+    text, declarations, triggers = assemble(project, model, allocation, plan, result)
     if result.errors:
         return result
 
     result.compiled = text.rendered
     result.declarations = declarations
-    result.link_map = _link_map(project, allocation, plan, triggers, fusion, text)
+    result.link_map = _link_map(project, allocation, plan, triggers, text)
     if single:  # what the compiler is given, so "changed since the last build?" needs no Compiled.txt of the link's own
         result.link_map["compiled_sha256"] = hashlib.sha256(result.compiled.encode("utf-8")).hexdigest()
     counters = previous_map.get("budget", {}).get("counters") if isinstance(previous_map.get("budget"), dict) else None
@@ -391,7 +371,7 @@ class _Verbatim(_Text):
 
 def _assemble_single(
     project: ScriptProject, model: SemanticModel, allocation: Allocation, plan: ResourcePlan, result: LinkResult
-) -> tuple[_Verbatim, str, list[_Trigger], dict]:
+) -> tuple[_Verbatim, str, list[_Trigger]]:
     """A single file, *transparently*: its preprocessed text line for line (annotations stay, as the comments they
     are), with labels substituted, below the ``declare``/``alias`` lines its annotations need -- and nothing above it
     at all when they need none, so a file that uses no annotations compiles exactly as written."""
@@ -405,12 +385,12 @@ def _assemble_single(
     code = model.blocks[SINGLE_BLOCK]
     for number, line in enumerate(code.lines, start=1):
         text.add(_substitute_labels(line, plan.labels), (code.file, number))
-    return text, _declarations_text(declaration_lines, alias_lines), [], {"groups": [], "declined": []}
+    return text, _declarations_text(declaration_lines, alias_lines), []
 
 
 def _assemble(
     project: ScriptProject, model: SemanticModel, allocation: Allocation, plan: ResourcePlan, result: LinkResult
-) -> tuple[_Rendered, str, list[_Trigger], dict]:
+) -> tuple[_Rendered, str, list[_Trigger]]:
     text = _Rendered()
     env = project.env
     flags = ",".join(sorted(env.flags)) if env else ""
@@ -428,32 +408,42 @@ def _assemble(
     declarations = _declarations_text(declaration_lines, alias_lines)
 
     triggers: list[_Trigger] = []
-    fusion_report: dict[str, list] = {"groups": [], "declined": []}
+
+    def emit_fragments(block: str, fragments: list) -> None:
+        for fragment in fragments:
+            text.blank()
+            trigger = _Trigger(block=block, fragment=fragment)
+            triggers.append(trigger)
+            preamble = model.preambles.get(fragment.preamble) if fragment.preamble else None
+            _emit_trigger(text, trigger, preamble, plan.labels, result.diagnostics)
+
+    def emit_code(code, start: int, end: int) -> None:
+        for line, origin in _code_lines(code.lines[start:end], start + 1, code.file):
+            text.add(_substitute_labels(line, plan.labels), origin)
+
     for block in project.order:
         text.blank()
         loaded = project.blocks.get(block)
         code = model.blocks.get(block)
+        imported: set[int] = set()
         if code is not None:  # a block only fragments contribute to needs no heading: each trigger names it
             where = f" ({loaded.file.path})" if loaded is not None and loaded.file is not None else ""
             text.add(f"-- {block}{where}")
-            for line, origin in _code_lines(code.lines, 1, code.file):
-                text.add(_substitute_labels(line, plan.labels), origin)
-        fusion = plan_fusion(block, model.fragments_of(block), model.preambles, alias_lines, _code_text)
-        result.diagnostics += fusion.diagnostics
-        fusion_report["groups"] += fusion.fused
-        fusion_report["declined"] += fusion.declined
-        for group in fusion.groups:
-            text.blank()
-            first = group.fragments[0]
-            trigger = _Trigger(block=block, fragments=group.fragments, hoisted=group.hoisted)
-            triggers.append(trigger)
-            preamble = model.preambles.get(first.preamble) if first.preamble else None
-            _emit_trigger(text, trigger, preamble, plan.labels, result.diagnostics)
-    return text, declarations, triggers, fusion_report
+            # Each @import line's fragments go where the line is; what no line imports goes after the code.
+            start = 0
+            for index, fragments in code.placed:
+                emit_code(code, start, index)
+                emit_fragments(block, fragments)
+                imported.update(id(f) for f in fragments)
+                text.blank()
+                start = index + 1
+            emit_code(code, start, len(code.lines))
+        emit_fragments(block, [f for f in model.fragments_of(block) if id(f) not in imported])
+    return text, declarations, triggers
 
 
 def _link_map(
-    project: ScriptProject, allocation: Allocation, plan: ResourcePlan, triggers: list[_Trigger], fusion: dict, text: _Text
+    project: ScriptProject, allocation: Allocation, plan: ResourcePlan, triggers: list[_Trigger], text: _Text
 ) -> dict:
     env = project.env
     budget: dict[str, dict] = {}
@@ -481,9 +471,8 @@ def _link_map(
         "budget": budget,
         "order": list(project.order),
         "temporaries": [
-            {"block": t.block, "fragments": [f.id for f in t.fragments], **t.temporaries} for t in triggers if t.temporaries
+            {"block": t.block, "fragments": [t.fragment.id], **t.temporaries} for t in triggers if t.temporaries
         ],
-        "fusion": fusion,
         "source_lines": text.source_lines(),
     }
 

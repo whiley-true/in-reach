@@ -123,7 +123,7 @@ def docs_cmd(folder: Path, no_write: bool, fmt: str) -> None:
     """Generate the script's documentation: build/docs/overview.md and overview.json.
 
     Made from the script itself: -- @doc notes, -- @tags, script/README.md (and, in a script project, blocks/<name>.md
-    and each module's README.md), and what the linker decided (slots, resources, budget, fusion)."""
+    and each module's README.md), and what the linker decided (slots, resources, budget)."""
     try:
         result = api.docs(folder, write=not no_write)
     except api.ApiError as exc:
@@ -156,10 +156,6 @@ def link_cmd(folder: Path, dry_run: bool, fmt: str) -> None:
             raise click.ClickException(f"{len(result.errors)} error(s); nothing was written.")
         link_map = result.link_map
         click.echo(f"blocks   {' -> '.join(link_map['order'])}")
-        for group in link_map["fusion"]["groups"]:
-            click.echo(f"fused    {group['trigger']} <- {' + '.join(group['fragments'])}")
-        for declined in link_map["fusion"]["declined"]:
-            click.echo(f"kept     {' | '.join(declined['fragments'])}: {declined['reason']}")
         budget = "  ".join(f"{name} {entry['used']}/{entry['cap']}" for name, entry in link_map["budget"].items() if "cap" in entry)
         if budget:
             click.echo(f"budget   {budget}")
@@ -215,16 +211,18 @@ def show_cmd(folder: Path, view: str, fmt: str) -> None:
 @main.command(name="create-project")
 @_folder_argument
 @click.option("--backup", is_flag=True, help="Copy script/ to .in-reach/backups/ first.")
+@click.option("--no-modules", is_flag=True, help="Keep the whole script as blocks/main.mgl instead of making modules.")
 @_format_option
-def create_project_cmd(folder: Path, backup: bool, fmt: str) -> None:
-    """Convert a single-file script into a script project (script/project.toml + blocks/main.mgl).
+def create_project_cmd(folder: Path, backup: bool, no_modules: bool, fmt: str) -> None:
+    """Convert a single-file script into a script project: each top-level player/object/team loop becomes a module,
+    the rest is split into blocks in order (--no-modules: one block, blocks/main.mgl).
 
     Experimental, and one-way: from then on script/output.mgl is no longer compiled. --backup keeps a copy first."""
     backup_path = None
     try:
         if backup:
             backup_path = api.backup_script(folder)
-        written = api.create_script_project(folder)
+        written = api.create_script_project(folder, modules=not no_modules)
     except api.ApiError as exc:
         _fail(exc, fmt)
     if fmt == "json":

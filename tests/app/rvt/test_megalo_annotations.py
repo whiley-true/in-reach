@@ -361,29 +361,16 @@ def test_traits_problems(text: str, message: str) -> None:
     assert message in _problem(text).message
 
 
-@pytest.mark.parametrize(
-    ("value", "mode", "group"),
-    [("auto", "auto", None), ("never", "never", None), ("subroutine", "subroutine", None), ("force:hill", "force", "hill")],
-)
-def test_fusion_modes(value: str, mode: str, group: str | None) -> None:
-    parsed = _one(f"-- @fusion {value}")
+@pytest.mark.parametrize("text", ["-- @fusion never", "-- @fusion auto", "-- @fusion force:hill", "-- @fusion"])
+def test_fusion_is_retired_a_warning_not_an_annotation(text: str) -> None:
+    """Fusion was removed; a project converted before that still says ``-- @fusion never`` -- a warning, not an error."""
+    from in_reach.app.rvt.megalo_ast import parse_annotations
 
-    assert (parsed.mode, parsed.group) == (mode, group)
+    result = parse_annotations(text)
 
-
-@pytest.mark.parametrize(
-    ("text", "message"),
-    [
-        ("-- @fusion", "needs auto, never"),
-        ("-- @fusion always", "expected auto, never, subroutine or force:GROUP"),
-        ("-- @fusion force", "force needs a group"),
-        ("-- @fusion force:", "force needs a group"),
-        ("-- @fusion auto:x", "expected auto, never"),
-        ("-- @fusion auto never", "unexpected 'never'"),
-    ],
-)
-def test_fusion_problems(text: str, message: str) -> None:
-    assert message in _problem(text).message
+    assert result.items == []
+    [diagnostic] = result.diagnostics
+    assert diagnostic.severity == "warning" and "fusion was removed" in diagnostic.message
 
 
 def test_a_loop_and_guard_end_take_exactly_what_they_should() -> None:

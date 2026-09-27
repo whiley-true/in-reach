@@ -143,7 +143,7 @@ def test_a_projects_blocks_modules_and_readmes(tmp_path: Path) -> None:
     [module] = [m for m in docs.modules if m.name == "hill_score"]
     assert module.readme.text == "Scores the hill.\n" and module.tags == ["koth"] and module.blocks == ["HILL_PASS"]
     assert docs.tags == {"koth": ["module hill_score"]}
-    assert docs.fusion["groups"][0]["fragments"] == ["hill_score.score", "hill_buff.buff"]
+    assert "fusion" not in docs.to_dict() and "## Fusion" not in render_markdown(docs)  # fusion was removed
     [note] = docs.notes
     assert (note.file, note.kind) == ("blocks/win_check.mgl", "code")
     assert "- `if global.number[0] == 5 then` -- ends the game (`blocks/win_check.mgl:1`)" in render_markdown(docs)
@@ -192,7 +192,7 @@ def test_the_overview_is_written_only_when_it_changes(tmp_path: Path) -> None:
 
     assert [p.name for p in first] == ["overview.md", "overview.json"] and again == []
     data = json.loads((docs_dir(folder) / "overview.json").read_text(encoding="utf-8"))
-    assert data["docs_schema"] == 1 and data["mode"] == "single" and data["files"][0]["notes"][0]["text"] == "First to five wins."
+    assert data["docs_schema"] == 2 and data["mode"] == "single" and data["files"][0]["notes"][0]["text"] == "First to five wins."
 
 
 def test_api_docs_can_leave_the_build_alone(tmp_path: Path) -> None:

@@ -488,7 +488,7 @@ def test_link_writes_the_build_and_reports_what_it_did(runner: CliRunner, hill: 
 
     assert result.exit_code == 0, result.output
     assert "blocks   SETUP -> HILL_PASS -> WIN_CHECK" in result.output
-    assert "fused    HILL_PASS <- hill_score.score + hill_buff.buff" in result.output
+    assert "fused" not in result.output  # fusion was removed
     assert "global.number 2/12" in result.output
     assert "wrote    build/Compiled.txt" in result.output
     assert (hill / "build" / "Compiled.txt").is_file()
@@ -515,7 +515,7 @@ def test_link_of_a_broken_project_fails_and_writes_nothing(runner: CliRunner, tm
     assert not (folder / "build").exists()
 
 
-def test_link_lists_a_merge_it_declined_with_the_reason(runner: CliRunner, tmp_path: Path) -> None:
+def test_link_warns_about_a_retired_fusion_line(runner: CliRunner, tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).parent / "app" / "script_project"))
@@ -528,7 +528,7 @@ def test_link_lists_a_merge_it_declined_with_the_reason(runner: CliRunner, tmp_p
 
     result = runner.invoke(main, ["link", "--dry-run", str(folder)])
 
-    assert "kept     hill_score.score | hill_buff.buff: @fusion never" in result.output
+    assert result.exit_code == 0 and "warning: @fusion does nothing: fusion was removed" in result.output
 
 
 def test_help_lists_the_script_project_commands(runner: CliRunner) -> None:

@@ -20,7 +20,7 @@ from pathlib import Path
 import tomlkit
 
 from .model import build_model
-from .project import PROJECT_FILENAME, is_linked, load_project, script_dir
+from .project import BLOCKS_DIRNAME, PROJECT_FILENAME, SOURCE_SUFFIX, is_linked, load_project, script_dir
 
 _BLOCK_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 _FRAGMENT_HEADER = re.compile(r"(@fragment[ \t]+)([A-Za-z_][A-Za-z0-9_]*)(\.)")
@@ -72,7 +72,10 @@ def set_module_enabled(folder: Path, name: str, enabled: bool) -> None:
 
 def move_fragment(folder: Path, fragment_id: str, block: str) -> Path:
     """Moves fragment ``fragment_id`` (``module.name``, as the Scripts view and the link map show it) to ``block`` by
-    rewriting its ``-- @fragment`` line. Returns the file that changed."""
+    rewriting its ``-- @fragment`` line. An ``-- @import`` line in the block it leaves that would now place nothing (it
+    named this fragment, or its module and the module has nothing else there) is removed. A module's one loop (no
+    ``@fragment`` line) goes where its ``@import`` is, so that line moves instead: out of the block it leaves, onto the end
+    of ``block``'s file. Returns the file the fragment now comes from -- its own, or the importing block's."""
     if not _BLOCK_NAME.fullmatch(block):
         raise EditError(f"{block!r} isn't a valid block name (capitals, digits and underscores)")
     if not is_linked(folder):
@@ -83,6 +86,8 @@ def move_fragment(folder: Path, fragment_id: str, block: str) -> Path:
         raise EditError(f"there is no fragment {fragment_id}")
     if fragment.block == block:
         return script_dir(folder) / fragment.file
+    if fragment.implicit:
+        return _move_import(folder, model, fragment, block)
     path = script_dir(folder) / fragment.file
     lines = path.read_bytes().decode("utf-8").splitlines(keepends=True)
     index = fragment.line - 1
@@ -91,4 +96,37 @@ def move_fragment(folder: Path, fragment_id: str, block: str) -> Path:
         raise EditError(f"{fragment.file}:{fragment.line} isn't a -- @fragment line any more; save the file and try again")
     lines[index] = rewritten
     path.write_bytes("".join(lines).encode("utf-8"))
+    _drop_stale_imports(folder, model, fragment)
     return path
+
+
+def _move_import(folder: Path, model, fragment, block: str) -> Path:
+    if block not in model.project.order:
+        raise EditError(f"there is no block {block} in project.toml's order")
+    code = model.blocks.get(block)
+    target = script_dir(folder) / (code.file if code is not None else f"{BLOCKS_DIRNAME}/{block.lower()}{SOURCE_SUFFIX}")
+    if fragment.block:
+        _drop_stale_imports(folder, model, fragment)
+    existing = target.read_bytes().decode("utf-8") if target.is_file() else ""
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    separator = "" if not existing or existing.endswith(("\n", "\r\n")) else newline
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(f"{existing}{separator}-- @import {fragment.module}{newline}".encode("utf-8"))
+    return target
+
+
+def _drop_stale_imports(folder: Path, model, moved) -> None:
+    code = model.blocks.get(moved.block)
+    if code is None:
+        return
+    others = [f for f in model.fragments if f.module == moved.module and f.block == moved.block and f is not moved]
+    stale = {
+        a.span.start_line - 1
+        for a in code.imports
+        if a.module == moved.module and (a.fragment == moved.name or (a.fragment is None and not others))
+    }
+    if not stale:
+        return
+    block_file = script_dir(folder) / code.file
+    lines = block_file.read_bytes().decode("utf-8").splitlines(keepends=True)
+    block_file.write_bytes("".join(line for i, line in enumerate(lines) if i not in stale).encode("utf-8"))

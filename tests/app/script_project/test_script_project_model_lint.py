@@ -49,14 +49,14 @@ _FRAGMENT = "-- @fragment PASS.f\n-- @loop player\nx = 1\n"
 
 
 def test_a_fragment_takes_its_header_and_the_lines_after_it(tmp_path: Path) -> None:
-    _, model = _model(tmp_path, "-- @doc heals\n-- @fragment PASS.tick\n-- @loop player\n-- @gate a == 1\n-- @guard b == 2\n-- @traits layer=injury\n-- @fusion never\nx = 1\ny = 2\n")
+    _, model = _model(tmp_path, "-- @doc heals\n-- @fragment PASS.tick\n-- @loop player\n-- @gate a == 1\n-- @guard b == 2\n-- @traits layer=injury\nx = 1\ny = 2\n")
 
     [fragment] = model.fragments
     assert (fragment.id, fragment.block, fragment.loop, fragment.layer) == ("m.tick", "PASS", "player", "injury")
-    assert fragment.doc == ["heals"] and fragment.fusion.mode == "never"
+    assert fragment.doc == ["heals"] and not fragment.implicit
     assert fragment.gate is not None and len(fragment.guards) == 1
     assert [line for line in fragment.body if line.strip()] == ["x = 1", "y = 2"]
-    assert fragment.body_line == 8
+    assert fragment.body_line == 7
 
 
 def test_a_fragments_body_stops_at_the_next_fragment(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_a_fragment_can_name_a_preamble_to_use(tmp_path: Path) -> None:
     [
         ("-- @fragment PASS.f\nx = 1\n", "fragment-no-loop", 1),
         ("-- @fragment PASS.f\n-- @loop player\n-- @loop team\nx = 1\n", "header-duplicate", 3),
-        ("-- @fragment PASS.f\n-- @loop player\n-- @fusion auto\n-- @fusion never\nx = 1\n", "header-duplicate", 4),
+        ("-- @fragment PASS.f\n-- @loop player\n-- @traits layer=a\n-- @traits layer=b\nx = 1\n", "header-duplicate", 4),
         (_FRAGMENT + "\n" + _FRAGMENT, "fragment-duplicate", 5),
         ("-- @fragment PASS.f\n-- @loop player\n-- @preamble nope\nx = 1\n", "preamble-unknown", 1),
         ("-- @preamble ctx\nx = 1\n\n-- @preamble ctx\ny = 1\n", "preamble-duplicate", 4),
