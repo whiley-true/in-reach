@@ -557,7 +557,9 @@ namespace Megalo {
          //
          CodeBlock* body      = nullptr;
          bool       is_inline = this->is_inline_trigger();
-         if (!is_inline) {
+         if (this->shared_body) {
+            body = this->shared_body;
+         } else if (!is_inline) {
             this->_make_trigger(compiler);
             assert(this->trigger != nullptr);
             body = this->trigger;
@@ -617,9 +619,17 @@ namespace Megalo {
                auto child_is_inline = block->is_inline_trigger();
                if (!child_is_inline) {
                   if (block->_is_if_block() && !block->is_event_trigger()) {
-                     if (is_last)
-                        block->trigger = this->trigger;
-                     else {
+                     if (is_last) {
+                        //
+                        // in-reach: an inline block has no trigger of its own to share -- its body is
+                        // a scope -- so its last if-block used to get a new trigger and a call to it,
+                        // one action more than the same conditions written into the scope itself.
+                        //
+                        if (this->trigger)
+                           block->trigger = this->trigger;
+                        else
+                           block->shared_body = body;
+                     } else {
 
                         if (ReachINI::Compiler::bInlineIfs.current.b) {
                            child_is_inline = block->has_inline_specifier = true;

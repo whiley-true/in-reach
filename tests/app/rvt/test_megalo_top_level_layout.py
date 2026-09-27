@@ -6,7 +6,8 @@ This compiler used to pack every top-level statement into one shared trigger, wh
 into a separate subroutine reached by a "Run Nested Trigger" action: one wasted action per loop. In a
 script already at the engine's 1024-action cap (RCC Onslaught v13 sits at 1013) that was enough to
 push the in-house build over it. Now a loop gets its own trigger with the type set on it, and plain
-statements between loops are packed together, in source order.
+statements between loops are packed together, in source order. A top-level ``if`` or ``do`` block gets
+its own trigger as well, and a function that is only a loop is that loop.
 """
 import pytest
 
@@ -157,6 +158,36 @@ def test_plain_statements_alone_still_share_a_single_trigger(rvt) -> None:
     assert variant.multiplayer.trigger_count == 1
 
 
+# -- a top-level if or do block is a trigger too -------------------------------------------------------------------
+
+
+_IFS = "".join(f"if global.number[{i}] == 1 then\n   global.number[{i}] = 0\nend\n" for i in range(4))
+
+
+def test_each_top_level_if_is_its_own_trigger_costing_no_wrapper(rvt) -> None:
+    """Packed into one shared trigger, every ``if`` but the last needed a "Run Inline Nested Trigger": three
+    wasted actions here, one per top-level block in RCC Onslaught v14 (1016 of 1024 actions)."""
+    variant = _compile_in_house(rvt, _IFS)
+    assert variant.multiplayer.trigger_count == 4
+    assert _actions(variant) == 4
+    assert _shape(variant) == _shape(_compile_native(rvt, _IFS))
+
+
+def test_each_top_level_do_block_is_its_own_trigger_matching_native(rvt) -> None:
+    source = "do\n   global.number[0] = 1\nend\ndo\n   if global.number[1] == 1 then\n      global.number[1] = 0\n   end\nend\n"
+    variant = _compile_in_house(rvt, source)
+    assert _shape(variant) == _shape(_compile_native(rvt, source))
+    assert _actions(variant) == 2
+
+
+def test_top_level_ifs_still_gate_only_their_own_bodies(rvt) -> None:
+    """Separate triggers, so one ``if``'s condition can't reach the plain statement after it."""
+    source = "if global.number[0] == 1 then\n   global.number[1] = 2\nend\nglobal.number[2] = 3\n"
+    text = normalize_script_text(_compile_in_house(rvt, source).decompile_script())
+    assert text.index("global.number[2] = 3") > text.index("end")
+    assert text.count("if ") == 1
+
+
 # -- what is deliberately unchanged --------------------------------------------------------------------------------
 
 
@@ -168,10 +199,34 @@ def test_a_loop_inside_an_if_is_still_a_nested_subroutine(rvt) -> None:
     assert variant.multiplayer.trigger(1).block_type == rvt.TriggerBlockType.for_each_player
 
 
-def test_a_loop_inside_a_function_is_still_a_nested_subroutine(rvt) -> None:
-    source = "function sweep()\n   for each player do\n      current_player.number[0] += 1\n   end\nend\nsweep()\n"
+_SWEEP = "function sweep()\n   for each player do\n      current_player.number[0] += 1\n   end\nend\n"
+
+
+def test_a_function_that_is_only_a_loop_is_the_loop_itself(rvt) -> None:
+    """What native builds and what the decompiler prints as ``function f()for each ... do``: the function's
+    own trigger loops, with no second trigger behind a call. RCC Onslaught v14 has three of them."""
+    source = _SWEEP + "sweep()\nsweep()\n"
     variant = _compile_in_house(rvt, source)
-    assert variant.multiplayer.trigger_count == 3  # the function, its loop, and the top-level call
+    mp = variant.multiplayer
+    assert mp.trigger_count == 2  # the function-loop and the top-level calls
+    assert mp.trigger(0).block_type == rvt.TriggerBlockType.for_each_player
+    assert mp.trigger(0).entry_type == rvt.TriggerEntryType.subroutine
+    assert _actions(variant) == 3  # the loop's one action and the two calls
+    assert _actions(variant) == _actions(_compile_native(rvt, source))
+
+
+def test_a_labelled_loop_function_carries_its_label(rvt) -> None:
+    source = 'function sweep()\n   for each object with label "hill" do\n      current_object.number[0] += 1\n   end\nend\nsweep()\nsweep()\n'
+    shape = _shape(_compile_in_house(rvt, source))
+    assert shape[0][1] == "hill"
+    assert len(shape) == 2
+
+
+def test_a_function_with_more_than_its_loop_still_calls_the_loop(rvt) -> None:
+    source = "function sweep()\n   global.number[0] = 1\n   for each player do\n      current_player.number[0] += 1\n   end\nend\nsweep()\nsweep()\n"
+    variant = _compile_in_house(rvt, source)
+    assert variant.multiplayer.trigger_count == 3  # the function, its loop, and the top-level calls
+    assert variant.multiplayer.trigger(0).block_type == rvt.TriggerBlockType.normal
 
 
 def test_a_loop_bound_to_an_event_is_unchanged(rvt) -> None:

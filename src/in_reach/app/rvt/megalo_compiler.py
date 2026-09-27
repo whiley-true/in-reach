@@ -1325,7 +1325,7 @@ class _Compiler:
         self._compile_top_level(other_statements)
 
         for decl in function_decls:
-            self._compile_statements(decl.body, self._mp.trigger(self._functions[decl.name]), tail=True)
+            self._compile_function_body(decl.body, self._functions[decl.name])
 
         for event_stmt in event_triggers:
             self._compile_event_trigger(event_stmt)
@@ -1383,6 +1383,23 @@ class _Compiler:
         # This statement is the entire trigger's own body -- nothing else is ever added to `trigger`
         # afterward, so it's always in tail position (see _compile_if's own docstring).
         self._compile_statement(stmt.body, self._mp.trigger(index), tail=True)
+
+    def _compile_function_body(self, body, index: int) -> None:
+        """Compiles a function's ``body`` into its own subroutine trigger, ``index``.
+
+        A body that is one ``for each`` and nothing else makes the function's trigger that loop, rather
+        than a trigger whose only action runs the loop's own trigger -- what the native compiler does
+        (``Block::_make_trigger``) and what a decompiled ``function f() for each object do ... end``
+        came from. The wrapper cost an action and a trigger for nothing: three of them in RCC Onslaught
+        v14, whose script sits at 1016 of the engine's 1024 actions.
+        """
+        effective = [s for s in body if s.kind != "declare"]
+        if len(effective) == 1 and effective[0].kind == "for_each":
+            loop = effective[0]
+            self._mark_loop(index, loop)
+            self._compile_statements(loop.body, self._mp.trigger(index), tail=True)
+            return
+        self._compile_statements(body, self._mp.trigger(index), tail=True)
 
     def _compile_statements(self, statements, trigger, *, tail: bool = False) -> None:
         # `tail` is true only for the LAST statement in `statements`, and only when `statements`
@@ -2666,6 +2683,14 @@ class _Compiler:
         block_type_name = "for_each_player_randomly" if stmt.randomly else f"for_each_{stmt.selector}"
         return getattr(self._rvt.TriggerBlockType, block_type_name), None
 
+    def _mark_loop(self, index: int, stmt) -> None:
+        """Makes trigger ``index`` loop the way ``stmt`` (a ``for each``) says to."""
+        block_type, forge_label_index = self._for_each_trigger_fields(stmt)
+        if forge_label_index is not None:
+            self._mp.mark_trigger_forge_label(index, forge_label_index)
+        else:
+            self._mp.mark_trigger_block_type(index, block_type)
+
     def _compile_for_each(self, stmt, trigger) -> None:
         block_type, forge_label_index = self._for_each_trigger_fields(stmt)
         self._compile_nested_body(stmt.body, trigger, block_type=block_type, forge_label_index=forge_label_index)
@@ -2682,7 +2707,13 @@ class _Compiler:
         nothing -- 60 of them in RCC Onslaught v13, whose real script sits at 1013 of the engine's 1024
         actions, which was enough to push the in-house build over the cap.
 
-        Source order is kept: a plain run, then the loop that ended it in a trigger of its own, then the
+        An ``if`` or ``do`` block gets a trigger of its own too, for the same reason: packed into a shared
+        trigger, every one but the last needs a "Run Inline Nested Trigger" wrapper (an ``if``'s conditions
+        would otherwise gate whatever follows it). The native compiler and the variants it built give each
+        its own trigger; actions run out long before triggers do (RCC Onslaught v14: 1016 of 1024 actions,
+        255 of 320 triggers).
+
+        Source order is kept: a plain run, then the block that ended it in a trigger of its own, then the
         next run in another, so triggers tick in the order the script wrote them. A script with no
         top-level statements at all gets no trigger for them (it used to get an empty one).
         """
@@ -2700,14 +2731,13 @@ class _Compiler:
                 continue  # emits no opcode (see _write_declarations), so it must not cost a trigger of its own
             if stmt.kind == "for_each":
                 flush()
-                block_type, forge_label_index = self._for_each_trigger_fields(stmt)
+                self._for_each_trigger_fields(stmt)  # an unsupported loop must fail before a trigger is added
                 trigger = self._add_trigger()
-                index = self._mp.trigger_count - 1
-                if forge_label_index is not None:
-                    self._mp.mark_trigger_forge_label(index, forge_label_index)
-                else:
-                    self._mp.mark_trigger_block_type(index, block_type)
+                self._mark_loop(self._mp.trigger_count - 1, stmt)
                 self._compile_statements(stmt.body, trigger, tail=True)
+            elif stmt.kind in ("if", "do"):
+                flush()
+                self._compile_statement(stmt, self._add_trigger(), tail=True)
             else:
                 pending.append(stmt)
         flush()

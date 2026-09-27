@@ -46,7 +46,7 @@ _TEAM_COUNT = 8
 # the named-reference identifiers all end in the type of what they refer to (``current_player``,
 # ``hud_player``, ``killed_object``, ``neutral_team``).
 _OWNER_SUFFIX_SCOPES = {"_player": "player", "_object": "object", "_team": "team"}
-# ``global.<type>[N]`` is itself a variable that can own others; only these three types can.
+# ``<owner>.<type>[N]`` is itself a variable that can own others; only these three types can.
 _OWNING_TYPES = ("player", "object", "team")
 
 
@@ -226,12 +226,9 @@ def _owning_scope(owner) -> str | None:
     target = owner.target
     if target.kind == "identifier" and target.name == "team":
         return "team"
-    if (
-        target.kind == "member"
-        and target.target.kind == "identifier"
-        and target.target.name == "global"
-        and target.name in _OWNING_TYPES
-    ):
+    # ``global.object[2]``, ``temporaries.object[0]``, ``team[4].object[1]``: an object is an object
+    # whatever holds it, so its own variables are object-scoped.
+    if target.kind == "member" and target.name in _OWNING_TYPES:
         return target.name
     return None
 

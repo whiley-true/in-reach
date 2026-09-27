@@ -61,6 +61,12 @@ rebuild all four sets from the script text -- without calling it; see
 `Variable.which` was already writable, so `current_player.script_stat[N]` needed no change to
 `set_scope_by_format()`; the compiler copies `which` from a `current_player.number[N]` example.
 
+### A fix to the engine's own compiler
+
+| Change | Why |
+|---|---|
+| `Block::shared_body` (`compiler.h`), used by `Block::compile` (`compiler.cpp`) | The last `if` in a block writes its conditions into that block's own code. An inline block has no trigger to share, so its last `if` got a new trigger and a "Run Nested Trigger" to it: an action more per such block. It now writes into the inline scope. RCC Onslaught v14's decompiled script recompiled to 1055 actions (over the 1024 cap) against the 1016 its `.bin` holds; now 1016. `tests/app/rvt/test_native_inline_tail_if.py`. |
+
 ## Building
 
 Needs Windows, CMake, Visual Studio 2022's C++ build tools, and [vcpkg](https://vcpkg.io) with Qt5

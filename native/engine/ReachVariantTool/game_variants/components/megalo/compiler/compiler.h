@@ -53,6 +53,7 @@ namespace Megalo {
          public:
             OpcodeArgValueMegaloScope* inlined_trigger = nullptr;
             Trigger* trigger = nullptr;
+            CodeBlock* shared_body = nullptr; // in-reach: an inline parent's scope that this block, its last if-block, compiles into
             Trigger* tr_wrap = nullptr; // wrapper trigger; use to fix (on event: for ... do end) so that it compiles properly (since the game doesn't allow event types on loop triggers)
             QString  name; // only for functions
             bool     has_inline_specifier = false;

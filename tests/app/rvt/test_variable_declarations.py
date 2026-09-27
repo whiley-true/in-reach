@@ -63,6 +63,11 @@ def test_using_a_variable_implies_it_and_every_slot_below_it() -> None:
         ("global.player[2].timer[1]", {("global", "player"): 3, ("player", "timer"): 2}),
         ("global.object[3].number[1]", {("global", "object"): 4, ("object", "number"): 2}),
         ("global.team[1].object[0]", {("global", "team"): 2, ("team", "object"): 1}),
+        # An object is an object whatever holds it: RCC Onslaught v14's `temporaries.object[0].object[3]` made the
+        # in-house compiler give up ("can't tell which scope") and fall back to native, which put it over 1024 actions.
+        ("temporaries.object[0].object[3]", {("object", "object"): 4}),
+        ("temporaries.player[1].number[2]", {("player", "number"): 3}),
+        ("team[4].object[1].number[0]", {("team", "object"): 2, ("object", "number"): 1}),
     ],
 )
 def test_a_reference_implies_the_slots_it_names(reference: str, expected: dict) -> None:

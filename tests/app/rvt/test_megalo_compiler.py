@@ -128,7 +128,8 @@ def test_a_non_tail_if_body_is_still_built_inline_using_a_wrapper_trigger(jugger
     trigger) was added."""
     rvt, variant = juggernaut
     mp = variant.multiplayer
-    source = "if global.number[0] == 1 then\r\n   game.end_round()\r\nend\r\nglobal.number[1] = 2\r\n"
+    # In a `do` block: a top-level `if` is a trigger of its own, with nothing after it to protect.
+    source = "do\r\n   if global.number[0] == 1 then\r\n      game.end_round()\r\n   end\r\n   global.number[1] = 2\r\nend\r\n"
 
     megalo_compiler.compile_script(rvt, variant, source)
 
@@ -1747,13 +1748,11 @@ def test_run_compile_uses_megalo_compiler_for_a_supported_edited_script(tmp_path
     assert "global.number[0] = 1" in text
     assert "if global.number[0] == 1 then" in text
     assert "game.end_round()" in text
-    # Structural proof our own construction ran, not compile_script()'s own text parsing -- exactly
-    # one trigger (the trailing "if" is in tail position -- the script's own last statement -- so it
-    # compiles directly into the same top-level trigger, no wrapper needed; see megalo_compiler's own
-    # _compile_if docstring). compile_script() clears and rebuilds the trigger list from scratch
-    # (see its own docstring), so this is also proof the base variant's own pre-existing triggers
-    # (juggernaut.bin ships with several) were replaced, not appended onto.
-    assert compiled.multiplayer.trigger_count == 1
+    # Exactly two triggers (the plain statement's, and the top-level "if"'s own -- see megalo_compiler's
+    # _compile_top_level docstring): compile_script() clears and rebuilds the trigger list from scratch
+    # (see its own docstring), so the base variant's own pre-existing triggers (juggernaut.bin ships
+    # with several) were replaced, not appended onto.
+    assert compiled.multiplayer.trigger_count == 2
 
 
 def test_run_compile_falls_back_to_native_for_an_unsupported_edited_script(tmp_path: Path) -> None:

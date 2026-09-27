@@ -156,7 +156,10 @@ def test_a_trailing_if_still_needs_no_wrapper(rvt) -> None:
 # used to reject -- so the text couldn't be compiled again in-house (it fell back to native).
 
 _ROUND_TRIP_SCRIPTS = {
-    "an if with something after it": "if global.number[0] == 1 then\n   global.number[1] = 2\nend\nglobal.number[2] = 3\n",
+    # Inside a block: a top-level `if` is a trigger of its own, needing no inline wrapper.
+    "an if with something after it": (
+        "do\n   if global.number[0] == 1 then\n      global.number[1] = 2\n   end\n   global.number[2] = 3\nend\n"
+    ),
     "an alt chain": (
         "if global.number[0] == 1 then\n   global.number[1] = 1\n"
         "altif global.number[0] == 2 then\n   global.number[1] = 2\n"
